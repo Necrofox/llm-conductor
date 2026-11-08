@@ -1,0 +1,19 @@
+---
+description: Local-only journals live under history/; never publish them under doc/
+alwaysApply: true
+---
+
+# Local journals (`history/`)
+
+`history/` is the **standard path for local-only** maintainer material:
+
+- task backlog and closed-task archive (`backlog.md`, `HISTORY.md`)
+- lint debt slices, audit notes (`review_*.md`), publish checklists
+- ad-hoc decision logs and scratch notes
+
+Rules:
+
+- Never put these files under `doc/` — `doc/` is English, human-facing, and published.
+- Never commit `history/` — root `.gitignore` has `/history/`.
+- After the first public push, active work tracks in GitHub Issues; keep local archives in `history/` if useful.
+- See also `AGENTS.md`.

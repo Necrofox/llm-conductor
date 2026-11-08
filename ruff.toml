@@ -1,0 +1,31 @@
+# ruff configuration for llm-conductor.
+#
+# Context: before this file, `ruff check .` ran with no config. In ruff 0.16
+# the default rule set without a config is NOT the minimal "E4/E7/E9/F" —
+# it is almost every plugin (including BLE001, S110, SIM*, PIE*, etc.),
+# minus a few noisy groups (e.g. E501/W291-293 line length and trailing
+# whitespace, docstring/annotation plugins) — confirmed via
+# `--show-settings`. On that default the 2026-10-08 run found 226 hits
+# (see doc/lint_debt.md), ~170 of them pyupgrade suggestions to rewrite
+# `Optional[X]`/`Dict`/`List` as `X | None`/`dict`/`list` and drop
+# `# -*- coding: utf-8 -*-`. Those are not bugs — they are a mismatch
+# between the project's typing style (the project predates wide PEP
+# 604/585 adoption) and modern ruff defaults.
+#
+# Decision (doc/lint_debt.md §0, recommendation): leave the rest of the
+# broad default set alone (it gives a useful signal — F401/F811/E722 and
+# candidates for a separate BLE001/S110 pass, see doc/backlog.md), and
+# exclude only the pyupgrade rules that conflict with the deliberately
+# kept typing-annotation style.
+
+target-version = "py311"
+
+[lint]
+ignore = [
+    "UP045",  # Optional[X] -> X | None — project deliberately uses Optional
+    "UP006",  # Dict/List -> dict/list — same for generic aliases
+    "UP007",  # Union[X, Y] -> X | Y
+    "UP035",  # typing.Dict/List etc. -> collections.abc — same style
+    "UP037",  # quotes in type annotations — consequence of the same style
+    "UP009",  # redundant "# -*- coding: utf-8 -*-" — kept intentionally in file headers
+]

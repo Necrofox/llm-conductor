@@ -1,0 +1,20 @@
+# ============================================================================
+# LLM-Conductor — runtime-зависимости
+# ============================================================================
+# Установка:  pip install -r requirements.txt
+# Источник правды зависимостей — pyproject.toml (этот файл — зеркало).
+#
+# Минимальная версия Python: 3.11
+#   (tomllib в stdlib — конфигурация в формате TOML;
+#    Protocol/runtime_checkable, frozen dataclasses, PEP 604-совместимый typing)
+# Проверено на: Python 3.13
+#
+# ВСЁ остальное — стандартная библиотека:
+#   argparse, atexit, abc, collections, concurrent.futures, contextlib,
+#   dataclasses, datetime, enum, functools, hashlib, io, json, logging,
+#   os, re, signal, sys, tempfile, threading, time, traceback, typing
+# ----------------------------------------------------------------------------
+
+# HTTP-клиент для Ollama / OpenAI-совместимых API
+# llm_conductor/core/api_client.py, llm_conductor/cli/validators.py
+requests>=2.31.0,<3.0.0

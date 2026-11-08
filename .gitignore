@@ -1,0 +1,135 @@
+# ============================================================================
+# LLM-Conductor — .gitignore
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# СЕКРЕТЫ И ЛОКАЛЬНАЯ КОНФИГУРАЦИЯ
+# ----------------------------------------------------------------------------
+# llm.toml может содержать литеральный ключ ([*.api].key) — НИКОГДА не коммитить.
+# Профиль без ключей (только key_env) можно версионировать как *.example.toml.
+# Шаблоны генерируются через `python llm-conductor.py init`.
+conductor.toml
+llm.toml
+llm.*.toml
+!*.example.toml
+.env
+.env.*
+*.key
+secrets.json
+
+# ----------------------------------------------------------------------------
+# РАБОЧИЕ АРТЕФАКТЫ КОНВЕЙЕРА
+# ----------------------------------------------------------------------------
+# Кэши API-ответов (CacheManager.get_cache_filename), по умолчанию в ./cache/
+# ([cache].dir в conductor.toml; относительный путь — от каталога conductor.toml)
+/cache/
+translation_cache.json
+verification_cache.json
+# Файл блокировки кэша между процессами (FileLock, llm_conductor/core/locking.py)
+.llmc.lock
+# Heartbeat snapshot (HeartbeatWriter → {cache_dir}/progress_state.json)
+progress_state.json
+
+# Результаты прогонов (ResultLayout): общий ./result/ рядом с conductor.toml
+# и result/ рядом с целью при --result2target
+/result/
+result/
+# Ownership marker for shared result/<name>/ (ResultLayout.claim_owner)
+.llmc.target
+
+# Fallback-сохранения из safe_write_file (dict -> .json, str -> .txt)
+*.fallback_*.json
+*.fallback_*.txt
+
+# Временные файлы атомарной записи (FileOperations.write_json_atomic)
+.*.tmp
+*.tmp
+# Ad-hoc scratch configs left in the repo root during local experiments
+*_tmp.toml
+llm_test_tmp.toml
+
+# Логи (ConfigLogger.create), по умолчанию в ./logs/
+# ([logging].dir в conductor.toml; относительный путь — от каталога conductor.toml)
+/logs/
+conductor_*.log
+*.log
+
+# Пользовательский глоссарий — локальные данные проекта
+glossary.json
+!glossary.example.json
+
+# Локальная площадка сквозного тестирования — привязана к конкретному
+# инференсу в локальной сети; контрибуторам не нужна.
+/e2e/
+
+# Local-only journals / task archive / publish checklists (see AGENTS.md
+# and .cursor/rules). Never publish under doc/.
+/history/
+
+# ----------------------------------------------------------------------------
+# PYTHON
+# ----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Сборка / дистрибуция
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# PyInstaller
+# llm-conductor.spec версионируется намеренно (конфигурация сборки)
+*.manifest
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ----------------------------------------------------------------------------
+# ТЕСТЫ / ЛИНТЕРЫ / ТИПЫ
+# ----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+.hypothesis/
+
+# ----------------------------------------------------------------------------
+# IDE / РЕДАКТОРЫ
+# ----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.continue/
+
+# ----------------------------------------------------------------------------
+# ОС
+# ----------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store

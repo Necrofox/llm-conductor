@@ -1,0 +1,16 @@
+{
+  "ui": {
+    "menu_new_game": "New Game",
+    "menu_settings": "Settings",
+    "coins_label": "You have {0} gold coins."
+  },
+  "npc": {
+    "greeting_male": "Welcome, traveler. Need a guide?",
+    "greeting_female": "Welcome, traveler. Need a guide?",
+    "farewell_plural": "Safe travels, friends."
+  },
+  "quest": {
+    "intro": "The guild needs someone who can read old maps.\nBring the relic to the gate before dawn.",
+    "reward_html": "Reward: <b>200</b> coins and a <color=\"#f0c\">rare</color> charm."
+  }
+}
