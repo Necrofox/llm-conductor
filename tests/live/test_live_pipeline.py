@@ -38,7 +38,7 @@ FRESH_RUNS = ["full", "strict", "verify_only"]
 MODEL_BEHAVIOUR = pytest.mark.xfail(
     strict=False,
     reason=(
-        "Task #72: residual model instability (tags/chatter/scripts/length) "
+        "residual model instability (tags/chatter/scripts/length) "
         "after content validation — replies are non-deterministic"
     ),
 )
