@@ -679,7 +679,14 @@ def test_task34_failures_are_reported_in_api_metrics(workspace, model, run_main,
 def test_signal_handlers_and_atexit_are_registered(workspace, model, run_main):
     run_main(*RUN)
 
-    assert set(run_main.signals) == {signal.SIGINT, signal.SIGTERM}
+    registered = set(run_main.signals)
+    assert {signal.SIGINT, signal.SIGTERM}.issubset(registered)
+    # POSIX file timeouts install SIGALRM (SignalTimeoutStrategy); Windows has
+    # no SIGALRM, so CI Ubuntu saw an extra signal that Windows never did.
+    extra = registered - {signal.SIGINT, signal.SIGTERM}
+    if hasattr(signal, "SIGALRM"):
+        extra.discard(signal.SIGALRM)
+    assert extra == set()
     assert len(run_main.atexit_handlers) == 1
 
 
