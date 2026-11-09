@@ -6,19 +6,27 @@ rationale kept locally, see `history/` on a maintainer checkout.
 ## Leaf processing (order)
 
 1. Blank / whitespace-only → return as-is.
-2. Build glossary snippet (on verify: match terms in the **original**).
-3. Linguistic hints from the key path.
-4. Assemble enhanced prompt ([prompts.md](prompts.md)).
-5. Full cache key + component fingerprints.
-6. Persistent cache lookup; in-run dedup (translation only) on the same key.
-7. Mask formatting tags → call translate/verify → unmask.
-8. Transport/parse/truncation/refusal failures → degrade to original; not
-   cached; circuit breaker counts a failure.
-9. If `[validation].enabled`, content validator; reject → degrade, no cache.
-10. Accept → record success; write cache / update dedup.
+2. Format-only (no letters outside markup / placeholders / residual
+   punctuation) → return as-is; no cache lookup or LLM round-trip.
+3. Peel leading/trailing whitespace from the leaf (restore after accept).
+4. Build glossary snippet (on verify: match terms in the **original**).
+5. Linguistic hints from the key path.
+6. Assemble enhanced prompt ([prompts.md](prompts.md)).
+7. Full cache key + component fingerprints (on the **full** leaf, including
+   outer whitespace).
+8. Persistent cache lookup; in-run dedup (translation only) on the same key.
+9. Mask formatting tags on the peeled core → call translate/verify → unmask.
+10. Transport/parse/truncation/refusal failures → degrade to original; not
+    cached; circuit breaker counts a failure.
+11. If `[validation].enabled`, content validator (vs peeled core); reject →
+    degrade, no cache.
+12. Accept → restore outer whitespace; record success; write cache / update
+    dedup.
 
-Invariant: glossary, hints, and cache key use the **unmasked** source; the
-model sees masked text; the cache stores the **unmasked** result.
+Invariant: glossary, hints, and cache key use the **unmasked** full source;
+the model sees the masked peeled core; outer whitespace is owned by the
+client (not trusted to the model or reply `strip()`); the cache stores the
+**unmasked** result with whitespace restored.
 
 ## Cache and dedup
 

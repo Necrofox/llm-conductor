@@ -27,7 +27,12 @@ from llm_conductor.l10n.context import (
     build_glossary_string,
 )
 from llm_conductor.l10n.validation import ReplyValidationResult, validate_model_reply
-from llm_conductor.utils import mask_tags, unmask_tags
+from llm_conductor.utils import (
+    is_format_only_leaf,
+    mask_tags,
+    split_boundary_whitespace,
+    unmask_tags,
+)
 
 if TYPE_CHECKING:
     from llm_conductor.interfaces import (
@@ -403,10 +408,12 @@ class RecursiveProcessor:
         is_verification: bool
     ) -> str:
         """Body of ``_process_leaf``; the outer wrapper always notes the leaf."""
-        if not value.strip():
+        if not value.strip() or is_format_only_leaf(value):
             with self._stats_lock:
                 self.stats['skipped_leaves'] += 1
             return value
+
+        prefix, core, suffix = split_boundary_whitespace(value)
 
         operation_type = OPERATION_VERIFICATION if is_verification else OPERATION_TRANSLATION
 
@@ -530,7 +537,8 @@ class RecursiveProcessor:
         enhanced_config = runtime_config.copy()
         enhanced_config['prompt'] = enhanced_prompt
 
-        masked_text, tag_map = mask_tags(value)
+        # Model sees the peeled core; outer whitespace is restored after accept.
+        masked_text, tag_map = mask_tags(core)
 
         try:
             outcome = process_func(
@@ -557,7 +565,7 @@ class RecursiveProcessor:
 
             validation = (
                 validate_model_reply(
-                    value, outcome.text, unmask_result.text, tag_map,
+                    core, outcome.text, unmask_result.text, tag_map,
                     unmask_result.missing_markers, unmask_result.orphaned_markers,
                     glossary, self.config,
                 )
@@ -584,7 +592,7 @@ class RecursiveProcessor:
                 return value
 
             self.config.circuit_breaker.record_success(operation_type)
-            unmasked_result = unmask_result.text
+            unmasked_result = prefix + unmask_result.text + suffix
 
             if self.cache_enabled and cache_manager is not None and cache_key is not None:
                 metadata = {
@@ -1089,7 +1097,7 @@ def _print_recursive_statistics(
     config.logger.info(
         f"Leaf processing:\n"
         f"  Processed: {stats['processed_leaves']}\n"
-        f"  Skipped (empty): {stats['skipped_leaves']}\n"
+        f"  Skipped (empty/format): {stats['skipped_leaves']}\n"
         f"  Deduplicated: {stats['deduplicated_leaves']}\n"
         f"  Failed: {stats['failed_leaves']}"
     )

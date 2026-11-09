@@ -15,11 +15,48 @@ from llm_conductor.exceptions import ConductorError
 from llm_conductor.exceptions import TimeoutError as ConductorTimeoutError
 from llm_conductor.utils import (
     ThreadPoolTimeoutStrategy,
+    is_format_only_leaf,
     mask_tags,
     run_with_timeout,
+    split_boundary_whitespace,
     unmask_tags,
 )
 from tests.support import StubConfig
+
+# ============================================================================
+# boundary whitespace / format-only
+# ============================================================================
+
+@pytest.mark.parametrize("text,expected", [
+    (" ({0})", (" ", "({0})", "")),
+    ("  Open.\t", ("  ", "Open.", "\t")),
+    ("Hello", ("", "Hello", "")),
+    ("", ("", "", "")),
+    ("   ", ("   ", "", "")),
+    ("\nHi\n", ("\n", "Hi", "\n")),
+])
+def test_split_boundary_whitespace(text, expected):
+    assert split_boundary_whitespace(text) == expected
+    prefix, core, suffix = expected
+    assert prefix + core + suffix == text
+
+
+@pytest.mark.parametrize("text,expected", [
+    (" ({0})", True),
+    ("{0}", True),
+    ("<b></b>", True),
+    ("()", True),
+    ("{0} {1}", True),
+    ("  Open.\t", False),
+    ("Hello {0}", False),
+    ("", False),
+    ("   ", False),
+    ("100%", True),
+    ("42", True),
+])
+def test_is_format_only_leaf(text, expected):
+    assert is_format_only_leaf(text) is expected
+
 
 # ============================================================================
 # mask_tags

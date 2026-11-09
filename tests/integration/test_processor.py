@@ -147,6 +147,49 @@ def test_tags_are_masked_for_model_and_restored_in_result(make_config):
     assert result["w"] == "RU(<b>Warning:</b> {0}\nok)"
 
 
+def test_format_only_leaves_skip_model_and_preserve_value(make_config):
+    model = FakeModel()
+    data = {
+        "status": " ({0})",
+        "placeholder": "{0}",
+        "empty_tags": "<b></b>",
+    }
+
+    result, processor = _run(
+        make_config(dedup__enabled=False, cache__enabled=False), data, model
+    )
+
+    assert result == data
+    assert model.calls == []
+    assert processor.get_stats_summary()['skipped_leaves'] == 3
+
+
+def test_boundary_whitespace_peeled_for_model_and_restored(make_config):
+    model = FakeModel()
+
+    result, _ = _run(
+        make_config(dedup__enabled=False, cache__enabled=False),
+        {"label": "  Open.\t"},
+        model,
+    )
+
+    assert model.values == ["Open."]
+    assert result["label"] == "  RU(Open.)\t"
+
+
+def test_mixed_text_with_placeholder_still_calls_model(make_config):
+    model = FakeModel()
+
+    result, _ = _run(
+        make_config(dedup__enabled=False, cache__enabled=False),
+        {"msg": "Hello {0}"},
+        model,
+    )
+
+    assert model.values == ["Hello [T0]"]
+    assert result["msg"] == "RU(Hello {0})"
+
+
 def test_statistics(make_config):
     _, processor = _run(make_config(dedup__enabled=False, cache__enabled=False),
                         SAMPLE, FakeModel())

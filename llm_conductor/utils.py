@@ -3,6 +3,7 @@ import itertools
 import re
 import signal as signal_module
 import string
+import unicodedata
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -170,6 +171,50 @@ def run_with_timeout(func: Callable[[], T], timeout_seconds: int,
 # ============================================================================
 # MASQUERADE UTILITIES
 # ============================================================================
+
+def split_boundary_whitespace(text: str) -> Tuple[str, str, str]:
+    """
+    Split leading and trailing whitespace from a leaf for peel/restore.
+
+    The processor peels ``core`` before the model call and restores
+    ``prefix`` / ``suffix`` on the accepted reply so api_client's reply
+    ``strip()`` cannot eat significant outer spaces from the leaf.
+
+    Args:
+        text: Full leaf string.
+
+    Returns:
+        ``(prefix, core, suffix)`` where ``prefix + core + suffix == text``.
+    """
+    without_leading = text.lstrip()
+    prefix = text[: len(text) - len(without_leading)]
+    core = without_leading.rstrip()
+    suffix = without_leading[len(core) :]
+    return prefix, core, suffix
+
+
+def is_format_only_leaf(text: str) -> bool:
+    """
+    True when a leaf has no letters outside markup / placeholders / whitespace.
+
+    After stripping outer whitespace and removing ``TAG_MASK_PATTERN``
+    matches, residual characters are inspected: if none has a Unicode
+    general category starting with ``L``, the leaf is format-only and
+    should skip the LLM round-trip. Pure whitespace is false here so the
+    existing blank-skip branch can own that case.
+
+    Args:
+        text: Full leaf string.
+
+    Returns:
+        Whether the leaf is markup / placeholder / punctuation only.
+    """
+    core = text.strip()
+    if not core:
+        return False
+    residual = TAG_MASK_PATTERN.sub('', core)
+    return not any(unicodedata.category(char).startswith('L') for char in residual)
+
 
 def _marker_prefix_candidates() -> Iterator[str]:
     """
