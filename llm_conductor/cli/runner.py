@@ -10,12 +10,8 @@ import os
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
-from llm_conductor.cli.draft_validate import (
-    compare_json_structure,
-    format_draft_structure_errors,
-)
 from llm_conductor.cli.exit_status import ExitStatus
 from llm_conductor.cli.glossary import GlossaryResolver, GlossarySource
 from llm_conductor.cli.heartbeat import HeartbeatWriter
@@ -25,7 +21,6 @@ from llm_conductor.cli.validators import (
     validate_input_data,
     validate_runtime_config,
 )
-from llm_conductor.config import ConfigData, RuntimeConfigFactory
 from llm_conductor.constants import (
     CACHE_LOCK_FILENAME,
     EXIT_API_UNAVAILABLE,
@@ -60,10 +55,22 @@ from llm_conductor.exceptions import (
     FileOperationError,
     LockUnavailableError,
     RunInterrupted,
-    TargetError,
 )
-from llm_conductor.interfaces import ConfigProtocol, HeartbeatProgressProtocol
+from llm_conductor.interfaces import (
+    APIConfigProtocol,
+    ConfigProtocol,
+    HeartbeatProgressProtocol,
+    RuntimeConfigFactoryProtocol,
+)
 from llm_conductor.l10n.processor import process_stage_recursive
+
+
+@dataclass(frozen=True)
+class ProfileEndpoints:
+    """Translation and verification endpoints for one llm.toml profile."""
+
+    translation: APIConfigProtocol
+    verification: APIConfigProtocol
 
 
 @dataclass(frozen=True)
@@ -323,7 +330,8 @@ class TargetRunner:
 
     def __init__(self, config: ConfigProtocol, target: RunTarget,
                  layout: ResultLayout,
-                 profiles: Dict[str, ConfigData],
+                 factories: Mapping[str, RuntimeConfigFactoryProtocol],
+                 endpoints: Mapping[str, ProfileEndpoints],
                  glossaries: Dict[Optional[str], GlossarySource],
                  default_options: Optional[RunOptions] = None):
         """
@@ -331,7 +339,8 @@ class TargetRunner:
             config: Bootstrap configuration (logger, caches, resilience).
             target: The resolved target.
             layout: Where results are written.
-            profiles: ``ConfigData`` keyed by absolute llm.toml path.
+            factories: Runtime config factories keyed by absolute llm.toml path.
+            endpoints: API endpoints keyed by the same llm.toml paths.
             glossaries: Glossary sources keyed by absolute path (``None`` → empty).
             default_options: Fallback stage/strict when an entry has no overrides
                 (lone JSON path); unused when every entry carries its own settings.
@@ -339,12 +348,10 @@ class TargetRunner:
         self._config = config
         self._target = target
         self._layout = layout
-        self._profiles = profiles
+        self._factories = factories
+        self._endpoints = endpoints
         self._glossaries = glossaries
         self._default_options = default_options or RunOptions()
-        self._factories = {
-            path: RuntimeConfigFactory(data) for path, data in profiles.items()
-        }
 
     def run(self) -> int:
         """
@@ -405,7 +412,7 @@ class TargetRunner:
         if entry.llm_config_path is not None:
             return entry.llm_config_path
         # Bootstrap profile: the only key when a lone JSON uses CLI --llm-config.
-        return next(iter(self._profiles))
+        return next(iter(self._factories))
 
     def _glossary_for(self, entry: TargetEntry) -> GlossarySource:
         """Glossary source for one entry."""
@@ -475,9 +482,9 @@ class TargetRunner:
 
         Raises:
             ConfigValidationError: If a runtime configuration is invalid.
-            TargetError: If draft/original preflight fails.
         """
-        self._validate_drafts()
+        # Original/draft JSON preflight runs in cli.main._execute_run before
+        # locks (and before --dry-run) via validate_target_inputs.
         heartbeat.start()
 
         if not self._endpoints_available():
@@ -495,35 +502,6 @@ class TargetRunner:
         self._config.logger.info("Cache saved.")
 
         self._report(outcomes, status)
-
-    def _validate_drafts(self) -> None:
-        """
-        Read every draft target and check structure before any model call.
-
-        Raises:
-            TargetError: Collecting all draft IO / structure faults.
-        """
-        blocks: List[str] = []
-        for entry in self._target.entries:
-            if entry.draft_path is None:
-                continue
-            try:
-                original = safe_read_file(
-                    entry.source_path, "input data", self._config.file_ops,
-                    self._config.logger, critical=True, as_text=False)
-                draft = safe_read_file(
-                    entry.draft_path, "draft data", self._config.file_ops,
-                    self._config.logger, critical=True, as_text=False)
-            except FileOperationError as e:
-                blocks.append(f"  target {entry.index}: {e}")
-                continue
-            issues = compare_json_structure(original, draft)
-            if issues:
-                blocks.append(format_draft_structure_errors(entry.index, issues))
-        if blocks:
-            raise TargetError(
-                f"Draft validation failed for {self._target.path}:\n" + "\n".join(blocks)
-            )
 
     def _runtime_configs_for(self, entry: TargetEntry, options: RunOptions) -> Dict[str, dict]:
         """
@@ -563,12 +541,12 @@ class TargetRunner:
         checked: List[Tuple[str, str]] = []
         for entry in self._target.entries:
             options = self._options_for(entry)
-            data = self._profiles[self._profile_path_for(entry)]
+            ends = self._endpoints[self._profile_path_for(entry)]
             pairs = []
             if options.translates:
-                pairs.append((OPERATION_TRANSLATION, data.translation_api))
+                pairs.append((OPERATION_TRANSLATION, ends.translation))
             if options.verifies:
-                pairs.append((OPERATION_VERIFICATION, data.verification_api))
+                pairs.append((OPERATION_VERIFICATION, ends.verification))
             for operation_type, api in pairs:
                 if (api.url, api.model) in checked:
                     continue

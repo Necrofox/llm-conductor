@@ -102,8 +102,8 @@ def test_help_lists_subcommands_and_run_flags(tmp_path):
     assert top.returncode == run.returncode == 0
     for command in ("run", "init", "check"):
         assert command in top.stdout
-    for flag in ("--target", "--stage", "--strict", "--no-cache", "--llm-config", "--glossary",
-                 "--verb", "--result2target", "--cache2target"):
+    for flag in ("--target", "--stage", "--strict", "--no-cache", "--dry-run", "--llm-config",
+                 "--glossary", "--verb", "--result2target", "--cache2target"):
         assert flag in run.stdout
 
 

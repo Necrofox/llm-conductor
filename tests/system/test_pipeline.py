@@ -407,9 +407,9 @@ original = "result/final/menu/main.json"
 
 @pytest.mark.parametrize("max_failure_ratio, expected", [(0.5, EXIT_SUCCESS), (0.0, EXIT_FAILURE_RATIO_EXCEEDED)])
 def test_failed_file_does_not_stop_the_others(project, model, run_main, max_failure_ratio, expected):
-    """One of two files is broken: 50% of files failed - an error only above the threshold."""
+    """One of two files is JSON null (fails per-file validation after shared preflight)."""
     project.write_configs(resilience__max_failure_ratio=max_failure_ratio)
-    project.write_text("project/menu/main.json", "{broken")
+    project.write_text("project/menu/main.json", "null")
 
     assert run_main("run", "--target", "project/ui.toml") == expected
 
@@ -418,7 +418,8 @@ def test_failed_file_does_not_stop_the_others(project, model, run_main, max_fail
     assert "1 of 2 file(s) failed: " in project.log_text()
 
 
-def test_missing_manifest_entry_is_a_failed_file(project, model, run_main):
+def test_missing_manifest_entry_exits_2_before_any_file(project, model, run_main, capsys):
+    """Shared input preflight rejects missing originals before inference (GH-9)."""
     project.write_text("project/ui.toml", """
 [[targets]]
 original = "menu/main.json"
@@ -427,15 +428,12 @@ original = "menu/main.json"
 original = "menu/missing.json"
 """)
 
-    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
-
-    assert project.exists(project.result("final", "menu/main.json", target="ui.toml"))
-    assert "missing.json" in project.log_text()
-    snap = project.read_json("cache/progress_state.json")
-    failed = {(item["path"].replace("\\", "/"), item["status"]) for item in snap["files"]["failed"]}
-    done = {path.replace("\\", "/") for path in snap["files"]["done"]}
-    assert ("menu/missing.json", "failed") in failed
-    assert "menu/main.json" in done
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 2:" in combined
+    assert "missing.json" in combined.replace("\\", "/")
+    assert model.requests == []
+    assert not project.exists(project.result("final", "menu/main.json", target="ui.toml"))
 
 
 def test_circuit_breaker_stops_the_remaining_files(project, model, run_main, no_sleep):
@@ -655,10 +653,13 @@ def test_missing_target_is_a_usage_error(workspace, model, run_main, capsys):
     assert model.requests == []
 
 
-def test_broken_input_file_fails_the_run(workspace, model, run_main):
+def test_broken_input_file_is_a_usage_error(workspace, model, run_main, capsys):
+    """Invalid JSON fails shared preflight with exit 2 (GH-9); not a per-file ratio exit."""
     (workspace.root / "sample.json").write_text("{broken", encoding="utf-8")
 
-    assert run_main(*RUN) == EXIT_FAILURE_RATIO_EXCEEDED
+    assert run_main(*RUN) == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "invalid JSON" in combined or "Input validation failed" in combined
     assert model.model_calls == []
 
 

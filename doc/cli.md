@@ -6,6 +6,7 @@
 llm-conductor init                          # write conductor.toml + llm.toml (no overwrite)
 llm-conductor check                         # strict validate both TOML files
 llm-conductor run --target PATH [options]   # pipeline
+llm-conductor run --target PATH --dry-run   # preflight plan (no API / result writes)
 llm-conductor --version
 ```
 
@@ -20,6 +21,7 @@ layout as the frozen exe). After `pip install`: `llm-conductor …`.
 | `--stage {all,translate,verify}` | Default `all` (JSON targets only) |
 | `--strict` | Translation in strict mode (JSON targets only) |
 | `--no-cache` | Disable persistent cache for this run |
+| `--dry-run` | Validate inputs and print effective settings; no API, locks, or result writes (session flag) |
 | `--llm-config PATH` | Alternate profile, cwd-relative (JSON targets only) |
 | `--glossary PATH` | Glossary JSON (else `glossary.json` beside target, else empty; JSON targets only) |
 | `--verb LEVEL` | Log level override (session flag; also overrides manifest `verb`) |
@@ -27,6 +29,14 @@ layout as the frozen exe). After `pip install`: `llm-conductor …`.
 | `--cache2target` | Put cache dir next to the target (JSON targets only) |
 
 `check` validates TOML only (not manifests, locks, or live API).
+`run --dry-run` is the target/manifest audit: same settings resolver as a real
+`run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary
+errors. On success it prints an effective-settings table (index, original,
+draft, stage, strict, llm_config, glossary, result paths). Duplicate object
+keys in input JSON emit one WARNING per file (last value wins) and do **not**
+fail the plan. Dry-run does not acquire locks and does not report lock
+contention. There is no `plan` / `inspect` command and no `dry_run` field in
+the manifest (unknown key → exit 2).
 
 ## Run manifest (`.toml`)
 
@@ -62,7 +72,7 @@ Job fields come **only** from the manifest: `stage`, `strict`, `llm_config`,
 `glossary`, `result2target`, `cache2target`, plus per-target `original` /
 `draft` / overrides. Any **passed** job CLI flag with a `.toml` target →
 **exit 2** (not quiet ignore). Session flags still apply: `--verb`,
-`--no-cache`.
+`--no-cache`, `--dry-run`.
 
 Effective settings per target: `target ?? run ?? default`. Paths
 (`original`, `draft`, manifest-relative `llm_config` / `glossary`) are
@@ -143,8 +153,9 @@ Only `main()` calls `sys.exit`. Priority when several problems apply:
 | `7` | Target, cache dir, or result root locked by another run |
 | `130` | Interrupted (SIGINT/SIGTERM); caches saved, results incomplete |
 
-A single corrupt JSON file counts as a failed file (ratio may yield `5`),
-not usage error `2`.
+Unreadable or invalid input JSON (and draft structure faults) fail shared
+preflight with usage error `2` before inference. A file that parses but then
+fails during processing still counts as a failed file (ratio may yield `5`).
 
 **Warm cache + exit 5:** rejected replies are not cached. A rerun that only
 hits residual misses can exceed the failure ratio even if an earlier full

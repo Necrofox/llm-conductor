@@ -19,10 +19,13 @@ import sys
 from typing import Dict, List, Tuple
 
 from llm_conductor import __version__
+from llm_conductor.cli.dry_run import run_dry_run
 from llm_conductor.cli.init import create_config_files
 from llm_conductor.cli.locations import ConfigLocations, resolve_app_dir
+from llm_conductor.cli.preflight import validate_target_inputs
 from llm_conductor.cli.run_manifest import is_legacy_list_path, is_run_manifest_path
 from llm_conductor.cli.runner import (
+    ProfileEndpoints,
     RunOptions,
     TargetRunner,
     load_glossaries_for_target,
@@ -34,6 +37,7 @@ from llm_conductor.config import (
     ConfigFileLoader,
     ConfigLogger,
     RunOverrides,
+    RuntimeConfigFactory,
 )
 from llm_conductor.constants import (
     EXIT_CONFIG_ERROR,
@@ -62,7 +66,7 @@ from llm_conductor.exceptions import (
 )
 
 # Job flags forbidden with a TOML run manifest (precedence B). Session flags
-# (--verb, --no-cache) remain allowed.
+# (--verb, --no-cache, --dry-run) remain allowed.
 _JOB_FLAG_ATTRS: Tuple[Tuple[str, str], ...] = (
     ('stage', '--stage'),
     ('strict', '--strict'),
@@ -111,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         '--no-cache', action='store_true',
         help='Neither read nor write the disk cache (in-memory deduplication still works)',
+    )
+    run.add_argument(
+        '--dry-run', action='store_true',
+        help='Validate the target / manifest and print effective settings without API calls '
+             'or result writes (session flag; allowed with a run manifest)',
     )
     run.add_argument('--llm-config', metavar='PATH', help=llm_config_help)
     run.add_argument(
@@ -190,7 +199,7 @@ def _reject_job_flags_for_manifest(args: argparse.Namespace) -> None:
     raise TargetError(
         f"Job flags {', '.join(passed)} are not allowed with a {MANIFEST_EXTENSION} "
         f"run manifest (set them in the manifest instead; session flags "
-        f"--verb / --no-cache still apply)"
+        f"--verb / --no-cache / --dry-run still apply)"
     )
 
 
@@ -252,8 +261,29 @@ def _execute_run(config: Config, args: argparse.Namespace,
 
     stage = args.stage if args.stage is not None else RUN_STAGE_ALL
     options = RunOptions(stage=stage, strict=args.strict)
+
+    # Shared input preflight before locks / API (and before dry-run table).
+    validate_target_inputs(target, config.file_ops, config.logger)
+
+    if args.dry_run:
+        return run_dry_run(
+            config, target, layout, profiles, glossaries,
+            default_options=options, bootstrap_llm=locations.llm_path,
+        )
+
+    factories = {
+        path: RuntimeConfigFactory(data) for path, data in profiles.items()
+    }
+    endpoints = {
+        path: ProfileEndpoints(
+            translation=data.translation_api,
+            verification=data.verification_api,
+        )
+        for path, data in profiles.items()
+    }
     return TargetRunner(
-        config, target, layout, profiles, glossaries, default_options=options,
+        config, target, layout, factories, endpoints, glossaries,
+        default_options=options,
     ).run()
 
 
@@ -333,7 +363,8 @@ def _command_run(args: argparse.Namespace, app_dir: str) -> int:
     try:
         profiles = _load_profiles(locations.conductor_path, llm_paths, overrides)
         config = Config.create_from_files(
-            locations.conductor_path, locations.llm_path, log_to_file=True,
+            locations.conductor_path, locations.llm_path,
+            log_to_file=not args.dry_run,
             overrides=overrides, log_name=os.path.basename(args.target),
         )
     except (FileOperationError, ConfigValidationError) as e:

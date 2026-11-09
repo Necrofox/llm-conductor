@@ -62,6 +62,7 @@ not cwd. Edit `llm.toml` for your endpoint and prompts; set
 llm-conductor run --target path/to/strings.json
 llm-conductor run --target path/to/strings.json --stage translate --strict
 llm-conductor run --target project/ui.toml
+llm-conductor run --target project/ui.toml --dry-run   # same resolver; no API
 ```
 
 Batch runs use a `.toml` run manifest (`[[targets]]`); `.list` is removed.
