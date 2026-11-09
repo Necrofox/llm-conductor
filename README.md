@@ -26,12 +26,22 @@ working example (often English→another language), not a product limit.
 
 ### 1. Install or grab a binary
 
+From PyPI:
+
 ```bash
 pip install llm-conductor
-# from a clone (dev tools):
-pip install -e ".[dev]"
-# or download llm-conductor.exe from GitHub Releases
 ```
+
+From a clone (editable install + dev tools):
+
+```bash
+git clone https://github.com/Necrofox/llm-conductor.git
+cd llm-conductor
+pip install -e ".[dev]"
+```
+
+Or download `llm-conductor.exe` from
+[GitHub Releases](https://github.com/Necrofox/llm-conductor/releases).
 
 ### 2. Configs next to the program
 
