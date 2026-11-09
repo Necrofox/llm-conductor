@@ -75,6 +75,7 @@ DEFAULT_VALIDATION_ENABLED = True
 DEFAULT_VALIDATION_MAX_LENGTH_RATIO = 3.0
 DEFAULT_VALIDATION_MAX_LENGTH_SLACK = 20
 DEFAULT_VALIDATION_LATIN_POLICY = 'warn'
+DEFAULT_VALIDATION_SAVE_REJECTED_REPLIES = False
 VALID_LATIN_POLICIES = ('warn', 'reject')
 # Writing systems always allowed in replies ([validation].allowed_scripts of
 # llm.toml). Empty = none; the engine does not assume a target alphabet.
@@ -85,6 +86,8 @@ EXAMPLE_EN_RU_ALLOWED_SCRIPTS = ('cyrillic',)
 VALID_ALLOWED_SCRIPTS = (
     'latin', 'cyrillic', 'greek', 'arabic', 'hebrew', 'cjk', 'thai',
 )
+# Under [logging].dir when [validation].save_rejected_replies is on.
+REJECTED_REPLIES_SUBDIR = 'rejected'
 
 # ============================================================================
 # llm.toml DEFAULTS - a fully local profile: Ollama on both stages, no key
@@ -274,6 +277,7 @@ VALIDATION_REASON_UNEXPECTED_LATIN = 'unexpected_latin'
 
 # Max characters of a rejected model reply kept in the WARNING log line, so
 # the actual bad text (not just its rejection reason) survives for diagnosis.
+# Full body persistence is opt-in via [validation].save_rejected_replies.
 REJECTED_REPLY_LOG_LENGTH = 200
 
 # ============================================================================
@@ -393,7 +397,23 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # Cache key schema version. Written into every new cache entry; load()
 # discards entries without it or with another value, so a key format change
 # never needs a manual cleanup of cache_dir.
-CACHE_KEY_VERSION = 1
+# v2: generation-affecting sampling parameters join the key identity.
+CACHE_KEY_VERSION = 2
+
+# Generation-affecting sampling fields in the cache key / fingerprints:
+# (canonical name in the identity JSON, runtime_config key). keep_alive and
+# max_tokens_param are intentionally excluded — they do not change the reply.
+CACHE_SAMPLING_IDENTITY_FIELDS = (
+    ('temperature', 'temp'),
+    ('top_p', 'top_p'),
+    ('top_k', 'top_k'),
+    ('repeat_penalty', 'repeat_penalty'),
+    ('frequency_penalty', 'frequency_penalty'),
+    ('presence_penalty', 'presence_penalty'),
+    ('num_predict', 'num_predict'),
+    ('num_ctx', 'num_ctx'),
+    ('stop', 'stop'),
+)
 
 # Length (in hex characters) of the request component fingerprints stored in
 # a cache entry's metadata. They only explain cache misses

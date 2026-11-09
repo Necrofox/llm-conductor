@@ -524,15 +524,16 @@ class ValidationConfig:
     """
     Model-reply sanity check settings.
 
-    Thresholds and latin_text_policy come from [validation] of conductor.toml;
-    allowed_scripts comes from [validation] of llm.toml (travels with the
-    language pair in the profile).
+    Thresholds, latin_text_policy, and save_rejected_replies come from
+    [validation] of conductor.toml; allowed_scripts comes from [validation]
+    of llm.toml (travels with the language pair in the profile).
     """
 
     enabled: bool
     max_length_ratio: float
     max_length_slack: int
     latin_text_policy: str
+    save_rejected_replies: bool = False
     allowed_scripts: Tuple[str, ...] = ()
 
     def validate(self) -> None:

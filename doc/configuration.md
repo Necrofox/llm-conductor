@@ -42,11 +42,15 @@ literal fallback. An API key is required for `type = "openai"`; ignored for
 validator treats as always allowed for letters (`latin`, `cyrillic`,
 `greek`, `arabic`, `hebrew`, `cjk`, `thai`, …). Empty default means **no**
 script is unconditionally allowed — set this for your target writing
-system. Length limits and `latin_text_policy` stay in `conductor.toml`
-`[validation]` (script behaviour, not language pair).
+system. Length limits, `latin_text_policy`, and `save_rejected_replies` stay
+in `conductor.toml` `[validation]` (script behaviour, not language pair).
 
 Characters present in the source string or glossary values are always
 allowed; so are punctuation / digits / symbols / separators.
+
+`[validation].save_rejected_replies` (default `false`) writes each
+content-validator rejection’s full masked reply under
+`[logging].dir/rejected/<operation>/` for offline diagnosis.
 
 ## Overrides
 

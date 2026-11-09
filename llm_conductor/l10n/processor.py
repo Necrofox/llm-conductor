@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
@@ -13,13 +14,16 @@ from llm_conductor.constants import (
     ORIGINAL_TEXT_BLOCK_NOTE,
     ORIGINAL_TEXT_BLOCK_TEMPLATE,
     ORIGINAL_TEXT_MARKER,
+    REJECTED_REPLIES_SUBDIR,
     REJECTED_REPLY_LOG_LENGTH,
     STATISTICS_LOG_LEVELS,
     TRANSLATION_TEXT_MARKER,
     VERIFICATION_TEXT_MARKER,
 )
+from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
 from llm_conductor.core.shutdown import is_shutdown_requested
+from llm_conductor.exceptions import FileOperationError
 from llm_conductor.l10n.context import (
     KeyPath,
     LinguisticContext,
@@ -27,7 +31,12 @@ from llm_conductor.l10n.context import (
     build_glossary_string,
 )
 from llm_conductor.l10n.validation import ReplyValidationResult, validate_model_reply
-from llm_conductor.utils import mask_tags, unmask_tags
+from llm_conductor.utils import (
+    is_format_only_leaf,
+    mask_tags,
+    split_boundary_whitespace,
+    unmask_tags,
+)
 
 if TYPE_CHECKING:
     from llm_conductor.interfaces import (
@@ -403,10 +412,12 @@ class RecursiveProcessor:
         is_verification: bool
     ) -> str:
         """Body of ``_process_leaf``; the outer wrapper always notes the leaf."""
-        if not value.strip():
+        if not value.strip() or is_format_only_leaf(value):
             with self._stats_lock:
                 self.stats['skipped_leaves'] += 1
             return value
+
+        prefix, core, suffix = split_boundary_whitespace(value)
 
         operation_type = OPERATION_VERIFICATION if is_verification else OPERATION_TRANSLATION
 
@@ -447,11 +458,12 @@ class RecursiveProcessor:
         )
 
         # The key hashes the whole request, so identical text with different
-        # hints (`_male` / `_female`) never shares a cache or dedup entry.
+        # hints (`_male` / `_female`) or sampling never shares a cache/dedup entry.
         cache_manager = self.cache_manager
         cache_key: Optional[str] = None
         fingerprints: dict = {}
         if cache_manager is not None:
+            sampling_identity = build_sampling_identity(runtime_config)
             fingerprints = cache_manager.compute_fingerprints(
                 operation_type=operation_type,
                 model=runtime_config['model'],
@@ -460,6 +472,7 @@ class RecursiveProcessor:
                 hints_text=hints_text,
                 glossary_string=glossary_string,
                 mode=mode,
+                sampling_identity=sampling_identity,
             )
             cache_key = cache_manager.create_cache_key(
                 operation_type=operation_type,
@@ -468,6 +481,7 @@ class RecursiveProcessor:
                 enhanced_prompt=enhanced_prompt,
                 mode=mode,
                 value=value,
+                sampling_identity=sampling_identity,
             )
 
         if self.cache_enabled and cache_manager is not None and cache_key is not None:
@@ -530,7 +544,8 @@ class RecursiveProcessor:
         enhanced_config = runtime_config.copy()
         enhanced_config['prompt'] = enhanced_prompt
 
-        masked_text, tag_map = mask_tags(value)
+        # Model sees the peeled core; outer whitespace is restored after accept.
+        masked_text, tag_map = mask_tags(core)
 
         try:
             outcome = process_func(
@@ -557,7 +572,7 @@ class RecursiveProcessor:
 
             validation = (
                 validate_model_reply(
-                    value, outcome.text, unmask_result.text, tag_map,
+                    core, outcome.text, unmask_result.text, tag_map,
                     unmask_result.missing_markers, unmask_result.orphaned_markers,
                     glossary, self.config,
                 )
@@ -569,10 +584,15 @@ class RecursiveProcessor:
                 self.config.logger.warning(f"{path}: {validation.warning}")
 
             if not validation.accepted:
+                reason_text = validation.reason or ''
+                if validation.detail:
+                    reason_text = f"{reason_text}[{validation.detail}]"
                 self.config.logger.warning(
-                    f"Rejected model reply for {path}: {validation.reason}. "
+                    f"Rejected model reply for {path}: {reason_text}. "
                     f"Reply: {self._preview_rejected_reply(outcome.text)}"
                 )
+                if self.config.validation.save_rejected_replies:
+                    self._save_rejected_reply(path, operation_type, outcome.text)
                 self.config.metrics.record_rejection(operation_type)
 
                 if self.config.circuit_breaker.record_failure(operation_type):
@@ -584,7 +604,7 @@ class RecursiveProcessor:
                 return value
 
             self.config.circuit_breaker.record_success(operation_type)
-            unmasked_result = unmask_result.text
+            unmasked_result = prefix + unmask_result.text + suffix
 
             if self.cache_enabled and cache_manager is not None and cache_key is not None:
                 metadata = {
@@ -947,6 +967,63 @@ class RecursiveProcessor:
         preview = repr(masked_reply[:REJECTED_REPLY_LOG_LENGTH])
         return preview + '...' if truncated else preview
 
+    @staticmethod
+    def _sanitize_rejected_reply_filename(path: str) -> str:
+        """
+        Turn a leaf path into a single path-segment filename.
+
+        Args:
+            path: Human-readable KeyPath string (e.g. ``ui.title``).
+
+        Returns:
+            A ``.txt`` filename safe for Windows and POSIX.
+        """
+        sanitized = path
+        for char in ('/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']'):
+            sanitized = sanitized.replace(char, '_')
+        return f"{sanitized}.txt"
+
+    def _save_rejected_reply(self, path: KeyPath, operation_type: str, masked_reply: str) -> None:
+        """
+        Persist the full masked reply under ``[logging].dir/rejected/``.
+
+        Opt-in via ``[validation].save_rejected_replies``. Failures are logged
+        and swallowed so rejection handling never raises from diagnostics I/O.
+
+        Args:
+            path: Leaf KeyPath used for the filename.
+            operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
+            masked_reply: outcome.text of the rejected CallOutcome.
+        """
+        file_ops = self.config.file_ops
+        log_dir = self.config.log_dir
+        if file_ops is None or not log_dir:
+            self.config.logger.warning(
+                f"Cannot save rejected reply for {path}: log_dir or file_ops unavailable"
+            )
+            return
+
+        target = os.path.join(
+            log_dir,
+            REJECTED_REPLIES_SUBDIR,
+            operation_type,
+            self._sanitize_rejected_reply_filename(str(path)),
+        )
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            safe_write_file(
+                target, masked_reply, f"rejected reply for {path}",
+                file_ops, self.config.logger,
+            )
+        except FileOperationError as exc:
+            self.config.logger.warning(
+                f"Failed to save rejected reply for {path}: {exc}"
+            )
+        except OSError as exc:
+            self.config.logger.warning(
+                f"Failed to save rejected reply for {path}: {exc}"
+            )
+
     def get_stats_summary(self) -> dict:
         """
         Return a thread-safe shallow copy of processing stats.
@@ -1089,7 +1166,7 @@ def _print_recursive_statistics(
     config.logger.info(
         f"Leaf processing:\n"
         f"  Processed: {stats['processed_leaves']}\n"
-        f"  Skipped (empty): {stats['skipped_leaves']}\n"
+        f"  Skipped (empty/format): {stats['skipped_leaves']}\n"
         f"  Deduplicated: {stats['deduplicated_leaves']}\n"
         f"  Failed: {stats['failed_leaves']}"
     )

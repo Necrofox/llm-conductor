@@ -47,12 +47,15 @@ class ReplyValidationResult(NamedTuple):
 
     reason is set only when accepted is False. warning is set only on a
     non-rejecting finding (currently: Latin text under the 'warn' policy)
-    for the caller to log without discarding the reply.
+    for the caller to log without discarding the reply. detail carries a
+    structured supplement for some rejection reasons (currently:
+    tag_marker_mismatch missing/extra/duplicated lists).
     """
 
     accepted: bool
     reason: Optional[str]
     warning: Optional[str]
+    detail: Optional[str] = None
 
 
 def _name_matches_prefix(name: str, prefix: str) -> bool:
@@ -114,6 +117,38 @@ def _classify_char(
     return 'foreign'
 
 
+def _format_marker_group(name: str, markers: List[str]) -> str:
+    """Format one marker group for a tag_marker_mismatch detail string."""
+    return f"{name}={', '.join(markers)}"
+
+
+def _marker_mismatch_detail(
+    masked_reply: str,
+    tag_map: Dict[str, str],
+    missing_markers: List[str],
+    orphaned_markers: List[str],
+) -> Optional[str]:
+    """
+    Build a compact missing/duplicated/extra detail, or None if all match.
+
+    Duplicated means an expected tag_map marker appears more than once in
+    the masked reply (mask_tags() emits each marker once). Extra is the
+    orphaned [Tn]-shaped text left after unmasking.
+    """
+    missing = list(missing_markers)
+    duplicated = [marker for marker in tag_map if masked_reply.count(marker) > 1]
+    extra = list(orphaned_markers)
+
+    parts: List[str] = []
+    if missing:
+        parts.append(_format_marker_group('missing', missing))
+    if duplicated:
+        parts.append(_format_marker_group('duplicated', duplicated))
+    if extra:
+        parts.append(_format_marker_group('extra', extra))
+    return '; '.join(parts) if parts else None
+
+
 def validate_model_reply(
     original_value: str,
     masked_reply: str,
@@ -152,8 +187,13 @@ def validate_model_reply(
     if '\n' in masked_reply:
         return ReplyValidationResult(False, VALIDATION_REASON_NEWLINE_IN_REPLY, None)
 
-    if missing_markers or orphaned_markers:
-        return ReplyValidationResult(False, VALIDATION_REASON_TAG_MARKER_MISMATCH, None)
+    marker_detail = _marker_mismatch_detail(
+        masked_reply, tag_map, missing_markers, orphaned_markers,
+    )
+    if marker_detail is not None:
+        return ReplyValidationResult(
+            False, VALIDATION_REASON_TAG_MARKER_MISMATCH, None, marker_detail,
+        )
 
     if Counter(TAG_MASK_PATTERN.findall(unmasked_reply)) != Counter(tag_map.values()):
         return ReplyValidationResult(False, VALIDATION_REASON_FABRICATED_TAG, None)

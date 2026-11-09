@@ -23,6 +23,7 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
+from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.l10n.context import KeyPath, LinguisticContext
 from llm_conductor.l10n.processor import RecursiveProcessor, process_stage_recursive
 
@@ -145,6 +146,49 @@ def test_tags_are_masked_for_model_and_restored_in_result(make_config):
 
     assert model.values == ["[T0]Warning:[T1] [T2][T3]ok"]
     assert result["w"] == "RU(<b>Warning:</b> {0}\nok)"
+
+
+def test_format_only_leaves_skip_model_and_preserve_value(make_config):
+    model = FakeModel()
+    data = {
+        "status": " ({0})",
+        "placeholder": "{0}",
+        "empty_tags": "<b></b>",
+    }
+
+    result, processor = _run(
+        make_config(dedup__enabled=False, cache__enabled=False), data, model
+    )
+
+    assert result == data
+    assert model.calls == []
+    assert processor.get_stats_summary()['skipped_leaves'] == 3
+
+
+def test_boundary_whitespace_peeled_for_model_and_restored(make_config):
+    model = FakeModel()
+
+    result, _ = _run(
+        make_config(dedup__enabled=False, cache__enabled=False),
+        {"label": "  Open.\t"},
+        model,
+    )
+
+    assert model.values == ["Open."]
+    assert result["label"] == "  RU(Open.)\t"
+
+
+def test_mixed_text_with_placeholder_still_calls_model(make_config):
+    model = FakeModel()
+
+    result, _ = _run(
+        make_config(dedup__enabled=False, cache__enabled=False),
+        {"msg": "Hello {0}"},
+        model,
+    )
+
+    assert model.values == ["Hello [T0]"]
+    assert result["msg"] == "RU(Hello {0})"
 
 
 def test_statistics(make_config):
@@ -398,7 +442,9 @@ def _key_for_leaf(config, value, path=("t",), mode=MODE_STYLE):
     runtime = config.get_translation_config_for_mode(mode)
     prompt = processor._build_enhanced_prompt(runtime['prompt'], [], "", OPERATION_TRANSLATION)
     return config.cache_manager.create_cache_key(
-        OPERATION_TRANSLATION, runtime['model'], runtime['system_prompt'], prompt, mode, value)
+        OPERATION_TRANSLATION, runtime['model'], runtime['system_prompt'], prompt, mode, value,
+        build_sampling_identity(runtime),
+    )
 
 
 def test_legacy_verification_tuple_in_cache_is_unwrapped(make_config):
@@ -486,6 +532,39 @@ def test_rejected_reply_log_is_truncated_for_long_replies(make_config):
     assert repr(bad_reply) not in logged
     assert repr(bad_reply[:REJECTED_REPLY_LOG_LENGTH]) in logged
     assert logged.rstrip().endswith('...')
+
+
+def test_tag_marker_mismatch_log_includes_missing_detail(make_config):
+    config = make_config()
+    # Source masks {0} -> [T0]; reply drops the marker.
+    bad_reply = "Нажмите для прыжка"
+
+    result, _ = _run(config, {"t": "Press {0} to jump"}, BadReplyModel(bad_reply))
+
+    assert result == {"t": "Press {0} to jump"}
+    logged = next(m for m in config.logger.messages('WARNING') if "Rejected model reply" in m)
+    assert "tag_marker_mismatch[missing=[T0]]" in logged
+
+
+def test_save_rejected_replies_writes_full_body_under_log_dir(make_config, tmp_path):
+    config = make_config(validation__save_rejected_replies=True)
+    bad_reply = "full rejected body that must be persisted\n"
+
+    _run(config, {"t": "Hello"}, BadReplyModel(bad_reply))
+
+    saved = tmp_path / "logs" / "rejected" / OPERATION_TRANSLATION / "t.txt"
+    assert saved.is_file()
+    assert saved.read_text(encoding='utf-8') == bad_reply
+
+
+def test_save_rejected_replies_off_writes_no_file(make_config, tmp_path):
+    config = make_config(validation__save_rejected_replies=False)
+    bad_reply = "RU(Hello)\nunexpected chatter"
+
+    _run(config, {"t": "Hello"}, BadReplyModel(bad_reply))
+
+    rejected_root = tmp_path / "logs" / "rejected"
+    assert not rejected_root.exists()
 
 
 # ============================================================================

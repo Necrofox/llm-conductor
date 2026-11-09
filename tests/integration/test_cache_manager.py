@@ -12,11 +12,27 @@ import pytest
 
 from llm_conductor.constants import (
     CACHE_KEY_VERSION,
+    CACHE_SAMPLING_IDENTITY_FIELDS,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
 )
+from llm_conductor.core.cache import build_sampling_identity
 
 T = OPERATION_TRANSLATION
+
+SAMPLE_RUNTIME = {
+    'temp': 0.7,
+    'top_p': 0.9,
+    'top_k': 40,
+    'repeat_penalty': 1.1,
+    'frequency_penalty': 0.0,
+    'presence_penalty': 0.0,
+    'num_predict': 256,
+    'num_ctx': 4096,
+    'stop': ['\n\n'],
+}
+
+SAMPLE_IDENTITY = build_sampling_identity(SAMPLE_RUNTIME)
 
 KEY_PARTS = {
     'operation_type': T,
@@ -25,6 +41,7 @@ KEY_PARTS = {
     'enhanced_prompt': "Translate: ",
     'mode': "style",
     'value': "Hello",
+    'sampling_identity': SAMPLE_IDENTITY,
 }
 
 FINGERPRINT_PARTS = {
@@ -35,6 +52,7 @@ FINGERPRINT_PARTS = {
     'hints_text': "",
     'glossary_string': "",
     'mode': "style",
+    'sampling_identity': SAMPLE_IDENTITY,
 }
 
 
@@ -81,17 +99,46 @@ def test_cache_key_is_deterministic_md5(manager):
 
 @pytest.mark.parametrize("component", sorted(KEY_PARTS))
 def test_every_request_component_changes_the_key(manager, component):
-    """Regression: model/prompts/hints used not to be part of the key."""
+    """Regression: model/prompts/hints/sampling used not to be part of the key."""
     changed = {**KEY_PARTS, component: KEY_PARTS[component] + "_changed"}
 
     assert manager.create_cache_key(**changed) != manager.create_cache_key(**KEY_PARTS)
 
 
+@pytest.mark.parametrize("field_name,runtime_key", CACHE_SAMPLING_IDENTITY_FIELDS)
+def test_each_sampling_field_changes_the_key(manager, field_name, runtime_key):
+    """Issue #12: changing any generation-affecting param must miss the cache."""
+    altered = dict(SAMPLE_RUNTIME)
+    if field_name == 'stop':
+        altered[runtime_key] = list(altered[runtime_key]) + ['</s>']
+    elif isinstance(altered[runtime_key], float):
+        altered[runtime_key] = altered[runtime_key] + 0.05
+    else:
+        altered[runtime_key] = altered[runtime_key] + 1
+
+    changed_identity = build_sampling_identity(altered)
+    assert changed_identity != SAMPLE_IDENTITY
+    assert manager.create_cache_key(
+        **{**KEY_PARTS, 'sampling_identity': changed_identity}
+    ) != manager.create_cache_key(**KEY_PARTS)
+
+
+def test_restoring_sampling_parameters_restores_the_key(manager):
+    """Issue #12 acceptance: same sampling again → same key (cache hit path)."""
+    again = build_sampling_identity(dict(SAMPLE_RUNTIME))
+    assert again == SAMPLE_IDENTITY
+    assert manager.create_cache_key(
+        **{**KEY_PARTS, 'sampling_identity': again}
+    ) == manager.create_cache_key(**KEY_PARTS)
+
+
 def test_fingerprints_cover_all_components_with_fixed_length(manager):
     fingerprints = manager.compute_fingerprints(**FINGERPRINT_PARTS)
 
-    assert set(fingerprints) == {'cache_key_version', 'operation_type', 'model', 'system_prompt',
-                                 'prompt_template', 'hints', 'glossary', 'mode'}
+    assert set(fingerprints) == {
+        'cache_key_version', 'operation_type', 'model', 'system_prompt',
+        'prompt_template', 'hints', 'glossary', 'mode', 'sampling',
+    }
     assert {len(fp) for fp in fingerprints.values()} == {12}
 
 
@@ -295,6 +342,7 @@ def test_diagnose_names_changed_components(manager):
 
     assert _miss_reason(manager, model="other") == 'model'
     assert _miss_reason(manager, system_prompt="SYS2", hints_text="Use MASCULINE") == 'hints, system_prompt'
+    assert _miss_reason(manager, sampling_identity=SAMPLE_IDENTITY + "_x") == 'sampling'
 
 
 def test_diagnose_prompt_assembly_when_all_fingerprints_match(manager):
