@@ -24,6 +24,11 @@ from that schema.
 - CLI paths (`--target`, `--glossary`, `--llm-config`) are from cwd.
   Outputs derived from the target (`glossary.json` beside the target,
   `--result2target`, `--cache2target`) are from the target’s directory.
+- **Run manifest** (`.toml` with `[[targets]]`): `original` / `draft` /
+  manifest-relative `llm_config` / `glossary` resolve from the **manifest
+  directory** and must stay inside it. Job fields are set in the manifest
+  only (precedence B); session flags `--verb` / `--no-cache` still apply.
+  See [cli.md](cli.md#run-manifest-toml).
 
 Loading is strict: unknown sections/keys and wrong types fail with a full
 problem list (and a “did you mean …?” hint). Missing keys take schema
@@ -54,10 +59,16 @@ content-validator rejection’s full masked reply under
 
 ## Overrides
 
-Priority: **CLI > files > defaults**. There are no CLI flags to override
-model URL or name — use another `--llm-config`. Run flags that affect
-`conductor.toml` (`--verb`, `--no-cache`, `--cache2target`) apply via
-immutable `RunOverrides` on a copy of the loaded data.
+**JSON `--target`:** priority **CLI > files > defaults**. There are no CLI
+flags to override model URL or name — use another `--llm-config`. Run flags
+that affect `conductor.toml` (`--verb`, `--no-cache`, `--cache2target`) apply
+via immutable `RunOverrides` on a copy of the loaded data.
+
+**Run manifest `.toml`:** job fields (`stage`, `strict`, `llm_config`,
+`glossary`, `result2target`, `cache2target`) come only from the manifest;
+passed job CLI flags → exit 2. Session flags `--verb` / `--no-cache` still
+override. Per-target fields win over run-level defaults
+(`target ?? run ?? default`).
 
 ## Related
 

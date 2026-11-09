@@ -29,7 +29,7 @@ def _target(tmp_path: Path, names: list[str]) -> RunTarget:
     entries = tuple(
         TargetEntry(str(tmp_path / name), name) for name in names
     )
-    return RunTarget(str(tmp_path / "ui.list"), entries)
+    return RunTarget(str(tmp_path / "ui.toml"), entries)
 
 
 def _writer(tmp_path: Path, *, interval: int = 100, names: list[str] | None = None,

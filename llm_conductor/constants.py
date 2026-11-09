@@ -337,14 +337,23 @@ RUN_STAGE_TRANSLATE = 'translate'
 RUN_STAGE_VERIFY = 'verify'
 VALID_RUN_STAGES = (RUN_STAGE_ALL, RUN_STAGE_TRANSLATE, RUN_STAGE_VERIFY)
 
-# A target with this extension is a manifest: one input path per line,
-# relative to the manifest directory; '#' starts a comment line.
-MANIFEST_EXTENSION = '.list'
-MANIFEST_COMMENT_PREFIX = '#'
+# A target with this extension is a TOML run manifest ([[targets]]).
+MANIFEST_EXTENSION = '.toml'
+# Former line-oriented batch format; rejected with a migration hint.
+LEGACY_LIST_EXTENSION = '.list'
 UTF8_BOM = '\ufeff'
 # A drive prefix ("D:\x.json", "D:x.json") is rejected on every OS, so one
 # manifest behaves the same on Windows and POSIX.
 MANIFEST_DRIVE_PATTERN = re.compile(r'^[A-Za-z]:')
+
+# Allowed top-level keys of a run manifest (unknown → exit 2).
+RUN_MANIFEST_RUN_KEYS = frozenset({
+    'verb', 'result2target', 'cache2target', 'stage', 'strict',
+    'llm_config', 'glossary', 'targets',
+})
+RUN_MANIFEST_TARGET_KEYS = frozenset({
+    'original', 'draft', 'stage', 'strict', 'llm_config', 'glossary',
+})
 
 # Results go to <root>/result/{translated,redacted,final}/<relative path>.
 RESULT_DIR_NAME = 'result'

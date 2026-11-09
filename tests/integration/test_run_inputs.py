@@ -34,8 +34,10 @@ def logger():
 
 
 @pytest.fixture
-def resolver(logger):
-    return TargetResolver(FileOperations(logger=logger), logger)
+def resolver(logger, tmp_path):
+    return TargetResolver(
+        FileOperations(logger=logger), logger, conductor_dir=str(tmp_path),
+    )
 
 
 @pytest.fixture
@@ -63,18 +65,24 @@ def test_single_file_is_its_own_only_entry(resolver, tmp_path):
 
 
 def test_manifest_is_read_and_parsed(resolver, tmp_path, monkeypatch):
-    _write(tmp_path / "project" / "ui.list", "menu/main.json\n")
+    _write(tmp_path / "project" / "ui.toml", """
+[[targets]]
+original = "menu/main.json"
+""")
     monkeypatch.chdir(tmp_path)
 
-    target = resolver.resolve(os.path.join("project", "ui.list"))
+    target = resolver.resolve(os.path.join("project", "ui.toml"))
 
-    assert target.path == str(tmp_path / "project" / "ui.list")
-    assert [e.source_path for e in target.entries] == [str(tmp_path / "project" / "menu" / "main.json")]
+    assert target.path == str(tmp_path / "project" / "ui.toml")
+    assert [e.source_path for e in target.entries] == [
+        str(tmp_path / "project" / "menu" / "main.json")
+    ]
+    assert target.is_manifest
 
 
 def test_missing_target_is_a_target_error(resolver, tmp_path):
     with pytest.raises(TargetError, match="not found"):
-        resolver.resolve(str(tmp_path / "absent.list"))
+        resolver.resolve(str(tmp_path / "absent.toml"))
 
 
 def test_directory_target_is_a_target_error(resolver, tmp_path):
@@ -84,9 +92,18 @@ def test_directory_target_is_a_target_error(resolver, tmp_path):
 
 def test_manifest_entries_are_not_checked_for_existence(resolver, tmp_path):
     """A missing listed file fails alone during the run, not the whole manifest."""
-    path = _write(tmp_path / "ui.list", "absent.json\n")
+    path = _write(tmp_path / "ui.toml", """
+[[targets]]
+original = "absent.json"
+""")
 
     assert len(resolver.resolve(str(path)).entries) == 1
+
+
+def test_legacy_list_is_rejected(resolver, tmp_path):
+    path = _write(tmp_path / "ui.list", "menu/main.json\n")
+    with pytest.raises(TargetError, match=r"\.list manifests are no longer supported"):
+        resolver.resolve(str(path))
 
 
 # ============================================================================

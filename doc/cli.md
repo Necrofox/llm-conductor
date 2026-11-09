@@ -16,36 +16,97 @@ layout as the frozen exe). After `pip install`: `llm-conductor …`.
 
 | Flag | Meaning |
 |---|---|
-| `--target PATH` | Required. `.json` file or `.list` manifest |
-| `--stage {all,translate,verify}` | Default `all` |
-| `--strict` | Translation in strict mode |
+| `--target PATH` | Required. `.json` file or `.toml` run manifest |
+| `--stage {all,translate,verify}` | Default `all` (JSON targets only) |
+| `--strict` | Translation in strict mode (JSON targets only) |
 | `--no-cache` | Disable persistent cache for this run |
-| `--llm-config PATH` | Alternate profile (cwd-relative) |
-| `--glossary PATH` | Glossary JSON (else `glossary.json` beside target, else empty) |
-| `--verb LEVEL` | Log level override |
-| `--result2target` | Write `result/` next to the target |
-| `--cache2target` | Put cache dir next to the target |
+| `--llm-config PATH` | Alternate profile, cwd-relative (JSON targets only) |
+| `--glossary PATH` | Glossary JSON (else `glossary.json` beside target, else empty; JSON targets only) |
+| `--verb LEVEL` | Log level override (session flag; also overrides manifest `verb`) |
+| `--result2target` | Write `result/` next to the target (JSON targets only) |
+| `--cache2target` | Put cache dir next to the target (JSON targets only) |
 
 `check` validates TOML only (not manifests, locks, or live API).
 
-## Manifest (`.list`)
+## Run manifest (`.toml`)
 
-One path per line, relative to the manifest directory, must stay inside it.
-Blank lines and `#` comments skipped. Absolute paths, `..`, drive prefixes,
-the directory itself, and duplicates after normalization are errors **before**
-processing (exit 2). A missing file listed in the manifest fails that file
-only; others continue.
+Batch input is a **run manifest**: a `.toml` file with a non-empty
+`[[targets]]` array. Detection: `--target` ending in `.toml` must parse as
+that shape; any other TOML (e.g. `conductor.toml` / `llm.toml`) → exit 2
+(«not a run manifest»).
+
+```toml
+verb = "INFO"
+result2target = true
+cache2target = false
+stage = "all"          # all | translate | verify
+strict = false
+llm_config = "llm.toml"
+glossary = "glossary.json"
+
+[[targets]]
+original = "dialogs/ui.json"
+# draft = "drafts/ui.ru.json"   # implies verify; do not set stage here
+# llm_config = "profiles/editor-a.toml"
+# glossary = "glossaries/matrix.json"
+# strict = true
+
+[[targets]]
+original = "mechanics.json"
+llm_config = "profiles/mechanics.toml"
+```
+
+### Precedence B (manifest target)
+
+Job fields come **only** from the manifest: `stage`, `strict`, `llm_config`,
+`glossary`, `result2target`, `cache2target`, plus per-target `original` /
+`draft` / overrides. Any **passed** job CLI flag with a `.toml` target →
+**exit 2** (not quiet ignore). Session flags still apply: `--verb`,
+`--no-cache`.
+
+Effective settings per target: `target ?? run ?? default`. Paths
+(`original`, `draft`, manifest-relative `llm_config` / `glossary`) are
+relative to the manifest directory, must not use `..` to escape it, and are
+validated for the whole manifest before inference (1-based `[[targets]]`
+index in errors). Duplicate `original` after normpath/normcase and
+result-path collisions are rejected.
+
+### `draft` (frozen verify input)
+
+Optional `[[targets]].draft` is the only way to feed a frozen translation
+into verification. It implies stage `verify` (editor model only). Setting
+`stage` on the **same** target → exit 2. Run-level `stage` is unused for that
+target (not a conflict). Original and draft are matched by full JSON key
+path before any API call; neither file is mutated. There is **no** CLI
+`--draft` / `--original`. A lone `--target file.json` cannot take a draft —
+use a one-entry `.toml`.
+
+### Migration from `.list`
+
+`.list` manifests are **removed**. Passing `--target something.list` exits 2
+with an explicit migration message. Each former non-comment line becomes:
+
+```toml
+[[targets]]
+original = "path/from/line.json"
+```
 
 ## Glossary resolution
 
-`--glossary PATH` (missing → exit 2) → else `glossary.json` beside the
-target → else no terms. Not read from cwd. A found but invalid file is an
-error. Source is always logged at INFO.
+**JSON target:** `--glossary PATH` (missing → exit 2) → else `glossary.json`
+beside the target → else no terms.
+
+**Run manifest:** `glossary` on the target or run (manifest-relative); if
+unset everywhere → `glossary.json` beside the manifest, else empty. CLI
+`--glossary` is forbidden (precedence B).
+
+A found but invalid file is an error. Source is always logged at INFO.
 
 ## Result layout
 
-Without `--result2target`: `result/<target-name>/` next to `conductor.toml`.
-With `--result2target`: `result/` next to the target.
+Without `result2target`: `result/<target-name>/` next to `conductor.toml`.
+With `result2target` (CLI for JSON, or manifest field): `result/` next to the
+target / manifest.
 
 | Path | When |
 |---|---|

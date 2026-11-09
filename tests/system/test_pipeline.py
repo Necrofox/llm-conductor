@@ -289,11 +289,21 @@ def test_cache_logs_and_results_live_next_to_the_config_not_the_cwd(workspace, m
 
 
 # ============================================================================
-# Manifests
+# Run manifests (TOML [[targets]])
 # ============================================================================
 
 MENU = {"title": "Main menu"}
 GUARD = {"line": "Halt!"}
+
+UI_MANIFEST = """\
+result2target = false
+
+[[targets]]
+original = "menu/main.json"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+"""
 
 
 @pytest.fixture
@@ -301,67 +311,97 @@ def project(workspace):
     """project/ with two inputs in nested directories and a manifest naming both."""
     workspace.write_json("project/menu/main.json", MENU)
     workspace.write_json("project/dialogs/npc/guard.json", GUARD)
-    workspace.write_text("project/ui.list",
-                         "# UI strings\n\n   menu/main.json   \ndialogs\\npc\\guard.json\n")
+    workspace.write_text("project/ui.toml", UI_MANIFEST)
     return workspace
 
 
 def test_manifest_results_mirror_the_nested_directories(project, model, run_main, preserve_logs):
-    assert run_main("run", "--target", "project/ui.list") == EXIT_SUCCESS
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
 
     def final(relative):
-        return project.read_json(project.result("final", relative, target="ui.list"))
+        return project.read_json(project.result("final", relative, target="ui.toml"))
 
     assert final("menu/main.json") == {"title": "OK(RU(Main menu))"}
     assert final("dialogs/npc/guard.json") == {"line": "OK(RU(Halt!))"}
     assert "File 2/2" in project.log_text()
 
 
-def test_manifest_with_result2target_mirrors_next_to_the_manifest(project, model, run_main):
-    assert run_main("run", "--target", "project/ui.list", "--result2target") == EXIT_SUCCESS
+def test_manifest_with_result2target_in_toml_mirrors_next_to_the_manifest(project, model, run_main):
+    project.write_text("project/ui.toml", """
+result2target = true
+
+[[targets]]
+original = "menu/main.json"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
 
     assert project.read_json("project/result/final/menu/main.json") == {"title": "OK(RU(Main menu))"}
 
 
-@pytest.mark.parametrize("bad_line", [
+@pytest.mark.parametrize("bad_original", [
     "../outside.json",
     "menu/../../outside.json",
     "ABSOLUTE",
 ], ids=["parent", "parent-after-normalization", "absolute"])
 def test_manifest_path_outside_its_directory_fails_before_anything_is_written(project, model, run_main,
-                                                                               bad_line, capsys):
+                                                                               bad_original, capsys):
     outside = project.write_json("outside.json", {"secret": "Keep me"})
-    line = str(outside) if bad_line == "ABSOLUTE" else bad_line
-    project.write_text("project/ui.list", f"menu/main.json\n{line}\n")
+    original = str(outside).replace("\\", "/") if bad_original == "ABSOLUTE" else bad_original
+    project.write_text("project/ui.toml", f"""
+result2target = true
 
-    assert run_main("run", "--target", "project/ui.list", "--result2target") == EXIT_USAGE_ERROR
+[[targets]]
+original = "menu/main.json"
 
-    assert "line 2" in capsys.readouterr().out
+[[targets]]
+original = "{original}"
+""")
+
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+
+    err = capsys.readouterr()
+    combined = err.out + err.err
+    assert "target 2:" in combined
     assert model.requests == []
     assert not project.exists("result") and not project.exists("project/result")
     assert project.read_json("outside.json") == {"secret": "Keep me"}
 
 
 def test_manifest_duplicate_after_normalization_is_an_error(project, model, run_main, capsys):
-    project.write_text("project/ui.list", "menu/main.json\ndialogs\\..\\menu\\main.json\n")
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_USAGE_ERROR
+[[targets]]
+original = "dialogs/../menu/main.json"
+""")
 
-    assert "duplicate of line 1" in capsys.readouterr().out
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+
+    captured = capsys.readouterr()
+    assert "duplicate original of target 1" in (captured.out + captured.err)
     assert model.requests == []
 
 
 def test_empty_manifest_is_an_error(project, model, run_main):
-    project.write_text("project/ui.list", "# nothing yet\n\n")
+    project.write_text("project/ui.toml", 'verb = "INFO"\n')
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_USAGE_ERROR
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
 
 
 def test_input_inside_the_result_directory_is_rejected(project, model, run_main):
     project.write_json("project/result/final/menu/main.json", MENU)
-    project.write_text("project/ui.list", "result/final/menu/main.json\n")
+    project.write_text("project/ui.toml", """
+result2target = true
 
-    assert run_main("run", "--target", "project/ui.list", "--result2target") == EXIT_USAGE_ERROR
+[[targets]]
+original = "result/final/menu/main.json"
+""")
+
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
     assert model.requests == []
 
 
@@ -371,19 +411,25 @@ def test_failed_file_does_not_stop_the_others(project, model, run_main, max_fail
     project.write_configs(resilience__max_failure_ratio=max_failure_ratio)
     project.write_text("project/menu/main.json", "{broken")
 
-    assert run_main("run", "--target", "project/ui.list") == expected
+    assert run_main("run", "--target", "project/ui.toml") == expected
 
-    assert project.read_json(project.result("final", "dialogs/npc/guard.json", target="ui.list"))
-    assert not project.exists(project.result("final", "menu/main.json", target="ui.list"))
+    assert project.read_json(project.result("final", "dialogs/npc/guard.json", target="ui.toml"))
+    assert not project.exists(project.result("final", "menu/main.json", target="ui.toml"))
     assert "1 of 2 file(s) failed: " in project.log_text()
 
 
 def test_missing_manifest_entry_is_a_failed_file(project, model, run_main):
-    project.write_text("project/ui.list", "menu/main.json\nmenu/missing.json\n")
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_SUCCESS
+[[targets]]
+original = "menu/missing.json"
+""")
 
-    assert project.exists(project.result("final", "menu/main.json", target="ui.list"))
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
+
+    assert project.exists(project.result("final", "menu/main.json", target="ui.toml"))
     assert "missing.json" in project.log_text()
     snap = project.read_json("cache/progress_state.json")
     failed = {(item["path"].replace("\\", "/"), item["status"]) for item in snap["files"]["failed"]}
@@ -396,10 +442,10 @@ def test_circuit_breaker_stops_the_remaining_files(project, model, run_main, no_
     project.write_configs(resilience__max_consecutive_failures=1)
     model.fail_model_calls = True
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_CONSECUTIVE_FAILURES
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_CONSECUTIVE_FAILURES
 
-    assert project.exists(project.result("final", "menu/main.json", target="ui.list"))
-    assert not project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.list"))
+    assert project.exists(project.result("final", "menu/main.json", target="ui.toml"))
+    assert not project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.toml"))
     assert "1 remaining file(s) not processed" in project.log_text()
 
     snap = project.read_json("cache/progress_state.json")
@@ -417,17 +463,17 @@ def test_crashed_file_is_recorded_in_heartbeat_and_does_not_stop_others(
     """Unexpected error in one file → status crashed, exit 1; the rest still run."""
     real_process = FilePipeline._process
 
-    def boom(self, entry):
+    def boom(self, entry, *args, **kwargs):
         if entry.relative_path.replace("\\", "/") == "menu/main.json":
             raise RuntimeError("injected crash")
-        return real_process(self, entry)
+        return real_process(self, entry, *args, **kwargs)
 
     monkeypatch.setattr(FilePipeline, "_process", boom)
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_INTERNAL_ERROR
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_INTERNAL_ERROR
 
-    assert not project.exists(project.result("final", "menu/main.json", target="ui.list"))
-    assert project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.list"))
+    assert not project.exists(project.result("final", "menu/main.json", target="ui.toml"))
+    assert project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.toml"))
 
     snap = project.read_json("cache/progress_state.json")
     failed = {(item["path"].replace("\\", "/"), item["status"]) for item in snap["files"]["failed"]}
@@ -604,7 +650,8 @@ def test_preflight_can_be_switched_off(workspace, model, run_main):
 def test_missing_target_is_a_usage_error(workspace, model, run_main, capsys):
     assert run_main("run", "--target", "absent.json") == EXIT_USAGE_ERROR
 
-    assert "absent.json not found" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "absent.json not found" in (captured.out + captured.err)
     assert model.requests == []
 
 

@@ -86,6 +86,8 @@ def test_no_arguments_prints_help_and_fails(tmp_path):
 
 
 def test_missing_config_fails_without_traceback(tmp_path):
+    # Target must exist so resolution reaches conductor.toml (exit 3), not exit 2.
+    (tmp_path / "input.json").write_text('{"a": "b"}', encoding="utf-8")
     result = _run(tmp_path, "run", "--target", "input.json")
 
     assert result.returncode == EXIT_CONFIG_ERROR
