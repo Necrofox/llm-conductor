@@ -27,14 +27,11 @@ working example (often English→another language), not a product limit.
 ### 1. Install or grab a binary
 
 ```bash
-pip install -e ".[dev]"          # from a clone
-# or download llm-conductor.exe from GitHub Releases (when published)
+pip install llm-conductor
+# from a clone (dev tools):
+pip install -e ".[dev]"
+# or download llm-conductor.exe from GitHub Releases
 ```
-
-PyPI upload is prepared (packaging metadata is in place) but may not be live
-yet — prefer a Release `.exe`, `pip install` from a clone, or
-`pip install git+https://github.com/Necrofox/llm-conductor.git` once the
-repo is public.
 
 ### 2. Configs next to the program
 
