@@ -69,6 +69,7 @@ RETRYABLE_IO_ERRNOS = frozenset({errno.EAGAIN, errno.EBUSY, errno.EIO})
 # [resilience]
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 10
 DEFAULT_MAX_FAILURE_RATIO = 0.5
+DEFAULT_FAIL_ON_ANY_ERROR = False
 
 # [validation]
 DEFAULT_VALIDATION_ENABLED = True
@@ -347,6 +348,32 @@ MANIFEST_DRIVE_PATTERN = re.compile(r'^[A-Za-z]:')
 
 # Results go to <root>/result/{translated,redacted,final}/<relative path>.
 RESULT_DIR_NAME = 'result'
+# Per-leaf stage status sidecars live under <result_root>/leaves/<relative>.json
+LEAVES_DIR_NAME = 'leaves'
+RUN_REPORT_FILENAME = 'run_report.json'
+USAGE_REPORT_FILENAME = 'usage.json'
+LEAF_REPORT_SCHEMA_VERSION = 1
+USAGE_REPORT_SCHEMA_VERSION = 1
+
+# Per-leaf outcome statuses (machine report / verify-skip contract).
+LEAF_STATUS_OK = 'ok'
+LEAF_STATUS_SKIPPED = 'skipped'
+LEAF_STATUS_CACHE_HIT = 'cache_hit'
+LEAF_STATUS_DEDUP = 'dedup'
+LEAF_STATUS_DEGRADED = 'degraded'
+LEAF_STATUS_VERIFY_SKIPPED = 'verify_skipped'
+
+# Why verification was skipped for a leaf (never inferred from string equality).
+LEAF_SKIP_REASON_TRANSLATION_DEGRADED = 'translation_degraded'
+
+# UsageLedger attempt outcomes and the separate preflight bucket.
+USAGE_OUTCOME_SUCCESS = 'success'
+USAGE_OUTCOME_FAILED = 'failed'
+# HTTP succeeded but content validation rejected the reply (tokens still count).
+USAGE_OUTCOME_REJECTED = 'rejected'
+USAGE_STAGE_PREFLIGHT = 'preflight'
+USAGE_NON_API_CACHE_HIT = 'cache_hit'
+USAGE_NON_API_DEDUP = 'dedup'
 # Cache directory created next to the target by --cache2target.
 TARGET_CACHE_DIR_NAME = 'cache'
 # Glossary looked up next to the target when --glossary is not given; the

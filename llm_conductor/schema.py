@@ -28,6 +28,7 @@ from llm_conductor.constants import (
     DEFAULT_CACHE_MAX_SIZE,
     DEFAULT_DEDUP_ENABLED,
     DEFAULT_DEDUP_LOG_INTERVAL,
+    DEFAULT_FAIL_ON_ANY_ERROR,
     DEFAULT_FILE_OPERATION_TIMEOUT,
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -546,6 +547,8 @@ CONDUCTOR_SCHEMA = FileSchema(
                     "Abort a stage after this many consecutive failed calls (>= 0, 0 disables the breaker)."),
             Setting("max_failure_ratio", ValueKind.FLOAT, DEFAULT_MAX_FAILURE_RATIO,
                     "Exit with a non-zero code if a stage's failure share exceeds this, 0.0..1.0."),
+            Setting("fail_on_any_error", ValueKind.BOOLEAN, DEFAULT_FAIL_ON_ANY_ERROR,
+                    "Exit with code 5 if any leaf ended degraded (stricter than max_failure_ratio alone)."),
         )),
         Section(("validation",),
                 "Sanity checks of a model reply before it is cached (both stages). "

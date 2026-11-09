@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from llm_conductor.constants import (
+    FAILURE_KIND_REJECTED,
     GLOSSARY_MARKER,
     LINGUISTIC_CONTEXT_BLOCK_TEMPLATE,
     LINGUISTIC_CONTEXT_MARKER,
@@ -18,10 +19,18 @@ from llm_conductor.constants import (
     REJECTED_REPLY_LOG_LENGTH,
     STATISTICS_LOG_LEVELS,
     TRANSLATION_TEXT_MARKER,
+    USAGE_NON_API_CACHE_HIT,
+    USAGE_NON_API_DEDUP,
     VERIFICATION_TEXT_MARKER,
 )
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
+from llm_conductor.core.leaf_report import (
+    make_degraded,
+    make_ok,
+    make_skipped,
+    make_verify_skipped,
+)
 from llm_conductor.core.shutdown import is_shutdown_requested
 from llm_conductor.exceptions import FileOperationError
 from llm_conductor.l10n.context import (
@@ -412,14 +421,29 @@ class RecursiveProcessor:
         is_verification: bool
     ) -> str:
         """Body of ``_process_leaf``; the outer wrapper always notes the leaf."""
+        operation_type = OPERATION_VERIFICATION if is_verification else OPERATION_TRANSLATION
+        leaf_path = str(path)
+        outcomes = self.config.leaf_outcomes
+
         if not value.strip() or is_format_only_leaf(value):
             with self._stats_lock:
                 self.stats['skipped_leaves'] += 1
+            outcomes.record(leaf_path, operation_type, make_skipped(value))
+            return value
+
+        # Skip normal verification when translation already degraded — decided
+        # from the prior stage outcome, never from value == original_data.
+        if is_verification and outcomes.is_translation_degraded(leaf_path):
+            with self._stats_lock:
+                self.stats['skipped_leaves'] += 1
+            outcomes.record(leaf_path, operation_type, make_verify_skipped(value))
+            if self.config.is_debug_mode:
+                self.config.logger.debug(
+                    f"Skipping verification for {leaf_path}: translation_degraded"
+                )
             return value
 
         prefix, core, suffix = split_boundary_whitespace(value)
-
-        operation_type = OPERATION_VERIFICATION if is_verification else OPERATION_TRANSLATION
 
         # Verification matches glossary terms against the English source, not the translation.
         if is_verification and isinstance(original_data, str):
@@ -519,6 +543,12 @@ class RecursiveProcessor:
                         self.config.logger.debug(f"Failed to delete cache entry: {delete_error}")
                     # No return: fall through to a fresh model call.
                 else:
+                    outcomes.record(
+                        leaf_path, operation_type, make_ok(value, sanitized_result, cache_hit=True)
+                    )
+                    self.config.usage_ledger.record_non_api(
+                        operation_type, USAGE_NON_API_CACHE_HIT
+                    )
                     return sanitized_result
             elif self.config.is_debug_mode:
                 # Explains the miss only; the full key has already decided it.
@@ -539,6 +569,12 @@ class RecursiveProcessor:
                                     f"duplicate values reused"
                                 )
 
+                        outcomes.record(
+                            leaf_path, operation_type, make_ok(value, translated, dedup=True)
+                        )
+                        self.config.usage_ledger.record_non_api(
+                            operation_type, USAGE_NON_API_DEDUP
+                        )
                         return translated
 
         enhanced_config = runtime_config.copy()
@@ -566,6 +602,9 @@ class RecursiveProcessor:
                 with self._stats_lock:
                     self.stats['failed_leaves'] += 1
 
+                outcomes.record(
+                    leaf_path, operation_type, make_degraded(value, outcome.failure_kind)
+                )
                 return value
 
             unmask_result = unmask_tags(outcome.text, tag_map, self.config)
@@ -601,6 +640,16 @@ class RecursiveProcessor:
                 with self._stats_lock:
                     self.stats['failed_leaves'] += 1
 
+                error_kind = validation.reason or FAILURE_KIND_REJECTED
+                outcomes.record(
+                    leaf_path, operation_type, make_degraded(value, error_kind)
+                )
+                # Reclassify by attempt id so concurrent leaves cannot race
+                # on “last success” when validation rejects a paid reply.
+                if outcome.usage_attempt_id is not None:
+                    self.config.usage_ledger.mark_attempt_rejected(
+                        outcome.usage_attempt_id, failure_kind=error_kind,
+                    )
                 return value
 
             self.config.circuit_breaker.record_success(operation_type)
@@ -634,8 +683,12 @@ class RecursiveProcessor:
                     f"This indicates a bug in unmask_tags() or API client. "
                     f"Using original value as fallback."
                 )
+                outcomes.record(
+                    leaf_path, operation_type, make_degraded(value, 'internal_error')
+                )
                 return value
 
+            outcomes.record(leaf_path, operation_type, make_ok(value, unmasked_result))
             return unmasked_result
 
         except Exception as e:  # noqa: BLE001 - leaf degrades to the original value (§4.3)
@@ -652,6 +705,9 @@ class RecursiveProcessor:
             with self._stats_lock:
                 self.stats['failed_leaves'] += 1
 
+            outcomes.record(
+                leaf_path, operation_type, make_degraded(value, type(e).__name__)
+            )
             return value
     
     def _inject_original_text(self, prompt: str, original_text_block: str, operation_type: str) -> str:

@@ -52,6 +52,12 @@ With `--result2target`: `result/` next to the target.
 | `{result}/translated/{rel}` | After translation |
 | `{result}/redacted/{rel}` | After verification |
 | `{result}/final/{rel}` | Always (also partial on circuit-breaker abort) |
+| `{result}/run_report.json` | Per-leaf stage status + aggregates |
+| `{result}/usage.json` | Token attempts by provider / model / stage |
+| `{result}/leaves/{rel}.json` | Sidecar for verify-skip across stage splits |
+
+Semantics of statuses and usage outcomes:
+[pipeline.md](pipeline.md#reports).
 
 `{rel}` is the path relative to the manifest directory (or the file name for
 a single target). Inputs are never modified. An input that already lies under
@@ -71,7 +77,7 @@ Only `main()` calls `sys.exit`. Priority when several problems apply:
 | `2` | Usage / target / manifest / glossary / result ownership |
 | `3` | Config invalid or `init` refused overwrite |
 | `4` | Preflight API unavailable |
-| `5` | Request or file failure ratio above `[resilience].max_failure_ratio` |
+| `5` | Request or file failure ratio above `[resilience].max_failure_ratio`, or any degraded leaf when `[resilience].fail_on_any_error` is true |
 | `6` | Consecutive-failure circuit breaker tripped |
 | `7` | Target, cache dir, or result root locked by another run |
 | `130` | Interrupted (SIGINT/SIGTERM); caches saved, results incomplete |

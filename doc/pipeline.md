@@ -67,17 +67,42 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
 ## Resilience
 
 - **Per-leaf degradation:** network/parse/truncation/refusal never abort the
-  whole tree; the original string is kept.
+  whole tree; the original string is kept. The outcome is recorded as
+  `degraded` from the request/validation result — never inferred from
+  `result == source` (names and ids may legally stay identical).
+- **Verify skip:** by default, leaves with `translation_degraded` do **not**
+  enter normal verification (no editor call on the English fallback). Status
+  is persisted under `result/<target>/leaves/<relative>.json` so a standalone
+  `--stage verify` still sees the flag.
 - **Circuit breaker:** `[resilience].max_consecutive_failures` stops further
   leaves for that stage (same path as shutdown); exit `6`.
 - **Failure ratio:** after the run, request and file failure ratios vs
   `max_failure_ratio` → exit `5` if exceeded.
+- **`fail_on_any_error`:** when `[resilience].fail_on_any_error = true`, any
+  degraded leaf forces exit `5` even if the ratio stays under threshold
+  (default `false`).
 - **Shutdown:** first SIGINT/SIGTERM saves caches and exits `130`; results may
   be incomplete.
 
+## Reports
+
+After a run, the result root also gets:
+
+| File | Contents |
+|---|---|
+| `run_report.json` | Per-leaf stage status (`ok` / `cache_hit` / `dedup` / `degraded` / `verify_skipped` / …), hashes, aggregates |
+| `usage.json` | Token attempts by provider/model/stage (retries included); outcomes `success` / `rejected` / `failed`; preflight separate; cache/dedup non-API counts; unknown usage marked |
+| `leaves/<relative>.json` | Per-file sidecar used for verify-skip across stage splits |
+
+The final log banner includes explicit `untranslated` / `degraded` /
+`verify_skipped` counts.
+
 ## Metrics
 
-API metrics count every attempt; failures break down by kind; validator
-rejections are counted separately. Token banners and stage summaries are
-English. Clean log-file retention depends on `[logging].level` (see schema /
-`init` comments).
+API metrics count every leaf call; failures break down by kind; validator
+rejections are counted separately. `usage.json` additionally counts every
+HTTP attempt (including retries) and preflight probes; a reply rejected by
+content validation keeps its token totals but is marked `rejected` via the
+attempt id (safe if leaves later run concurrently). Token banners and
+stage summaries are English. Clean log-file retention depends on
+`[logging].level` (see schema / `init` comments).

@@ -65,7 +65,8 @@ llm-conductor run --target project/ui.list --result2target
 ```
 
 Results land under `result/<target-name>/` (`translated/`, `redacted/`,
-`final/`) unless `--result2target`. See [doc/cli.md](doc/cli.md).
+`final/`) unless `--result2target`. See
+[doc/cli.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/cli.md).
 
 ### Ollama vs OpenAI-compatible
 
@@ -79,7 +80,8 @@ Point translation and verification at different hosts if you want.
 
 ## Example
 
-Input (see [examples/sample.json](examples/sample.json)):
+Input (see
+[examples/sample.json](https://github.com/Necrofox/llm-conductor/blob/main/examples/sample.json)):
 
 ```json
 {
@@ -92,7 +94,7 @@ Input (see [examples/sample.json](examples/sample.json)):
 
 Same English text, different key suffixes → separate requests and (usually)
 different grammatical forms in the target language. Full prompt rules:
-[doc/prompts.md](doc/prompts.md).
+[doc/prompts.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/prompts.md).
 
 ## Key-name conventions
 
@@ -106,19 +108,20 @@ different grammatical forms in the target language. Full prompt rules:
 
 | Doc | Topic |
 |---|---|
-| [doc/concepts.md](doc/concepts.md) | What it is / is not; isolation; language=prompt |
-| [doc/configuration.md](doc/configuration.md) | TOML split, paths, secrets |
-| [doc/cli.md](doc/cli.md) | Commands, results, exit codes |
-| [doc/prompts.md](doc/prompts.md) | Authoring prompts |
-| [doc/pipeline.md](doc/pipeline.md) | Cache, validation, resilience |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup and conventions |
-| [AGENTS.md](AGENTS.md) | Notes for AI coding agents |
+| [doc/concepts.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/concepts.md) | What it is / is not; isolation; language=prompt |
+| [doc/configuration.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/configuration.md) | TOML split, paths, secrets |
+| [doc/cli.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/cli.md) | Commands, results, exit codes |
+| [doc/prompts.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/prompts.md) | Authoring prompts |
+| [doc/pipeline.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/pipeline.md) | Cache, validation, resilience |
+| [CONTRIBUTING.md](https://github.com/Necrofox/llm-conductor/blob/main/CONTRIBUTING.md) | Dev setup and conventions |
+| [AGENTS.md](https://github.com/Necrofox/llm-conductor/blob/main/AGENTS.md) | Notes for AI coding agents |
 
 ## Cache note
 
 Rejected model replies are not cached. A warm-cache rerun that only hits
 residual misses can exit with code `5` even if an earlier full run was `0`.
-Fix prompts/model or remeasure with `--no-cache` ([doc/cli.md](doc/cli.md)).
+Fix prompts/model or remeasure with `--no-cache`
+([doc/cli.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/cli.md)).
 
 ## Roadmap (high level)
 
@@ -128,7 +131,7 @@ Fix prompts/model or remeasure with `--no-cache` ([doc/cli.md](doc/cli.md)).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/Necrofox/llm-conductor/blob/main/LICENSE).
 
 ---
 
