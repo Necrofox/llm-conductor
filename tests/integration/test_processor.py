@@ -23,6 +23,7 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
+from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.l10n.context import KeyPath, LinguisticContext
 from llm_conductor.l10n.processor import RecursiveProcessor, process_stage_recursive
 
@@ -441,7 +442,9 @@ def _key_for_leaf(config, value, path=("t",), mode=MODE_STYLE):
     runtime = config.get_translation_config_for_mode(mode)
     prompt = processor._build_enhanced_prompt(runtime['prompt'], [], "", OPERATION_TRANSLATION)
     return config.cache_manager.create_cache_key(
-        OPERATION_TRANSLATION, runtime['model'], runtime['system_prompt'], prompt, mode, value)
+        OPERATION_TRANSLATION, runtime['model'], runtime['system_prompt'], prompt, mode, value,
+        build_sampling_identity(runtime),
+    )
 
 
 def test_legacy_verification_tuple_in_cache_is_unwrapped(make_config):

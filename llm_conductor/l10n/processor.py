@@ -18,6 +18,7 @@ from llm_conductor.constants import (
     TRANSLATION_TEXT_MARKER,
     VERIFICATION_TEXT_MARKER,
 )
+from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
 from llm_conductor.core.shutdown import is_shutdown_requested
 from llm_conductor.l10n.context import (
@@ -454,11 +455,12 @@ class RecursiveProcessor:
         )
 
         # The key hashes the whole request, so identical text with different
-        # hints (`_male` / `_female`) never shares a cache or dedup entry.
+        # hints (`_male` / `_female`) or sampling never shares a cache/dedup entry.
         cache_manager = self.cache_manager
         cache_key: Optional[str] = None
         fingerprints: dict = {}
         if cache_manager is not None:
+            sampling_identity = build_sampling_identity(runtime_config)
             fingerprints = cache_manager.compute_fingerprints(
                 operation_type=operation_type,
                 model=runtime_config['model'],
@@ -467,6 +469,7 @@ class RecursiveProcessor:
                 hints_text=hints_text,
                 glossary_string=glossary_string,
                 mode=mode,
+                sampling_identity=sampling_identity,
             )
             cache_key = cache_manager.create_cache_key(
                 operation_type=operation_type,
@@ -475,6 +478,7 @@ class RecursiveProcessor:
                 enhanced_prompt=enhanced_prompt,
                 mode=mode,
                 value=value,
+                sampling_identity=sampling_identity,
             )
 
         if self.cache_enabled and cache_manager is not None and cache_key is not None:

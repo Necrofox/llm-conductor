@@ -36,6 +36,15 @@ client (not trusted to the model or reply `strip()`); the cache stores the
 | Glossary regex cache | Memory | Term + boundary mode |
 | Dedup index | Memory, this run | Same as disk cache key |
 
+Full-request identity (see `CACHE_KEY_VERSION` / `CACHE_SAMPLING_IDENTITY_FIELDS`
+in `llm_conductor/constants.py`) includes: operation type, model name, system
+prompt, assembled user prompt (hints/glossary/original), mode, leaf value, and
+generation-affecting sampling — `temperature`, `top_p`, `top_k`,
+`repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
+`num_ctx`, `stop`. There is **no** cross-parameter reuse: changing any of these
+misses the cache. Transport-only fields (`keep_alive`, `max_tokens_param`) are
+not part of identity. A key-schema bump drops stale disk entries on load.
+
 `--no-cache` / `[cache].enabled = false`: no disk read/write; in-memory dedup
 still runs. Cache dir may still be created for `progress_state.json`.
 

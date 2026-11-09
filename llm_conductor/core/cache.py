@@ -7,17 +7,42 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, Mapping, Optional, Set
 
 from llm_conductor.constants import (
     CACHE_FINGERPRINT_LENGTH,
     CACHE_KEY_VERSION,
+    CACHE_SAMPLING_IDENTITY_FIELDS,
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
 )
 from llm_conductor.core.io import safe_read_file
 from llm_conductor.interfaces import CacheConfigProtocol
+
+
+def build_sampling_identity(runtime_config: Mapping[str, Any]) -> str:
+    """
+    Canonical JSON of generation-affecting sampling parameters.
+
+    Used as one component of the cache key and as the ``sampling`` fingerprint.
+    Field list: ``CACHE_SAMPLING_IDENTITY_FIELDS`` in constants (see also
+    ``doc/pipeline.md``). ``stop`` order is preserved; outer keys are sorted.
+
+    Args:
+        runtime_config: Flattened mode config from ConfigBuilder (``temp``,
+            ``top_p``, …, ``stop``).
+
+    Returns:
+        Stable JSON string suitable for hashing.
+    """
+    payload: Dict[str, Any] = {}
+    for name, runtime_key in CACHE_SAMPLING_IDENTITY_FIELDS:
+        value = runtime_config[runtime_key]
+        if name == 'stop':
+            value = list(value) if value is not None else []
+        payload[name] = value
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 class GlossaryPatternCache:
@@ -760,18 +785,21 @@ class CacheManager:
             op.data[cache_key] = cache_entry
 
     def create_cache_key(self, operation_type: str, model: str, system_prompt: str,
-                          enhanced_prompt: str, mode: str, value: str) -> str:
+                          enhanced_prompt: str, mode: str, value: str,
+                          sampling_identity: str) -> str:
         """
         Build an MD5 cache key from the full request sent to the model.
 
         The key is MD5 of the canonical JSON
         ``[CACHE_KEY_VERSION, operation_type, model, system_prompt,
-        enhanced_prompt, mode, value]``. ``enhanced_prompt`` is the already
-        assembled prompt (linguistic hints and glossary included — see
-        RecursiveProcessor._build_enhanced_prompt) and is hashed whole, not
-        by component, so any future prompt ingredient joins the key
-        automatically (see ``doc/pipeline.md``). ``value`` is the unmasked
-        leaf source (pipeline invariant: cache stores unmasked results).
+        enhanced_prompt, mode, value, sampling_identity]``.
+        ``enhanced_prompt`` is the already assembled prompt (linguistic hints
+        and glossary included — see RecursiveProcessor._build_enhanced_prompt)
+        and is hashed whole, not by component, so any future prompt ingredient
+        joins the key automatically (see ``doc/pipeline.md``). ``value`` is
+        the unmasked leaf source (pipeline invariant: cache stores unmasked
+        results). ``sampling_identity`` is the canonical JSON from
+        ``build_sampling_identity`` (no cross-parameter reuse).
 
         Args:
             operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
@@ -780,25 +808,30 @@ class CacheManager:
             enhanced_prompt: Assembled user prompt (hints and glossary included).
             mode: Mode string (strict / style / verification).
             value: Leaf source value.
+            sampling_identity: Canonical sampling JSON from
+                ``build_sampling_identity``.
 
         Returns:
             32-character MD5 hex digest.
         """
-        cache_key_data = [CACHE_KEY_VERSION, operation_type, model, system_prompt, enhanced_prompt, mode, value]
+        cache_key_data = [
+            CACHE_KEY_VERSION, operation_type, model, system_prompt,
+            enhanced_prompt, mode, value, sampling_identity,
+        ]
         cache_key_str = json.dumps(cache_key_data, ensure_ascii=False)
         return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
 
     def compute_fingerprints(self, operation_type: str, model: str, system_prompt: str,
                               prompt_template: str, hints_text: str, glossary_string: str,
-                              mode: str) -> dict:
+                              mode: str, sampling_identity: str) -> dict:
         """
         Build short component fingerprints for miss diagnostics.
 
         Fingerprints are not part of the cache key (see create_cache_key) —
         only the full key decides a hit. They are stored in entry metadata
         and used by diagnose_miss() to name which component changed (model,
-        system prompt, prompt template, hints, glossary, or mode) without
-        logging the component contents.
+        system prompt, prompt template, hints, glossary, mode, or sampling)
+        without logging the component contents.
 
         Args:
             operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
@@ -809,6 +842,8 @@ class CacheManager:
             hints_text: Joined linguistic-hint text.
             glossary_string: Assembled glossary string.
             mode: Mode string (strict / style / verification).
+            sampling_identity: Canonical sampling JSON from
+                ``build_sampling_identity``.
 
         Returns:
             Mapping of component name to truncated hex digest.
@@ -822,6 +857,7 @@ class CacheManager:
             'hints': hints_text,
             'glossary': glossary_string,
             'mode': mode,
+            'sampling': sampling_identity,
         }
         return {
             name: hashlib.md5(text.encode('utf-8')).hexdigest()[:CACHE_FINGERPRINT_LENGTH]

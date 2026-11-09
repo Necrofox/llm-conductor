@@ -88,9 +88,10 @@ the cache key.
 ## Prompts and cache
 
 The cache key hashes the full request (model, system prompt, assembled mode
-prompt with hints/glossary/original, mode, value). Editing a prompt misses
-the cache automatically — no manual cache wipe for prompt changes. Large
-files mean a full re-run after a prompt edit.
+prompt with hints/glossary/original, mode, value, and generation-affecting
+sampling — see [pipeline.md](pipeline.md)). Editing a prompt or sampling
+parameter misses the cache automatically — no manual cache wipe for those
+changes. Large files mean a full re-run after a prompt edit.
 
 ## Checklist
 
