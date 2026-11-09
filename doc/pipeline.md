@@ -60,6 +60,10 @@ reply; marker mismatches; fabricated tags; abnormal length; foreign scripts
 outside `allowed_scripts` / source / glossary (Latin may warn or reject per
 `latin_text_policy`). Soft Latin warnings do not reject.
 
+A `tag_marker_mismatch` rejection logs structured `missing` / `duplicated` /
+`extra` marker lists. Set `[validation].save_rejected_replies = true` to also
+write the full masked reply under `[logging].dir/rejected/<operation>/`.
+
 ## Resilience
 
 - **Per-leaf degradation:** network/parse/truncation/refusal never abort the

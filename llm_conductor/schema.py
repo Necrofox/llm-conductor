@@ -74,6 +74,7 @@ from llm_conductor.constants import (
     DEFAULT_VALIDATION_LATIN_POLICY,
     DEFAULT_VALIDATION_MAX_LENGTH_RATIO,
     DEFAULT_VALIDATION_MAX_LENGTH_SLACK,
+    DEFAULT_VALIDATION_SAVE_REJECTED_REPLIES,
     DEFAULT_VERIFICATION_API_TIMEOUT,
     DEFAULT_VERIFICATION_API_TYPE,
     DEFAULT_VERIFICATION_API_URL,
@@ -558,6 +559,9 @@ CONDUCTOR_SCHEMA = FileSchema(
             Setting("latin_text_policy", ValueKind.STRING, DEFAULT_VALIDATION_LATIN_POLICY,
                     f"One of {', '.join(VALID_LATIN_POLICIES)}, for Latin text absent from "
                     f"the source and the glossary when latin is not in allowed_scripts."),
+            Setting("save_rejected_replies", ValueKind.BOOLEAN, DEFAULT_VALIDATION_SAVE_REJECTED_REPLIES,
+                    "Write each content-validator rejection's full masked reply under "
+                    "[logging].dir/rejected/ (opt-in diagnostics)."),
         )),
     ),
 )

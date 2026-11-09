@@ -264,6 +264,7 @@ class StubConfig:
             )
             if validation == 'default' else validation
         )
+        self.log_dir = ''
         self.max_recursion_depth = DEFAULT_MAX_RECURSION_DEPTH
         self.dedup_log_interval = DEFAULT_DEDUP_LOG_INTERVAL
         self.max_error_display = DEFAULT_MAX_ERROR_DISPLAY

@@ -534,6 +534,39 @@ def test_rejected_reply_log_is_truncated_for_long_replies(make_config):
     assert logged.rstrip().endswith('...')
 
 
+def test_tag_marker_mismatch_log_includes_missing_detail(make_config):
+    config = make_config()
+    # Source masks {0} -> [T0]; reply drops the marker.
+    bad_reply = "Нажмите для прыжка"
+
+    result, _ = _run(config, {"t": "Press {0} to jump"}, BadReplyModel(bad_reply))
+
+    assert result == {"t": "Press {0} to jump"}
+    logged = next(m for m in config.logger.messages('WARNING') if "Rejected model reply" in m)
+    assert "tag_marker_mismatch[missing=[T0]]" in logged
+
+
+def test_save_rejected_replies_writes_full_body_under_log_dir(make_config, tmp_path):
+    config = make_config(validation__save_rejected_replies=True)
+    bad_reply = "full rejected body that must be persisted\n"
+
+    _run(config, {"t": "Hello"}, BadReplyModel(bad_reply))
+
+    saved = tmp_path / "logs" / "rejected" / OPERATION_TRANSLATION / "t.txt"
+    assert saved.is_file()
+    assert saved.read_text(encoding='utf-8') == bad_reply
+
+
+def test_save_rejected_replies_off_writes_no_file(make_config, tmp_path):
+    config = make_config(validation__save_rejected_replies=False)
+    bad_reply = "RU(Hello)\nunexpected chatter"
+
+    _run(config, {"t": "Hello"}, BadReplyModel(bad_reply))
+
+    rejected_root = tmp_path / "logs" / "rejected"
+    assert not rejected_root.exists()
+
+
 # ============================================================================
 # Autosave and process_stage_recursive
 # ============================================================================

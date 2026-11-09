@@ -75,6 +75,7 @@ DEFAULT_VALIDATION_ENABLED = True
 DEFAULT_VALIDATION_MAX_LENGTH_RATIO = 3.0
 DEFAULT_VALIDATION_MAX_LENGTH_SLACK = 20
 DEFAULT_VALIDATION_LATIN_POLICY = 'warn'
+DEFAULT_VALIDATION_SAVE_REJECTED_REPLIES = False
 VALID_LATIN_POLICIES = ('warn', 'reject')
 # Writing systems always allowed in replies ([validation].allowed_scripts of
 # llm.toml). Empty = none; the engine does not assume a target alphabet.
@@ -85,6 +86,8 @@ EXAMPLE_EN_RU_ALLOWED_SCRIPTS = ('cyrillic',)
 VALID_ALLOWED_SCRIPTS = (
     'latin', 'cyrillic', 'greek', 'arabic', 'hebrew', 'cjk', 'thai',
 )
+# Under [logging].dir when [validation].save_rejected_replies is on.
+REJECTED_REPLIES_SUBDIR = 'rejected'
 
 # ============================================================================
 # llm.toml DEFAULTS - a fully local profile: Ollama on both stages, no key
@@ -274,6 +277,7 @@ VALIDATION_REASON_UNEXPECTED_LATIN = 'unexpected_latin'
 
 # Max characters of a rejected model reply kept in the WARNING log line, so
 # the actual bad text (not just its rejection reason) survives for diagnosis.
+# Full body persistence is opt-in via [validation].save_rejected_replies.
 REJECTED_REPLY_LOG_LENGTH = 200
 
 # ============================================================================

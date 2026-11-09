@@ -41,7 +41,7 @@ def test_accepts_a_faithful_reply_with_matching_tags():
         tag_map={'[T0]': '{0}'},
     )
 
-    assert result == (True, None, None)
+    assert result == (True, None, None, None)
 
 
 def test_rejects_literal_newline_in_reply():
@@ -51,6 +51,7 @@ def test_rejects_literal_newline_in_reply():
 
     assert result.accepted is False
     assert result.reason == 'newline_in_reply'
+    assert result.detail is None
 
 
 def test_rejects_lost_tag_marker():
@@ -63,6 +64,7 @@ def test_rejects_lost_tag_marker():
 
     assert result.accepted is False
     assert result.reason == 'tag_marker_mismatch'
+    assert result.detail == 'missing=[T0]'
 
 
 def test_rejects_orphaned_literal_marker_left_in_reply():
@@ -75,6 +77,36 @@ def test_rejects_orphaned_literal_marker_left_in_reply():
 
     assert result.accepted is False
     assert result.reason == 'tag_marker_mismatch'
+    assert result.detail == 'extra=[T3]'
+
+
+def test_rejects_duplicated_tag_marker_before_fabricated_tag():
+    """A doubled expected marker is tag_marker_mismatch, not fabricated_tag."""
+    result = _validate(
+        "Press {0} to jump",
+        masked_reply="Нажмите [T0] для [T0] прыжка",
+        unmasked_reply="Нажмите {0} для {0} прыжка",
+        tag_map={'[T0]': '{0}'},
+    )
+
+    assert result.accepted is False
+    assert result.reason == 'tag_marker_mismatch'
+    assert result.detail == 'duplicated=[T0]'
+
+
+def test_rejects_combined_missing_and_extra_markers():
+    result = _validate(
+        "Press {0} to jump",
+        masked_reply="Нажмите [T9] для прыжка",
+        unmasked_reply="Нажмите [T9] для прыжка",
+        tag_map={'[T0]': '{0}'},
+        missing_markers=['[T0]'],
+        orphaned_markers=['[T9]'],
+    )
+
+    assert result.accepted is False
+    assert result.reason == 'tag_marker_mismatch'
+    assert result.detail == 'missing=[T0]; extra=[T9]'
 
 
 def test_rejects_fabricated_tag_not_present_in_original():
@@ -86,6 +118,7 @@ def test_rejects_fabricated_tag_not_present_in_original():
 
     assert result.accepted is False
     assert result.reason == 'fabricated_tag'
+    assert result.detail is None
 
 
 def test_rejects_response_far_longer_than_the_source():

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
@@ -13,6 +14,7 @@ from llm_conductor.constants import (
     ORIGINAL_TEXT_BLOCK_NOTE,
     ORIGINAL_TEXT_BLOCK_TEMPLATE,
     ORIGINAL_TEXT_MARKER,
+    REJECTED_REPLIES_SUBDIR,
     REJECTED_REPLY_LOG_LENGTH,
     STATISTICS_LOG_LEVELS,
     TRANSLATION_TEXT_MARKER,
@@ -21,6 +23,7 @@ from llm_conductor.constants import (
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
 from llm_conductor.core.shutdown import is_shutdown_requested
+from llm_conductor.exceptions import FileOperationError
 from llm_conductor.l10n.context import (
     KeyPath,
     LinguisticContext,
@@ -581,10 +584,15 @@ class RecursiveProcessor:
                 self.config.logger.warning(f"{path}: {validation.warning}")
 
             if not validation.accepted:
+                reason_text = validation.reason or ''
+                if validation.detail:
+                    reason_text = f"{reason_text}[{validation.detail}]"
                 self.config.logger.warning(
-                    f"Rejected model reply for {path}: {validation.reason}. "
+                    f"Rejected model reply for {path}: {reason_text}. "
                     f"Reply: {self._preview_rejected_reply(outcome.text)}"
                 )
+                if self.config.validation.save_rejected_replies:
+                    self._save_rejected_reply(path, operation_type, outcome.text)
                 self.config.metrics.record_rejection(operation_type)
 
                 if self.config.circuit_breaker.record_failure(operation_type):
@@ -958,6 +966,63 @@ class RecursiveProcessor:
         truncated = len(masked_reply) > REJECTED_REPLY_LOG_LENGTH
         preview = repr(masked_reply[:REJECTED_REPLY_LOG_LENGTH])
         return preview + '...' if truncated else preview
+
+    @staticmethod
+    def _sanitize_rejected_reply_filename(path: str) -> str:
+        """
+        Turn a leaf path into a single path-segment filename.
+
+        Args:
+            path: Human-readable KeyPath string (e.g. ``ui.title``).
+
+        Returns:
+            A ``.txt`` filename safe for Windows and POSIX.
+        """
+        sanitized = path
+        for char in ('/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']'):
+            sanitized = sanitized.replace(char, '_')
+        return f"{sanitized}.txt"
+
+    def _save_rejected_reply(self, path: KeyPath, operation_type: str, masked_reply: str) -> None:
+        """
+        Persist the full masked reply under ``[logging].dir/rejected/``.
+
+        Opt-in via ``[validation].save_rejected_replies``. Failures are logged
+        and swallowed so rejection handling never raises from diagnostics I/O.
+
+        Args:
+            path: Leaf KeyPath used for the filename.
+            operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
+            masked_reply: outcome.text of the rejected CallOutcome.
+        """
+        file_ops = self.config.file_ops
+        log_dir = self.config.log_dir
+        if file_ops is None or not log_dir:
+            self.config.logger.warning(
+                f"Cannot save rejected reply for {path}: log_dir or file_ops unavailable"
+            )
+            return
+
+        target = os.path.join(
+            log_dir,
+            REJECTED_REPLIES_SUBDIR,
+            operation_type,
+            self._sanitize_rejected_reply_filename(str(path)),
+        )
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            safe_write_file(
+                target, masked_reply, f"rejected reply for {path}",
+                file_ops, self.config.logger,
+            )
+        except FileOperationError as exc:
+            self.config.logger.warning(
+                f"Failed to save rejected reply for {path}: {exc}"
+            )
+        except OSError as exc:
+            self.config.logger.warning(
+                f"Failed to save rejected reply for {path}: {exc}"
+            )
 
     def get_stats_summary(self) -> dict:
         """

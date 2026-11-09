@@ -176,8 +176,8 @@ class ValidationConfigProtocol(Protocol):
     """
     Settings of the model-reply sanity checks.
 
-    Thresholds and latin_text_policy come from conductor.toml [validation];
-    allowed_scripts from llm.toml [validation].
+    Thresholds, latin_text_policy, and save_rejected_replies come from
+    conductor.toml [validation]; allowed_scripts from llm.toml [validation].
     """
 
     @property
@@ -188,6 +188,8 @@ class ValidationConfigProtocol(Protocol):
     def max_length_slack(self) -> int: ...
     @property
     def latin_text_policy(self) -> str: ...
+    @property
+    def save_rejected_replies(self) -> bool: ...
     @property
     def allowed_scripts(self) -> tuple: ...
 
@@ -272,6 +274,8 @@ class ProcessorConfigProtocol(Protocol):
     @property
     def validation(self) -> ValidationConfigProtocol: ...
     @property
+    def log_dir(self) -> str: ...
+    @property
     def max_recursion_depth(self) -> int: ...
     @property
     def dedup_log_interval(self) -> int: ...
@@ -336,8 +340,6 @@ class ConfigProtocol(ProcessorConfigProtocol, CacheConfigProtocol, Protocol):
     on the narrow protocols above.
     """
 
-    @property
-    def log_dir(self) -> str: ...
     @property
     def profile_name(self) -> str: ...
     @property
