@@ -82,13 +82,30 @@ class BadReplyModel:
     process_func stub for a call the transport accepts but the content
     validator rejects - unlike FakeModel(valid=False), which simulates a
     transport/parsing failure (CallOutcome.success=False).
+
+    Records a successful usage attempt (like call_model_api) so the processor
+    can reclassify it as rejected by attempt id.
     """
 
     def __init__(self, reply: str):
         self.reply = reply
+        self.last_usage_attempt_id = None
 
     def __call__(self, value, config, runtime_config, glossary_string="", mode=None):
-        return CallOutcome(self.reply, True, None)
+        from llm_conductor.constants import (
+            OPERATION_TRANSLATION,
+            USAGE_OUTCOME_SUCCESS,
+        )
+        self.last_usage_attempt_id = config.usage_ledger.record_attempt(
+            provider="test",
+            model="stub",
+            stage=OPERATION_TRANSLATION,
+            attempt=1,
+            outcome=USAGE_OUTCOME_SUCCESS,
+            prompt_tokens=7,
+            completion_tokens=3,
+        )
+        return CallOutcome(self.reply, True, None, self.last_usage_attempt_id)
 
 
 def _run(config, data, model, mode=MODE_STYLE, glossary=None, original=None, verification=False):
@@ -505,13 +522,23 @@ def test_rejected_translation_reply_is_not_cached(make_config):
     """Content-validator rejects on translation must not write the translation cache (§4.4а)."""
     config = make_config()
     bad_reply = "RU(Hello)\nunexpected chatter"
+    model = BadReplyModel(bad_reply)
 
-    result, processor = _run(config, {"t": "Hello"}, BadReplyModel(bad_reply))
+    result, processor = _run(config, {"t": "Hello"}, model)
 
     assert result == {"t": "Hello"}
     assert processor.get_stats_summary()['failed_leaves'] == 1
     assert config.cache_manager.get_stats(OPERATION_TRANSLATION)['cache_size'] == 0
     assert config.leaf_outcomes.has_untreated_error() is True
+    # Paid HTTP success becomes rejected by attempt id (not “last success”).
+    export = config.usage_ledger.build_export()
+    by_id = {row["id"]: row for row in export["attempts"]}
+    attempt = by_id[model.last_usage_attempt_id]
+    assert attempt["outcome"] == "rejected"
+    assert attempt["prompt_tokens"] == 7
+    assert attempt["completion_tokens"] == 3
+    assert export["by_provider_model_stage"][0]["rejected_attempts"] == 1
+    assert export["by_provider_model_stage"][0]["successful_attempts"] == 0
 
 
 def test_verification_skips_translation_degraded_without_model_call(make_config):

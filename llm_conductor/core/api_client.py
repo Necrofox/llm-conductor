@@ -62,11 +62,16 @@ class CallOutcome(NamedTuple):
     text then carries the original, unmodified value. The caller
     (RecursiveProcessor._process_leaf) never sees a raw bool/str asymmetry
     between the two operation types.
+
+    usage_attempt_id identifies the UsageLedger row for a successful HTTP
+    reply so content validation can reclassify it as rejected without
+    racing other concurrent leaves.
     """
 
     text: str
     success: bool
     failure_kind: Optional[str]
+    usage_attempt_id: Optional[int] = None
 
 
 def _join_text_parts(content: Any) -> str:
@@ -733,9 +738,9 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
         completion_tokens: Optional[int] = None,
         failure_kind: Optional[str] = None,
         usage_unknown: bool = False,
-    ) -> None:
+    ) -> int:
         known = prompt_tokens is not None or completion_tokens is not None
-        config.usage_ledger.record_attempt(
+        return config.usage_ledger.record_attempt(
             provider=provider,
             model=model_for_usage,
             stage=operation_type,
@@ -747,6 +752,7 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
             usage_unknown=usage_unknown or not known,
         )
 
+    usage_attempt_id: Optional[int] = None
     try:
         response, attempts = make_request_with_retry(
             runtime_config.get('api_url', ''),
@@ -827,7 +833,7 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
                     operation_type, request_duration, failed=False,
                     prompt_tokens=prompt_tokens or 0, completion_tokens=completion_tokens or 0,
                 )
-                _record_usage(
+                usage_attempt_id = _record_usage(
                     attempts, failed=False,
                     prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                     usage_unknown=usage_unknown,
@@ -851,7 +857,9 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
         failure_kind = FAILURE_KIND_NETWORK
         # Failed attempts were already recorded inside make_request_with_retry.
 
-    return CallOutcome(result_value, failure_kind is None, failure_kind)
+    return CallOutcome(
+        result_value, failure_kind is None, failure_kind, usage_attempt_id,
+    )
 
 def translate_key(value: str, config: 'ProcessorConfigProtocol', runtime_config: dict, glossary_string: str = "",
                  mode: Optional[str] = None) -> CallOutcome:

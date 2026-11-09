@@ -91,7 +91,7 @@ After a run, the result root also gets:
 | File | Contents |
 |---|---|
 | `run_report.json` | Per-leaf stage status (`ok` / `cache_hit` / `dedup` / `degraded` / `verify_skipped` / …), hashes, aggregates |
-| `usage.json` | Token attempts by provider/model/stage (retries included); preflight separate; cache/dedup non-API counts; unknown usage marked |
+| `usage.json` | Token attempts by provider/model/stage (retries included); outcomes `success` / `rejected` / `failed`; preflight separate; cache/dedup non-API counts; unknown usage marked |
 | `leaves/<relative>.json` | Per-file sidecar used for verify-skip across stage splits |
 
 The final log banner includes explicit `untranslated` / `degraded` /
@@ -101,6 +101,8 @@ The final log banner includes explicit `untranslated` / `degraded` /
 
 API metrics count every leaf call; failures break down by kind; validator
 rejections are counted separately. `usage.json` additionally counts every
-HTTP attempt (including retries) and preflight probes. Token banners and
+HTTP attempt (including retries) and preflight probes; a reply rejected by
+content validation keeps its token totals but is marked `rejected` via the
+attempt id (safe if leaves later run concurrently). Token banners and
 stage summaries are English. Clean log-file retention depends on
 `[logging].level` (see schema / `init` comments).

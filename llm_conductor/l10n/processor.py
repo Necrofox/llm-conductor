@@ -644,6 +644,12 @@ class RecursiveProcessor:
                 outcomes.record(
                     leaf_path, operation_type, make_degraded(value, error_kind)
                 )
+                # Reclassify by attempt id so concurrent leaves cannot race
+                # on “last success” when validation rejects a paid reply.
+                if outcome.usage_attempt_id is not None:
+                    self.config.usage_ledger.mark_attempt_rejected(
+                        outcome.usage_attempt_id, failure_kind=error_kind,
+                    )
                 return value
 
             self.config.circuit_breaker.record_success(operation_type)

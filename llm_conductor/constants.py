@@ -369,6 +369,8 @@ LEAF_SKIP_REASON_TRANSLATION_DEGRADED = 'translation_degraded'
 # UsageLedger attempt outcomes and the separate preflight bucket.
 USAGE_OUTCOME_SUCCESS = 'success'
 USAGE_OUTCOME_FAILED = 'failed'
+# HTTP succeeded but content validation rejected the reply (tokens still count).
+USAGE_OUTCOME_REJECTED = 'rejected'
 USAGE_STAGE_PREFLIGHT = 'preflight'
 USAGE_NON_API_CACHE_HIT = 'cache_hit'
 USAGE_NON_API_DEDUP = 'dedup'

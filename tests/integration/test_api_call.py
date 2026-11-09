@@ -117,9 +117,11 @@ def test_verification_returns_call_outcome(make_config, http):
     config = make_config()
     http.post(OLLAMA_URL, json=ollama_reply("Проверено"))
 
-    assert verify_key("Проверить", config, config.get_verification_config()) == CallOutcome(
-        "Проверено", True, None
-    )
+    outcome = verify_key("Проверить", config, config.get_verification_config())
+    assert outcome.text == "Проверено"
+    assert outcome.success is True
+    assert outcome.failure_kind is None
+    assert outcome.usage_attempt_id is not None
     assert _metrics(config, OPERATION_VERIFICATION)['total_requests'] == 1
 
 
