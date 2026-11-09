@@ -6,6 +6,8 @@ System tests for conflict / ambiguous cases of the TOML run-manifest contract
 import pytest
 
 from llm_conductor.constants import EXIT_SUCCESS, EXIT_USAGE_ERROR
+from tests.support import write_configs
+from tests.system.harness import TRANSLATE_PROMPT, VERIFY_PROMPT, base_docs
 
 MENU = {"title": "Main menu"}
 DRAFT = {"title": "Главное меню"}
@@ -150,17 +152,15 @@ def test_draft_verify_calls_only_verification_and_keeps_inputs(
 original = "menu/main.json"
 draft = "drafts/main.ru.json"
 """)
-    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
+    assert run_main("run", "--target", "project/ui.toml", "--no-cache") == EXIT_SUCCESS
 
-    # Echo model wraps with OK(...); only verification stage should have run.
     assert project.read_json("project/menu/main.json") == MENU
     assert project.read_json("project/drafts/main.ru.json") == DRAFT
-    # No translated/ write required for draft path; redacted/final exist.
     assert project.exists(project.result("final", "menu/main.json", target="ui.toml"))
-    # All model calls should be verification (proofread marker), not translation.
-    assert model.requests  # verification called at least once
-    # Translation stage would write translated/; draft verify must not.
+    assert project.exists(project.result("redacted", "menu/main.json", target="ui.toml"))
     assert not project.exists(project.result("translated", "menu/main.json", target="ui.toml"))
+    assert model.calls_with(TRANSLATE_PROMPT) == []
+    assert model.calls_with(VERIFY_PROMPT)
 
 
 def test_draft_missing_file_exits_2_before_api(project, model, run_main, capsys):
@@ -170,6 +170,22 @@ original = "menu/main.json"
 draft = "drafts/absent.ru.json"
 """)
     assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+    assert model.requests == []
+
+
+def test_draft_plus_stage_with_bad_path_collects_both_errors(
+        project, model, run_main, capsys):
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "../outside.ru.json"
+stage = "verify"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 1:" in combined
+    assert "outside the manifest directory" in combined
+    assert "draft implies verify" in combined
     assert model.requests == []
 
 
@@ -189,3 +205,90 @@ original = "dialogs/npc/guard.json"
     assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
     assert not project.exists(project.result("translated", "menu/main.json", target="ui.toml"))
     assert project.exists(project.result("translated", "dialogs/npc/guard.json", target="ui.toml"))
+
+
+def test_per_target_llm_config_and_glossary_reach_the_api(project, model, run_main):
+    """Different originals in one manifest can use different profiles and glossaries."""
+    # Source must mention the glossary term or it is not injected into the prompt.
+    project.write_json("project/menu/main.json", {"title": "Welcome to the Guild"})
+    project.write_json("project/dialogs/npc/guard.json", {"line": "Guild ahead"})
+    for name, model_name in (("dialogs", "dlg-model"), ("mechanics", "mech-model")):
+        llm_doc, _ = base_docs(
+            translation__api__model=model_name,
+            verification__api__model=model_name,
+            meta__name=f"{name} profile",
+        )
+        write_configs(project.root / "project" / "profiles" / name, llm_doc, {})
+        (project.root / "project" / "profiles" / name / "llm.toml").rename(
+            project.root / "project" / "profiles" / f"{name}.toml"
+        )
+    project.write_json("project/glossaries/dialogs.json", {"Guild": "Гильдия"})
+    project.write_json("project/glossaries/mechanics.json", {"Guild": "Орден"})
+    project.write_text("project/ui.toml", """
+stage = "translate"
+
+[[targets]]
+original = "menu/main.json"
+llm_config = "profiles/dialogs.toml"
+glossary = "glossaries/dialogs.json"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+llm_config = "profiles/mechanics.toml"
+glossary = "glossaries/mechanics.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml", "--no-cache") == EXIT_SUCCESS
+
+    dlg = model.calls_with("Guild = Гильдия")
+    mech = model.calls_with("Guild = Орден")
+    assert dlg and {p["model"] for p in dlg} == {"dlg-model"}
+    assert mech and {p["model"] for p in mech} == {"mech-model"}
+    assert model.calls_with(VERIFY_PROMPT) == []
+
+
+def test_dual_editor_profiles_use_two_manifests(project, model, run_main):
+    """Same original+draft compared via two manifests (#14); one manifest forbids dup originals."""
+    project.write_json("project/drafts/main.ru.json", DRAFT)
+    for name, model_name in (("editor-a", "editor-a-model"), ("editor-b", "editor-b-model")):
+        llm_doc, _ = base_docs(
+            translation__api__model="unused-translate",
+            verification__api__model=model_name,
+            meta__name=name,
+        )
+        write_configs(project.root / "project" / "profiles" / name, llm_doc, {})
+        (project.root / "project" / "profiles" / name / "llm.toml").rename(
+            project.root / "project" / "profiles" / f"{name}.toml"
+        )
+        project.write_text(f"project/{name}.toml", f"""
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+llm_config = "profiles/{name}.toml"
+""")
+
+    assert run_main("run", "--target", "project/editor-a.toml", "--no-cache") == EXIT_SUCCESS
+    assert run_main("run", "--target", "project/editor-b.toml", "--no-cache") == EXIT_SUCCESS
+    assert model.calls_with(TRANSLATE_PROMPT) == []
+    assert {p["model"] for p in model.calls_with(VERIFY_PROMPT)} == {
+        "editor-a-model", "editor-b-model",
+    }
+    assert project.read_json("project/menu/main.json") == MENU
+    assert project.read_json("project/drafts/main.ru.json") == DRAFT
+
+
+def test_same_original_twice_in_one_manifest_is_rejected(project, model, run_main, capsys):
+    project.write_json("project/drafts/main.ru.json", DRAFT)
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "duplicate original" in combined
+    assert "result path collides" in combined
+    assert model.requests == []

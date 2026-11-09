@@ -91,7 +91,7 @@ def test_directory_target_is_a_target_error(resolver, tmp_path):
 
 
 def test_manifest_entries_are_not_checked_for_existence(resolver, tmp_path):
-    """A missing listed file fails alone during the run, not the whole manifest."""
+    """Parse-time resolve does not require originals on disk; shared preflight does."""
     path = _write(tmp_path / "ui.toml", """
 [[targets]]
 original = "absent.json"

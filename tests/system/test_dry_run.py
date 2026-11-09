@@ -101,3 +101,50 @@ def test_dry_run_session_flag_allowed_with_manifest(project, model, run_main, ca
     ) == EXIT_SUCCESS
     assert model.requests == []
     assert "index" in capsys.readouterr().out
+
+
+def test_dry_run_draft_structure_mismatch_exit_2(project, model, run_main, capsys):
+    project.write_json("project/drafts/main.ru.json", {"title": "x", "extra": "nope"})
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml", "--dry-run") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 1:" in combined
+    assert "extra" in combined or "structure" in combined
+    assert model.requests == []
+    assert not (project.root / "result").exists()
+
+
+def test_dry_run_collects_preflight_errors_across_targets(project, model, run_main, capsys):
+    project.write_json("project/drafts/main.ru.json", {"title": "x", "extra": "nope"})
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+
+[[targets]]
+original = "dialogs/missing.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml", "--dry-run") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 1:" in combined
+    assert "target 2:" in combined
+    assert "missing.json" in combined.replace("\\", "/")
+    assert model.requests == []
+
+
+def test_dry_run_prints_draft_and_verify_stage_in_table(project, model, run_main, capsys):
+    project.write_json("project/drafts/main.ru.json", {"title": "Главное меню"})
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml", "--dry-run") == EXIT_SUCCESS
+    out = capsys.readouterr().out
+    assert "verify" in out
+    assert "drafts" in out.replace("\\", "/") or "main.ru.json" in out
+    assert model.requests == []

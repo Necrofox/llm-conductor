@@ -66,9 +66,9 @@ via immutable `RunOverrides` on a copy of the loaded data.
 
 **Run manifest `.toml`:** job fields (`stage`, `strict`, `llm_config`,
 `glossary`, `result2target`, `cache2target`) come only from the manifest;
-passed job CLI flags → exit 2. Session flags `--verb` / `--no-cache` still
-override. Per-target fields win over run-level defaults
-(`target ?? run ?? default`).
+passed job CLI flags → exit 2. Session flags `--verb` / `--no-cache` /
+`--dry-run` still apply (`--verb` overrides manifest `verb`). Per-target
+fields win over run-level defaults (`target ?? run ?? default`).
 
 ## Related
 

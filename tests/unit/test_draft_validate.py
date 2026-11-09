@@ -32,6 +32,16 @@ def test_array_length_mismatch():
     assert any("array length mismatch" in i for i in issues)
 
 
+def test_bool_int_type_mismatch():
+    issues = compare_json_structure({"flag": True}, {"flag": 1})
+    assert any("flag: type mismatch (original bool, draft int)" in i for i in issues)
+
+
+def test_nested_missing_key_uses_full_path():
+    issues = compare_json_structure({"a": {"b": "x"}}, {"a": {}})
+    assert any("a.b: missing in draft" in i for i in issues)
+
+
 def test_format_includes_target_index():
     text = format_draft_structure_errors(2, ["root.a: missing in draft"])
     assert "target 2:" in text

@@ -91,6 +91,11 @@ path before any API call; neither file is mutated. There is **no** CLI
 `--draft` / `--original`. A lone `--target file.json` cannot take a draft —
 use a one-entry `.toml`.
 
+Comparing two editor profiles on the same `original` + `draft` needs **two
+run manifests** (or two copies of the input under different relative paths):
+duplicate `original` after normpath/normcase is rejected inside one
+manifest, so two `[[targets]]` rows cannot share the same source file.
+
 ### Migration from `.list`
 
 `.list` manifests are **removed**. Passing `--target something.list` exits 2

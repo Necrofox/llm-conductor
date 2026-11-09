@@ -355,6 +355,9 @@ class RunManifestParser:
             self._violations.append(ManifestViolation(str(e), target_index=index))
             return None
 
+        # Conflict keys off the draft *field*, not a successful path resolve,
+        # so a bad draft path still collects "draft implies verify" with stage.
+        has_draft_field = raw.draft is not None
         draft_raw = self._optional_string(raw.draft, 'draft', target_index=index)
         draft: Optional[str] = None
         if draft_raw is not None:
@@ -369,13 +372,13 @@ class RunManifestParser:
         target_llm = self._optional_string(raw.llm_config, 'llm_config', target_index=index)
         target_glossary = self._optional_string(raw.glossary, 'glossary', target_index=index)
 
-        if draft is not None and target_stage is not None:
+        if has_draft_field and target_stage is not None:
             self._violations.append(ManifestViolation(
                 "draft implies verify; omit stage on this target",
                 target_index=index,
             ))
 
-        if draft is not None:
+        if has_draft_field:
             stage = RUN_STAGE_VERIFY
         else:
             stage = target_stage if target_stage is not None else (

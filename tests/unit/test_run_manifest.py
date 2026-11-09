@@ -232,6 +232,38 @@ draft = "../outside.ru.json"
 """, file_ops, logger, match="outside the manifest directory")
 
 
+def test_draft_plus_stage_collected_even_when_draft_path_escapes(
+        base, conductor_dir, parser_deps):
+    """Conflict keys off the draft field, not a successful path resolve (#14)."""
+    file_ops, logger = parser_deps
+    with pytest.raises(TargetError) as exc:
+        _parse(base, conductor_dir, """
+[[targets]]
+original = "ui.json"
+draft = "../outside.ru.json"
+stage = "verify"
+""", file_ops, logger)
+    message = str(exc.value)
+    assert "target 1:" in message
+    assert "outside the manifest directory" in message
+    assert "draft implies verify" in message
+
+
+def test_draft_plus_stage_collected_when_draft_type_is_wrong(
+        base, conductor_dir, parser_deps):
+    file_ops, logger = parser_deps
+    with pytest.raises(TargetError) as exc:
+        _parse(base, conductor_dir, """
+[[targets]]
+original = "ui.json"
+draft = 1
+stage = "all"
+""", file_ops, logger)
+    message = str(exc.value)
+    assert "'draft' must be a string" in message
+    assert "draft implies verify" in message
+
+
 # ============================================================================
 # Schema / type / unknown keys / empty
 # ============================================================================
