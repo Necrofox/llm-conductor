@@ -52,6 +52,12 @@ With `--result2target`: `result/` next to the target.
 | `{result}/translated/{rel}` | After translation |
 | `{result}/redacted/{rel}` | After verification |
 | `{result}/final/{rel}` | Always (also partial on circuit-breaker abort) |
+| `{result}/run_report.json` | Per-leaf stage status + aggregates |
+| `{result}/usage.json` | Token attempts by provider / model / stage |
+| `{result}/leaves/{rel}.json` | Sidecar for verify-skip across stage splits |
+
+Semantics of statuses and usage outcomes:
+[pipeline.md](pipeline.md#reports).
 
 `{rel}` is the path relative to the manifest directory (or the file name for
 a single target). Inputs are never modified. An input that already lies under
