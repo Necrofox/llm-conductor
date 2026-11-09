@@ -26,6 +26,14 @@ Human documentation (English):
 It is gitignored (`/history/`). Never put that content under `doc/`.
 Project rule: [`.cursor/rules/history-local.mdc`](.cursor/rules/history-local.mdc).
 
+## GitHub Issues (kind labels)
+
+Active work is tracked in GitHub Issues. Each issue gets **exactly one** kind
+label: `bug` | `enhancement` | `feature` | `concept` | `chore`.
+Criteria and decision rules:
+[`.cursor/rules/github-issue-labels.mdc`](.cursor/rules/github-issue-labels.mdc).
+Priority stays in the issue body (or a milestone), not as labels.
+
 ## Conventions (short)
 
 1. No magic literals — use `llm_conductor/constants.py`.

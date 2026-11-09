@@ -48,4 +48,7 @@ logs). Example profiles use `*.example.toml` / `key_env`.
 - Ensure ruff / mypy / pytest are clean
 
 Active work after the first public push is tracked in **GitHub Issues**.
-Local maintainer journals live under gitignored `history/` (see AGENTS.md).
+Each issue gets exactly one kind label (`bug` / `enhancement` / `feature` /
+`concept` / `chore`) — see AGENTS.md and
+`.cursor/rules/github-issue-labels.mdc`. Local maintainer journals live under
+gitignored `history/` (see AGENTS.md).

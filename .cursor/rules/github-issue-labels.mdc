@@ -1,0 +1,43 @@
+---
+description: GitHub Issues kind labels — criteria for bug/enhancement/feature/concept/chore
+alwaysApply: true
+---
+
+# GitHub Issues — kind labels
+
+Active work is tracked in **GitHub Issues**. Each issue gets **exactly one**
+kind label from the set below. Do not invent extra kind labels; keep the set
+minimal.
+
+## Kind labels (choose one)
+
+| Label | Use when |
+|---|---|
+| `bug` | Documented or implied contract already exists; current behaviour is wrong |
+| `enhancement` | Improves an **existing** capability (observability, diagnostics, UX of a path that already works) |
+| `feature` | Adds a **new** capability or execution mode (new surface or runtime model), even if CLI flags barely change |
+| `concept` | Design hold — analyze only; do not implement until pain is confirmed |
+| `chore` | Cleanup, packaging, or non-user-facing debt |
+
+Default GitHub labels (`documentation`, `question`, `duplicate`, `wontfix`,
+`invalid`, `good first issue`, `help wanted`, `accessibility`) stay available
+for rare orthogonal cases. They are **not** a substitute for a kind label.
+
+## Decision rules
+
+1. **Capability, not “is there a new flag”.** Internal concurrency, new IO
+   adapters, new run modes → `feature` even when the operator surface is thin.
+2. **`bug` vs `enhancement`.** If README/`doc/` already promises the behaviour
+   (or the pipeline contract is broken) → `bug`. If protection already worked
+   and the ask is richer reporting/control → `enhancement`.
+3. **Priority is not a label.** Keep `P1` / `P2` in the issue body (or a
+   milestone). Do not create priority/area labels unless filtering pain is
+   real.
+4. **One kind only.** Prefer the strongest fit; do not stack `bug`+`feature`.
+5. **When creating or triaging issues**, apply the kind label immediately.
+
+## Out of scope for labels
+
+- Pilot/source tags (`pilot`, …) — note in the body instead
+- Area tags (`pipeline`, `cache`, `cli`) — add later only if the backlog needs
+  that filter
