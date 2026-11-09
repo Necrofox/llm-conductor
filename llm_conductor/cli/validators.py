@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type, Union
 
 import requests
@@ -11,6 +12,9 @@ from llm_conductor.constants import (
     HTTP_PAYMENT_REQUIRED,
     HTTP_TOO_MANY_REQUESTS,
     HTTP_UNAUTHORIZED,
+    USAGE_OUTCOME_FAILED,
+    USAGE_OUTCOME_SUCCESS,
+    USAGE_STAGE_PREFLIGHT,
     VALID_API_TYPES,
     VALID_MAX_TOKENS_PARAMS,
     VALID_MODES,
@@ -233,12 +237,40 @@ def check_api_availability(
         response = requests.post(api_url, json=test_data, headers=headers, timeout=timeout)
 
         if response.status_code == 200:
+            prompt_tokens = None
+            completion_tokens = None
+            usage_unknown = True
+            try:
+                parsed = api_client.parse_response(response.json())
+                prompt_tokens = parsed.prompt_tokens
+                completion_tokens = parsed.completion_tokens
+                usage_unknown = False
+            except (ValueError, TypeError, AttributeError, KeyError, json.JSONDecodeError):
+                pass
+            config.usage_ledger.record_attempt(
+                provider=api_type,
+                model=model_name,
+                stage=USAGE_STAGE_PREFLIGHT,
+                attempt=1,
+                outcome=USAGE_OUTCOME_SUCCESS,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                usage_unknown=usage_unknown,
+            )
             config.logger.info(
                 f"API endpoint '{api_url}' ({api_type.upper()}) is accessible, "
                 f"model '{model_name}' is available"
             )
             return True
 
+        config.usage_ledger.record_attempt(
+            provider=api_type,
+            model=model_name,
+            stage=USAGE_STAGE_PREFLIGHT,
+            attempt=1,
+            outcome=USAGE_OUTCOME_FAILED,
+            usage_unknown=True,
+        )
         detail = describe_http_error(response, api_client)
         hint = _diagnose_status_code(response.status_code)
         config.logger.error(
@@ -249,6 +281,14 @@ def check_api_availability(
 
     except requests.exceptions.InvalidHeader:
         # The exception text embeds the header value, i.e. the API key.
+        config.usage_ledger.record_attempt(
+            provider=api_type,
+            model=model_name,
+            stage=USAGE_STAGE_PREFLIGHT,
+            attempt=1,
+            outcome=USAGE_OUTCOME_FAILED,
+            usage_unknown=True,
+        )
         config.logger.error(
             f"API endpoint '{api_url}' ({api_type.upper()}): invalid HTTP header value "
             f"(check api_key for control characters)"
@@ -261,6 +301,14 @@ def check_api_availability(
         return False
 
     except requests.Timeout:
+        config.usage_ledger.record_attempt(
+            provider=api_type,
+            model=model_name,
+            stage=USAGE_STAGE_PREFLIGHT,
+            attempt=1,
+            outcome=USAGE_OUTCOME_FAILED,
+            usage_unknown=True,
+        )
         config.logger.error(
             f"API endpoint '{api_url}' ({api_type.upper()}) "
             f"timed out after {timeout} seconds"
@@ -268,6 +316,14 @@ def check_api_availability(
         return False
 
     except requests.ConnectionError:
+        config.usage_ledger.record_attempt(
+            provider=api_type,
+            model=model_name,
+            stage=USAGE_STAGE_PREFLIGHT,
+            attempt=1,
+            outcome=USAGE_OUTCOME_FAILED,
+            usage_unknown=True,
+        )
         config.logger.error(
             f"Failed to connect to API endpoint '{api_url}' ({api_type.upper()}). "
             f"Check if the server is running."
@@ -275,6 +331,14 @@ def check_api_availability(
         return False
 
     except Exception as e:  # noqa: BLE001 - preflight must return False, not crash the run
+        config.usage_ledger.record_attempt(
+            provider=api_type,
+            model=model_name,
+            stage=USAGE_STAGE_PREFLIGHT,
+            attempt=1,
+            outcome=USAGE_OUTCOME_FAILED,
+            usage_unknown=True,
+        )
         config.logger.error(
             f"Unexpected error checking API availability ({api_type.upper()}): {e}"
         )

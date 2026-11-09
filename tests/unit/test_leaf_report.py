@@ -1,0 +1,83 @@
+# -*- coding: utf-8 -*-
+"""Unit tests for LeafOutcomeRecorder and helpers."""
+from llm_conductor.constants import (
+    LEAF_SKIP_REASON_TRANSLATION_DEGRADED,
+    LEAF_STATUS_DEGRADED,
+    LEAF_STATUS_OK,
+    LEAF_STATUS_VERIFY_SKIPPED,
+    OPERATION_TRANSLATION,
+    OPERATION_VERIFICATION,
+)
+from llm_conductor.core.leaf_report import (
+    LeafOutcomeRecorder,
+    make_degraded,
+    make_ok,
+    make_verify_skipped,
+)
+
+
+def test_translation_degraded_lookup_is_outcome_based_not_string_equality():
+    recorder = LeafOutcomeRecorder()
+    recorder.set_active_file("a.json")
+    # Legal identical translation must not count as degraded.
+    recorder.record("name", OPERATION_TRANSLATION, make_ok("Necron", "Necron"))
+    assert recorder.is_translation_degraded("name") is False
+
+    recorder.record("desc", OPERATION_TRANSLATION, make_degraded("Hello", "rejected"))
+    assert recorder.is_translation_degraded("desc") is True
+
+
+def test_sidecar_round_trip_preserves_translation_degraded():
+    recorder = LeafOutcomeRecorder()
+    recorder.set_active_file("ui.json")
+    recorder.record("t", OPERATION_TRANSLATION, make_degraded("Hello", "parse"))
+
+    payload = recorder.file_sidecar_dict("ui.json")
+    loaded = LeafOutcomeRecorder()
+    loaded.merge_sidecar("ui.json", payload)
+    loaded.set_active_file("ui.json")
+
+    assert loaded.is_translation_degraded("t") is True
+    assert payload["leaves"]["t"][OPERATION_TRANSLATION]["status"] == LEAF_STATUS_DEGRADED
+
+
+def test_in_memory_stage_wins_over_sidecar_merge():
+    recorder = LeafOutcomeRecorder()
+    recorder.set_active_file("ui.json")
+    recorder.record("t", OPERATION_TRANSLATION, make_ok("a", "b"))
+
+    recorder.merge_sidecar("ui.json", {
+        "leaves": {
+            "t": {
+                OPERATION_TRANSLATION: make_degraded("a", "parse").to_dict(),
+            }
+        }
+    })
+    assert recorder.is_translation_degraded("t") is False
+
+
+def test_aggregates_and_fail_on_any():
+    recorder = LeafOutcomeRecorder()
+    recorder.set_active_file("f.json")
+    recorder.record("ok", OPERATION_TRANSLATION, make_ok("a", "b"))
+    recorder.record("bad", OPERATION_TRANSLATION, make_degraded("c", "network"))
+    recorder.record("bad", OPERATION_VERIFICATION, make_verify_skipped("c"))
+
+    totals = recorder.aggregates()
+    assert totals["untranslated"] == 1
+    assert totals["degraded"] == 1
+    assert totals["verify_skipped"] == 1
+    assert recorder.has_untreated_error() is True
+
+    report = recorder.build_run_report()
+    assert report["files"]["f.json"]["bad"][OPERATION_VERIFICATION]["status"] == LEAF_STATUS_VERIFY_SKIPPED
+    assert report["files"]["f.json"]["bad"][OPERATION_VERIFICATION]["reason"] == (
+        LEAF_SKIP_REASON_TRANSLATION_DEGRADED
+    )
+    assert report["files"]["f.json"]["ok"][OPERATION_TRANSLATION]["status"] == LEAF_STATUS_OK
+
+
+def test_note_sidecar_missing_only_once():
+    recorder = LeafOutcomeRecorder()
+    assert recorder.note_sidecar_missing() is True
+    assert recorder.note_sidecar_missing() is False

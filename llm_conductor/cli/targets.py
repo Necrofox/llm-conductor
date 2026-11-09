@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, cast
 
 from llm_conductor.constants import (
+    LEAVES_DIR_NAME,
     MANIFEST_COMMENT_PREFIX,
     MANIFEST_DRIVE_PATTERN,
     MANIFEST_EXTENSION,
@@ -264,6 +265,26 @@ class ResultLayout:
             OSError: If the directory cannot be created.
         """
         path = self.stage_path(stage, entry)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def leaves_path(self, entry: TargetEntry) -> str:
+        """
+        Path of the per-leaf status sidecar for one input file.
+
+        Sidecars live under ``leaves/`` next to translated/redacted/final so
+        a standalone ``--stage verify`` can load translation_degraded flags.
+        """
+        return os.path.join(self.root, LEAVES_DIR_NAME, entry.relative_path)
+
+    def prepare_leaves(self, entry: TargetEntry) -> str:
+        """
+        Sidecar path with its directory created.
+
+        Raises:
+            OSError: If the directory cannot be created.
+        """
+        path = self.leaves_path(entry)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return path
 

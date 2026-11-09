@@ -71,7 +71,7 @@ Only `main()` calls `sys.exit`. Priority when several problems apply:
 | `2` | Usage / target / manifest / glossary / result ownership |
 | `3` | Config invalid or `init` refused overwrite |
 | `4` | Preflight API unavailable |
-| `5` | Request or file failure ratio above `[resilience].max_failure_ratio` |
+| `5` | Request or file failure ratio above `[resilience].max_failure_ratio`, or any degraded leaf when `[resilience].fail_on_any_error` is true |
 | `6` | Consecutive-failure circuit breaker tripped |
 | `7` | Target, cache dir, or result root locked by another run |
 | `130` | Interrupted (SIGINT/SIGTERM); caches saved, results incomplete |

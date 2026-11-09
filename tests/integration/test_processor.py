@@ -13,6 +13,8 @@ import pytest
 
 from llm_conductor.constants import (
     FAILURE_KIND_PARSE,
+    LEAF_STATUS_DEGRADED,
+    LEAF_STATUS_VERIFY_SKIPPED,
     MODE_STYLE,
     MODE_VERIFICATION,
     OPERATION_TRANSLATION,
@@ -24,6 +26,7 @@ from llm_conductor.constants import (
 from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
 from llm_conductor.core.cache import build_sampling_identity
+from llm_conductor.core.leaf_report import make_degraded, make_ok
 from llm_conductor.l10n.context import KeyPath, LinguisticContext
 from llm_conductor.l10n.processor import RecursiveProcessor, process_stage_recursive
 
@@ -508,6 +511,56 @@ def test_rejected_translation_reply_is_not_cached(make_config):
     assert result == {"t": "Hello"}
     assert processor.get_stats_summary()['failed_leaves'] == 1
     assert config.cache_manager.get_stats(OPERATION_TRANSLATION)['cache_size'] == 0
+    assert config.leaf_outcomes.has_untreated_error() is True
+
+
+def test_verification_skips_translation_degraded_without_model_call(make_config):
+    """Normal verify must not run on translation_degraded (outcome-based, not ==)."""
+    config = make_config()
+    config.leaf_outcomes.set_active_file("sample.json")
+    config.leaf_outcomes.record(
+        "t", OPERATION_TRANSLATION, make_degraded("Hello", FAILURE_KIND_PARSE)
+    )
+    model = FakeModel(verification=True)
+
+    result, _ = _run(
+        config, {"t": "Hello"}, model, original={"t": "Hello"}, verification=True
+    )
+
+    assert result == {"t": "Hello"}
+    assert model.calls == []
+    sidecar = config.leaf_outcomes.file_sidecar_dict("sample.json")
+    assert sidecar["leaves"]["t"][OPERATION_VERIFICATION]["status"] == LEAF_STATUS_VERIFY_SKIPPED
+
+
+def test_identical_translation_still_verified_when_not_degraded(make_config):
+    """Names/ids that legally equal the source still get normal verification."""
+    config = make_config()
+    config.leaf_outcomes.set_active_file("sample.json")
+    config.leaf_outcomes.record(
+        "name", OPERATION_TRANSLATION, make_ok("Necron", "Necron")
+    )
+    model = FakeModel(verification=True)
+
+    result, _ = _run(
+        config, {"name": "Necron"}, model,
+        original={"name": "Necron"}, verification=True,
+    )
+
+    assert model.values == ["Necron"]
+    assert result == {"name": "RU(Necron)"}
+    assert config.leaf_outcomes.is_translation_degraded("name") is False
+
+
+def test_rejected_translation_records_degraded_status(make_config):
+    config = make_config()
+    config.leaf_outcomes.set_active_file("sample.json")
+
+    _run(config, {"t": "Hello"}, FakeModel(valid=False))
+
+    sidecar = config.leaf_outcomes.file_sidecar_dict("sample.json")
+    assert sidecar["leaves"]["t"][OPERATION_TRANSLATION]["status"] == LEAF_STATUS_DEGRADED
+    assert sidecar["leaves"]["t"][OPERATION_TRANSLATION]["error_kind"] == FAILURE_KIND_PARSE
 
 
 def test_rejected_reply_is_logged_with_a_preview(make_config):

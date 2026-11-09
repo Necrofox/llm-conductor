@@ -4,7 +4,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Tuple
 
 import requests
 
@@ -25,6 +25,8 @@ from llm_conductor.constants import (
     NON_RETRYABLE_HTTP_STATUS_CODES,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    USAGE_OUTCOME_FAILED,
+    USAGE_OUTCOME_SUCCESS,
 )
 from llm_conductor.exceptions import APIRequestError
 
@@ -39,6 +41,9 @@ class ParsedReply(NamedTuple):
     finish_reason and refusal carry signals the provider reports about
     itself - a cut-off reply or a declined request - that call_model_api()
     classifies as failures even though the HTTP call succeeded.
+
+    usage_unknown is True when the provider omitted usage fields entirely
+    (distinct from reporting zero tokens).
     """
 
     text: str
@@ -46,6 +51,7 @@ class ParsedReply(NamedTuple):
     completion_tokens: int
     finish_reason: Optional[str]
     refusal: bool
+    usage_unknown: bool = False
 
 
 class CallOutcome(NamedTuple):
@@ -196,8 +202,12 @@ class OllamaAPIClient(APIClient):
 
         result_value = _join_text_parts(message.get("content", ''))
 
-        prompt_tokens = response_json.get('prompt_eval_count', 0)
-        completion_tokens = response_json.get('eval_count', 0)
+        has_prompt = 'prompt_eval_count' in response_json
+        has_completion = 'eval_count' in response_json
+        usage_unknown = not (has_prompt or has_completion)
+
+        prompt_tokens = response_json.get('prompt_eval_count', 0) if has_prompt else 0
+        completion_tokens = response_json.get('eval_count', 0) if has_completion else 0
 
         if not isinstance(prompt_tokens, int):
             prompt_tokens = 0
@@ -208,7 +218,9 @@ class OllamaAPIClient(APIClient):
         if not isinstance(finish_reason, str):
             finish_reason = None
 
-        return ParsedReply(result_value, prompt_tokens, completion_tokens, finish_reason, False)
+        return ParsedReply(
+            result_value, prompt_tokens, completion_tokens, finish_reason, False, usage_unknown,
+        )
 
     def parse_error_detail(self, response_json: dict) -> Optional[str]:
         """Extract Ollama's error field, e.g. {"error": "model 'x' not found"}."""
@@ -307,9 +319,9 @@ class OpenAIAPIClient(APIClient):
         result_value = _join_text_parts(message.get('content', ''))
         refusal = isinstance(message.get('refusal'), str) and bool(message['refusal'])
 
-        usage = response_json.get('usage')
-        if not isinstance(usage, dict):
-            usage = {}
+        raw_usage = response_json.get('usage') if isinstance(response_json, dict) else None
+        usage_unknown = not isinstance(raw_usage, dict)
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
 
         prompt_tokens = usage.get('prompt_tokens', 0)
         completion_tokens = usage.get('completion_tokens', 0)
@@ -323,7 +335,9 @@ class OpenAIAPIClient(APIClient):
         if not isinstance(finish_reason, str):
             finish_reason = None
 
-        return ParsedReply(result_value, prompt_tokens, completion_tokens, finish_reason, refusal)
+        return ParsedReply(
+            result_value, prompt_tokens, completion_tokens, finish_reason, refusal, usage_unknown,
+        )
 
     def parse_error_detail(self, response_json: dict) -> Optional[str]:
         """
@@ -467,7 +481,10 @@ def make_request_with_retry(
     max_retries: Optional[int] = None,
     backoff_factor: Optional[int] = None,
     api_client: Optional[APIClient] = None,
-) -> requests.Response:
+    usage_provider: Optional[str] = None,
+    usage_model: Optional[str] = None,
+    usage_stage: Optional[str] = None,
+) -> Tuple[requests.Response, int]:
     """
     Execute an HTTP POST with exponential backoff on transient failures.
 
@@ -477,6 +494,10 @@ def make_request_with_retry(
     numeric Retry-After header when the provider sends one, falling back
     to the same exponential schedule otherwise. 5xx responses, timeouts
     and connection errors keep the exponential backoff.
+
+    Failed attempts are recorded on ``config.usage_ledger`` when
+    ``usage_stage`` is set; the successful final attempt is left for the
+    caller (which has parsed token usage).
 
     Args:
         url: Request URL.
@@ -488,9 +509,13 @@ def make_request_with_retry(
         backoff_factor: Exponential backoff base; falls back to a constant.
         api_client: Provider client used to decode a non-200 body into a
             human-readable error; omit to fall back to a raw body preview.
+        usage_provider: Provider id for the usage ledger (e.g. api_type).
+        usage_model: Model name for the usage ledger.
+        usage_stage: Pipeline stage / preflight bucket for the usage ledger.
 
     Returns:
-        The successful requests.Response.
+        ``(response, attempts)`` for the successful response; ``attempts``
+        is 1-based count of HTTP tries including the successful one.
 
     Raises:
         APIRequestError: After the last attempt is exhausted, or
@@ -512,6 +537,19 @@ def make_request_with_retry(
     last_exception: Optional[requests.RequestException] = None
     last_detail: Optional[str] = None
 
+    def _record_failed_attempt(attempt_index: int) -> None:
+        if usage_stage is None:
+            return
+        config.usage_ledger.record_attempt(
+            provider=usage_provider or '',
+            model=usage_model or '',
+            stage=usage_stage,
+            attempt=attempt_index,
+            outcome=USAGE_OUTCOME_FAILED,
+            failure_kind=FAILURE_KIND_NETWORK,
+            usage_unknown=True,
+        )
+
     if config.is_debug_mode:
         config.logger.debug(
             f"HTTP POST to {url}\n"
@@ -527,12 +565,13 @@ def make_request_with_retry(
             if config.is_debug_mode:
                 config.logger.debug(f"Request successful on attempt {attempt + 1}")
 
-            return response
+            return response, attempt + 1
 
         except requests.exceptions.InvalidHeader:
             # Permanent, and the exception text embeds the offending header
             # value - for Authorization that is the API key, so it must be
             # neither logged nor chained.
+            _record_failed_attempt(1)
             raise APIRequestError(
                 "Request rejected locally: invalid HTTP header value "
                 "(check api_key for control characters)"
@@ -540,12 +579,14 @@ def make_request_with_retry(
 
         except (requests.exceptions.InvalidURL, requests.exceptions.MissingSchema,
                 requests.exceptions.InvalidSchema) as e:
+            _record_failed_attempt(1)
             raise APIRequestError(f"Request rejected locally: {e}", original_exception=e) from e
 
         except requests.RequestException as e:
             last_exception = e
             status_code = e.response.status_code if e.response is not None else None
             last_detail = describe_http_error(e.response, api_client) if e.response is not None else None
+            _record_failed_attempt(attempt + 1)
 
             if status_code in NON_RETRYABLE_HTTP_STATUS_CODES:
                 config.logger.warning(
@@ -681,8 +722,33 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
             f"num_predict={sampling_params['num_predict']}"
         )
 
+    provider = str(api_type)
+    model_for_usage = str(model_name)
+
+    def _record_usage(
+        attempt: int,
+        *,
+        failed: bool,
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
+        failure_kind: Optional[str] = None,
+        usage_unknown: bool = False,
+    ) -> None:
+        known = prompt_tokens is not None or completion_tokens is not None
+        config.usage_ledger.record_attempt(
+            provider=provider,
+            model=model_for_usage,
+            stage=operation_type,
+            attempt=attempt,
+            outcome=USAGE_OUTCOME_FAILED if failed else USAGE_OUTCOME_SUCCESS,
+            prompt_tokens=prompt_tokens if known else None,
+            completion_tokens=completion_tokens if known else None,
+            failure_kind=failure_kind,
+            usage_unknown=usage_unknown or not known,
+        )
+
     try:
-        response = make_request_with_retry(
+        response, attempts = make_request_with_retry(
             runtime_config.get('api_url', ''),
             json_data,
             config,
@@ -691,6 +757,9 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
             max_retries=runtime_config.get('max_retries'),
             backoff_factor=runtime_config.get('retry_backoff_factor'),
             api_client=api_client,
+            usage_provider=provider,
+            usage_model=model_for_usage,
+            usage_stage=operation_type,
         )
 
         end_time = time.time()
@@ -699,6 +768,12 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
         try:
             response_json = response.json()
             parsed = api_client.parse_response(response_json)
+            prompt_tokens: Optional[int] = parsed.prompt_tokens
+            completion_tokens: Optional[int] = parsed.completion_tokens
+            usage_unknown = bool(parsed.usage_unknown)
+            if usage_unknown:
+                prompt_tokens = None
+                completion_tokens = None
 
             if parsed.refusal:
                 config.logger.warning("Model declined the request (refusal). Using original value.")
@@ -706,8 +781,13 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
                 failure_kind: Optional[str] = FAILURE_KIND_REFUSAL
                 config.metrics.update(
                     operation_type, request_duration, failed=True,
-                    prompt_tokens=parsed.prompt_tokens, completion_tokens=parsed.completion_tokens,
+                    prompt_tokens=prompt_tokens or 0, completion_tokens=completion_tokens or 0,
                     failure_kind=FAILURE_KIND_REFUSAL,
+                )
+                _record_usage(
+                    attempts, failed=True,
+                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                    failure_kind=FAILURE_KIND_REFUSAL, usage_unknown=usage_unknown,
                 )
             elif parsed.finish_reason == FINISH_REASON_LENGTH:
                 config.logger.warning(
@@ -718,8 +798,13 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
                 failure_kind = FAILURE_KIND_TRUNCATED
                 config.metrics.update(
                     operation_type, request_duration, failed=True,
-                    prompt_tokens=parsed.prompt_tokens, completion_tokens=parsed.completion_tokens,
+                    prompt_tokens=prompt_tokens or 0, completion_tokens=completion_tokens or 0,
                     failure_kind=FAILURE_KIND_TRUNCATED,
+                )
+                _record_usage(
+                    attempts, failed=True,
+                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                    failure_kind=FAILURE_KIND_TRUNCATED, usage_unknown=usage_unknown,
                 )
             elif not parsed.text or not isinstance(parsed.text, str):
                 config.logger.warning("API returned invalid response. Using original value.")
@@ -727,15 +812,25 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
                 failure_kind = FAILURE_KIND_PARSE
                 config.metrics.update(
                     operation_type, request_duration, failed=True,
-                    prompt_tokens=parsed.prompt_tokens, completion_tokens=parsed.completion_tokens,
+                    prompt_tokens=prompt_tokens or 0, completion_tokens=completion_tokens or 0,
                     failure_kind=FAILURE_KIND_PARSE,
+                )
+                _record_usage(
+                    attempts, failed=True,
+                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                    failure_kind=FAILURE_KIND_PARSE, usage_unknown=usage_unknown,
                 )
             else:
                 result_value = parsed.text.strip()
                 failure_kind = None
                 config.metrics.update(
                     operation_type, request_duration, failed=False,
-                    prompt_tokens=parsed.prompt_tokens, completion_tokens=parsed.completion_tokens,
+                    prompt_tokens=prompt_tokens or 0, completion_tokens=completion_tokens or 0,
+                )
+                _record_usage(
+                    attempts, failed=False,
+                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                    usage_unknown=usage_unknown,
                 )
 
         except (json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as e:
@@ -745,6 +840,7 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
             result_value = value
             failure_kind = FAILURE_KIND_PARSE
             config.metrics.update(operation_type, request_duration, failed=True, failure_kind=FAILURE_KIND_PARSE)
+            _record_usage(attempts, failed=True, failure_kind=FAILURE_KIND_PARSE, usage_unknown=True)
 
     except APIRequestError as e:
         end_time = time.time()
@@ -753,6 +849,7 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
         config.logger.warning(f"API request failed: {e}. Using original value.")
         result_value = value
         failure_kind = FAILURE_KIND_NETWORK
+        # Failed attempts were already recorded inside make_request_with_retry.
 
     return CallOutcome(result_value, failure_kind is None, failure_kind)
 

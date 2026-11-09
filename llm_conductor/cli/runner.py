@@ -38,12 +38,14 @@ from llm_conductor.constants import (
     MODE_VERIFICATION,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    RUN_REPORT_FILENAME,
     RUN_STAGE_ALL,
     RUN_STAGE_TRANSLATE,
     RUN_STAGE_VERIFY,
     STAGE_FINAL,
     STAGE_REDACTED,
     STAGE_TRANSLATED,
+    USAGE_REPORT_FILENAME,
 )
 from llm_conductor.core.api_client import translate_key, verify_key
 from llm_conductor.core.io import safe_read_file, safe_write_file
@@ -170,9 +172,12 @@ class FilePipeline:
         if not validate_input_data(source, entry.source_path, self._config):
             raise FileOperationError(f"invalid input data in {entry.source_path}")
 
+        self._config.leaf_outcomes.set_active_file(entry.relative_path)
+
         data = source
         if self._options.translates:
             data = self._run_stage(entry, STAGE_TRANSLATED, data, source, translate_key, OPERATION_TRANSLATION)
+            self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_TRANSLATION):
                 return self._abort(entry, data, OPERATION_TRANSLATION)
 
@@ -181,7 +186,9 @@ class FilePipeline:
                 translated_path = self._layout.stage_path(STAGE_TRANSLATED, entry)
                 data = self._read_json(translated_path, "translated data")
                 self._config.logger.info(f"Loaded translated data from {translated_path}")
+                self._load_leaves_sidecar(entry)
             data = self._run_stage(entry, STAGE_REDACTED, data, source, verify_key, OPERATION_VERIFICATION)
+            self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_VERIFICATION):
                 return self._abort(entry, data, OPERATION_VERIFICATION)
 
@@ -205,6 +212,40 @@ class FilePipeline:
             runtime_config=dict(self._runtime_configs[operation_type]),
             heartbeat=self._heartbeat,
         )
+
+    def _write_leaves_sidecar(self, entry: TargetEntry) -> None:
+        """Persist per-leaf stage statuses for this file under result/leaves/."""
+        path = self._layout.prepare_leaves(entry)
+        payload = self._config.leaf_outcomes.file_sidecar_dict(entry.relative_path)
+        if not safe_write_file(
+            path, payload, f"leaf status for {entry.relative_path}",
+            self._config.file_ops, self._config.logger,
+        ):
+            self._config.logger.warning(f"Failed to write leaf status sidecar {path}")
+
+    def _load_leaves_sidecar(self, entry: TargetEntry) -> None:
+        """
+        Load translation statuses so verify-only can skip translation_degraded.
+
+        Missing sidecar: verification still runs; log once that skip protection
+        is unavailable.
+        """
+        path = self._layout.leaves_path(entry)
+        if not os.path.isfile(path):
+            if self._config.leaf_outcomes.note_sidecar_missing():
+                self._config.logger.warning(
+                    "Leaf status sidecar missing; verification cannot skip "
+                    "translation_degraded leaves (status is not inferred from "
+                    "string equality)."
+                )
+            return
+        try:
+            payload = self._read_json(path, "leaf status sidecar")
+        except FileOperationError as exc:
+            self._config.logger.warning(f"Failed to load leaf status sidecar {path}: {exc}")
+            return
+        if isinstance(payload, dict):
+            self._config.leaf_outcomes.merge_sidecar(entry.relative_path, payload)
 
     def _abort(self, entry: TargetEntry, data: Any, operation_type: str) -> FileOutcome:
         """Write the partial final result of a stage stopped by the circuit breaker."""
@@ -472,6 +513,8 @@ class TargetRunner:
         if self._glossary.terms:
             config.print_glossary_cache_stats()
         config.print_token_metrics()
+        config.print_leaf_outcome_banner()
+        self._write_run_artifacts()
 
         threshold = config.resilience.max_failure_ratio
         for operation_type, ratio in config.failure_ratio_violations():
@@ -490,6 +533,44 @@ class TargetRunner:
                            f"[resilience].max_failure_ratio threshold of {threshold:.1%}")
                 config.logger.error(message)
                 status.record(EXIT_FAILURE_RATIO_EXCEEDED, message)
+
+        if config.resilience.fail_on_any_error and config.leaf_outcomes.has_untreated_error():
+            message = (
+                "one or more leaves ended degraded "
+                "([resilience].fail_on_any_error is enabled)"
+            )
+            config.logger.error(message)
+            status.record(EXIT_FAILURE_RATIO_EXCEEDED, message)
+
+    def _write_run_artifacts(self) -> None:
+        """Write run_report.json and usage.json under the result root."""
+        root = self._layout.root
+        try:
+            os.makedirs(root, exist_ok=True)
+        except OSError as exc:
+            self._config.logger.warning(f"Cannot create result root for reports: {exc}")
+            return
+
+        report_path = os.path.join(root, RUN_REPORT_FILENAME)
+        usage_path = os.path.join(root, USAGE_REPORT_FILENAME)
+        file_ops = self._config.file_ops
+        logger = self._config.logger
+
+        if safe_write_file(
+            report_path, self._config.leaf_outcomes.build_run_report(),
+            "run report", file_ops, logger,
+        ):
+            logger.info(f"Run report written to {report_path}")
+        else:
+            logger.warning(f"Failed to write run report {report_path}")
+
+        if safe_write_file(
+            usage_path, self._config.usage_ledger.build_export(),
+            "usage report", file_ops, logger,
+        ):
+            logger.info(f"Usage report written to {usage_path}")
+        else:
+            logger.warning(f"Failed to write usage report {usage_path}")
 
     def _warn_residual_cache_miss_ratio(self, operation_type: str, ratio: float) -> None:
         """

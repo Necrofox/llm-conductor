@@ -24,7 +24,9 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core.cache import GlossaryPatternCache
 from llm_conductor.core.circuit_breaker import ConsecutiveFailureTracker
+from llm_conductor.core.leaf_report import LeafOutcomeRecorder
 from llm_conductor.core.metrics import MetricsCollector
+from llm_conductor.core.usage import UsageLedger
 from llm_conductor.interfaces import Logger
 from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA, FileSchema, SectionPath
 
@@ -248,6 +250,8 @@ class StubConfig:
         self.cache_auto_save_interval = 0
         self.file_ops = None
         self.metrics = MetricsCollector()
+        self.leaf_outcomes = LeafOutcomeRecorder()
+        self.usage_ledger = UsageLedger()
         # Disabled by default (threshold 0): existing tests never trip it.
         # Tests of the breaker itself pass their own low-threshold tracker.
         self.circuit_breaker = (

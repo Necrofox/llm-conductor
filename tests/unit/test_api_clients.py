@@ -58,17 +58,19 @@ def test_ollama_payload_omits_blank_system_prompt(system_prompt):
 def test_ollama_parse_response_reads_message_and_token_counters():
     response = {"message": {"content": "Привет"}, "prompt_eval_count": 12, "eval_count": 3}
 
-    assert OllamaAPIClient().parse_response(response) == ("Привет", 12, 3, None, False)
+    assert OllamaAPIClient().parse_response(response) == ("Привет", 12, 3, None, False, False)
 
 
 def test_ollama_parse_response_defaults_missing_or_invalid_counters_to_zero():
     response = {"message": {"content": "Привет"}, "prompt_eval_count": "12"}
 
-    assert OllamaAPIClient().parse_response(response) == ("Привет", 0, 0, None, False)
+    # Invalid prompt_eval_count coerced to 0; eval_count absent → usage still
+    # considered present because one usage key was sent.
+    assert OllamaAPIClient().parse_response(response) == ("Привет", 0, 0, None, False, False)
 
 
 def test_ollama_parse_response_without_message_returns_empty_text():
-    assert OllamaAPIClient().parse_response({}) == ("", 0, 0, None, False)
+    assert OllamaAPIClient().parse_response({}) == ("", 0, 0, None, False, True)
 
 
 def test_ollama_parse_response_reads_done_reason():
@@ -139,13 +141,13 @@ def test_openai_parse_response_reads_first_choice_and_usage():
         "usage": {"prompt_tokens": 10, "completion_tokens": 2},
     }
 
-    assert OpenAIAPIClient().parse_response(response) == ("Привет", 10, 2, None, False)
+    assert OpenAIAPIClient().parse_response(response) == ("Привет", 10, 2, None, False, False)
 
 
 def test_openai_parse_response_without_usage_counts_zero_tokens():
     response = {"choices": [{"message": {"content": "Привет"}}]}
 
-    assert OpenAIAPIClient().parse_response(response) == ("Привет", 0, 0, None, False)
+    assert OpenAIAPIClient().parse_response(response) == ("Привет", 0, 0, None, False, True)
 
 
 @pytest.mark.parametrize("finish_reason", ["length", "content_filter", "stop", "tool_calls"])
@@ -257,7 +259,7 @@ def test_openai_parse_response_rejects_malformed_choices_with_value_error(respon
 def test_openai_parse_response_tolerates_null_usage():
     response = {"choices": [{"message": {"content": "ok"}}], "usage": None}
 
-    assert OpenAIAPIClient().parse_response(response) == ("ok", 0, 0, None, False)
+    assert OpenAIAPIClient().parse_response(response) == ("ok", 0, 0, None, False, True)
 
 
 @pytest.mark.parametrize("content", [None, 42, [{"type": "refusal", "refusal": "no"}]])
@@ -274,7 +276,9 @@ def test_ollama_parse_response_rejects_malformed_message_with_value_error(respon
 
 
 def test_ollama_parse_response_null_content_becomes_empty_text():
-    assert OllamaAPIClient().parse_response({"message": {"content": None}}) == ("", 0, 0, None, False)
+    assert OllamaAPIClient().parse_response({"message": {"content": None}}) == (
+        "", 0, 0, None, False, True,
+    )
 
 
 NONE_SAMPLING = {

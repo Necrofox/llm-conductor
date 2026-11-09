@@ -745,3 +745,71 @@ def test_task46_token_report_printed_once(workspace, model, run_main, capsys):
     run_main(*RUN)
 
     assert capsys.readouterr().out.count("TOKEN CONSUMPTION SUMMARY") == 1
+
+
+def test_run_writes_leaf_status_usage_reports_and_banner(workspace, model, run_main, capsys):
+    assert run_main(*RUN) == EXIT_SUCCESS
+
+    report = workspace.read_json("result/sample.json/run_report.json")
+    usage = workspace.read_json("result/sample.json/usage.json")
+    leaves = workspace.read_json("result/sample.json/leaves/sample.json")
+
+    assert report["aggregates"]["leaves"] > 0
+    assert "by_provider_model_stage" in usage
+    assert "preflight" in usage
+    assert "leaves" in leaves
+    out = capsys.readouterr().out
+    assert "LEAF OUTCOME SUMMARY" in out
+    assert "Untranslated:" in out
+    assert "Degraded:" in out
+
+
+def test_fail_on_any_error_exits_when_ratio_still_allows(workspace, model, run_main, no_sleep):
+    """
+    With max_failure_ratio=1.0 the ratio check never fires, but
+    fail_on_any_error still forces exit 5 when leaves degrade.
+    """
+    workspace.write_configs(
+        resilience__max_failure_ratio=1.0,
+        resilience__fail_on_any_error=True,
+        resilience__max_consecutive_failures=0,
+    )
+    model.fail_model_calls = True
+
+    assert run_main(*RUN) == EXIT_FAILURE_RATIO_EXCEEDED
+    assert "fail_on_any_error" in workspace.log_text()
+    assert "LEAF OUTCOME SUMMARY" in workspace.log_text()
+
+
+def test_verify_only_skips_translation_degraded_from_sidecar(workspace, model, run_main):
+    """Standalone verify loads leaves sidecar and does not call the editor for degraded leaves."""
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    leaves_path = "result/sample.json/leaves/sample.json"
+    sidecar = workspace.read_json(leaves_path)
+    leaf_path = "ui.title"
+    assert leaf_path in sidecar["leaves"]
+    sidecar["leaves"][leaf_path]["translation"] = {
+        "status": "degraded",
+        "cache_hit": False,
+        "degraded": True,
+        "error_kind": "rejected",
+        "source_hash": "abc",
+        "output_hash": "abc",
+    }
+    workspace.write_json(leaves_path, sidecar)
+
+    translated = workspace.read_json(workspace.result("translated"))
+    translated["ui"]["title"] = SAMPLE["ui"]["title"]
+    workspace.write_json(workspace.result("translated"), translated)
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") == EXIT_SUCCESS
+    verify_calls = model.model_calls[before:]
+    for payload in verify_calls:
+        assert SAMPLE["ui"]["title"] not in payload["messages"][-1]["content"]
+
+    updated = workspace.read_json(leaves_path)
+    assert updated["leaves"][leaf_path]["verification"]["status"] == "verify_skipped"
+    final = workspace.read_json(workspace.result("final"))
+    assert final["ui"]["title"] == SAMPLE["ui"]["title"]

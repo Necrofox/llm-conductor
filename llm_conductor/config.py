@@ -46,15 +46,19 @@ from llm_conductor.constants import (
 from llm_conductor.core.cache import CacheManager, GlossaryPatternCache
 from llm_conductor.core.circuit_breaker import ConsecutiveFailureTracker
 from llm_conductor.core.io import FileOperations, safe_read_file
+from llm_conductor.core.leaf_report import LeafOutcomeRecorder
 from llm_conductor.core.metrics import MetricsCollector
+from llm_conductor.core.usage import UsageLedger
 from llm_conductor.exceptions import ConfigValidationError
 from llm_conductor.interfaces import (
     CacheManagerProtocol,
     CircuitBreakerProtocol,
     FileOperationsProtocol,
     GlossaryPatternCacheProtocol,
+    LeafOutcomeRecorderProtocol,
     Logger,
     MetricsProtocol,
+    UsageLedgerProtocol,
 )
 from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA
 
@@ -502,6 +506,7 @@ class ResilienceConfig:
 
     max_consecutive_failures: int
     max_failure_ratio: float
+    fail_on_any_error: bool = False
 
     def validate(self) -> None:
         """
@@ -939,6 +944,8 @@ class ConfigFileLoader:
 
 
 MetricsFactory = Callable[[], MetricsProtocol]
+LeafOutcomesFactory = Callable[[], LeafOutcomeRecorderProtocol]
+UsageLedgerFactory = Callable[[], UsageLedgerProtocol]
 CacheManagerFactory = Callable[['Config'], CacheManagerProtocol]
 GlossaryCacheFactory = Callable[[int], GlossaryPatternCacheProtocol]
 CircuitBreakerFactory = Callable[[int], CircuitBreakerProtocol]
@@ -958,6 +965,8 @@ class Config:
         config_data: ConfigData,
         logger: Logger,
         metrics_factory: Optional[MetricsFactory] = None,
+        leaf_outcomes_factory: Optional[LeafOutcomesFactory] = None,
+        usage_ledger_factory: Optional[UsageLedgerFactory] = None,
         cache_manager_factory: Optional[CacheManagerFactory] = None,
         glossary_cache_factory: Optional[GlossaryCacheFactory] = None,
         circuit_breaker_factory: Optional[CircuitBreakerFactory] = None,
@@ -967,6 +976,10 @@ class Config:
             config_data: Validated configuration.
             logger: Logger of the run.
             metrics_factory: Builds the metrics collector; MetricsCollector by default.
+            leaf_outcomes_factory: Builds the per-leaf outcome recorder;
+                LeafOutcomeRecorder by default.
+            usage_ledger_factory: Builds the per-attempt usage ledger;
+                UsageLedger by default.
             cache_manager_factory: Builds the reply cache from this Config
                 (its logger, file_ops and cache settings are ready by then);
                 _default_cache_manager_factory by default.
@@ -981,6 +994,10 @@ class Config:
         self._started_at = time.monotonic()
 
         self.metrics: MetricsProtocol = (metrics_factory or MetricsCollector)()
+        self.leaf_outcomes: LeafOutcomeRecorderProtocol = (
+            leaf_outcomes_factory or LeafOutcomeRecorder)()
+        self.usage_ledger: UsageLedgerProtocol = (
+            usage_ledger_factory or UsageLedger)()
         self.circuit_breaker: CircuitBreakerProtocol = (
             circuit_breaker_factory or Config._default_circuit_breaker_factory)(
             config_data.resilience.max_consecutive_failures)
@@ -1315,13 +1332,27 @@ class Config:
         """
         Report the token consumption of both stages and of the whole session.
 
+        Prefer UsageLedger stage totals (every HTTP attempt, including
+        retries) when the ledger has recorded attempts; otherwise fall back
+        to MetricsCollector so older test doubles still work.
+
         The report goes through the logger only (console handler + log file).
         """
+        ledger_totals = self.usage_ledger.stage_token_totals()
         metrics_snapshot = self.metrics.get_snapshot()
         t_metrics = metrics_snapshot.get(OPERATION_TRANSLATION, {})
         v_metrics = metrics_snapshot.get(OPERATION_VERIFICATION, {})
 
-        total_consumed = t_metrics.get('total_tokens', 0) + v_metrics.get('total_tokens', 0)
+        def _stage(operation: str, metrics: dict) -> dict:
+            ledger = ledger_totals.get(operation, {})
+            if (ledger.get('prompt_tokens', 0) or ledger.get('completion_tokens', 0)
+                    or ledger.get('total_tokens', 0)):
+                return ledger
+            return metrics
+
+        t_view = _stage(OPERATION_TRANSLATION, t_metrics)
+        v_view = _stage(OPERATION_VERIFICATION, v_metrics)
+        total_consumed = t_view.get('total_tokens', 0) + v_view.get('total_tokens', 0)
 
         report = (
             "\n"
@@ -1329,20 +1360,31 @@ class Config:
             "                    TOKEN CONSUMPTION SUMMARY                      \n"
             "====================================================================\n"
             f" TRANSLATION STAGE (step 1 - {self.translation_api.api_type.upper()}):\n"
-            f"   - Prompt Tokens:     {t_metrics.get('prompt_tokens', 0):,}\n"
-            f"   - Completion Tokens: {t_metrics.get('completion_tokens', 0):,}\n"
-            f"   - Total Tokens:      {t_metrics.get('total_tokens', 0):,}\n"
+            f"   - Prompt Tokens:     {t_view.get('prompt_tokens', 0):,}\n"
+            f"   - Completion Tokens: {t_view.get('completion_tokens', 0):,}\n"
+            f"   - Total Tokens:      {t_view.get('total_tokens', 0):,}\n"
             "--------------------------------------------------------------------\n"
             f" VERIFICATION STAGE (step 2 - {self.verification_api.api_type.upper()}):\n"
-            f"   - Prompt Tokens:     {v_metrics.get('prompt_tokens', 0):,}\n"
-            f"   - Completion Tokens: {v_metrics.get('completion_tokens', 0):,}\n"
-            f"   - Total Tokens:      {v_metrics.get('total_tokens', 0):,}\n"
+            f"   - Prompt Tokens:     {v_view.get('prompt_tokens', 0):,}\n"
+            f"   - Completion Tokens: {v_view.get('completion_tokens', 0):,}\n"
+            f"   - Total Tokens:      {v_view.get('total_tokens', 0):,}\n"
             "====================================================================\n"
             f" SESSION TOTAL:         {total_consumed:,} tokens\n"
             "===================================================================="
         )
 
         self.logger.info(report)
+
+    def print_leaf_outcome_banner(self) -> None:
+        """Log untranslated / degraded / verify-skipped counts for the run."""
+        lines = self.leaf_outcomes.banner_lines()
+        box = (
+            "\n"
+            "====================================================================\n"
+            + "\n".join(lines)
+            + "\n===================================================================="
+        )
+        self.logger.info(box)
 
     @staticmethod
     def create_from_files(
