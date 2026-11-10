@@ -39,6 +39,31 @@ fail the plan. Dry-run does not acquire locks and does not report lock
 contention. There is no `plan` / `inspect` command and no `dry_run` field in
 the manifest (unknown key → exit 2).
 
+### Dry-run vs real-run failure modes
+
+Shared input preflight runs for both `run` and `run --dry-run` **before**
+locks and API probes. Cheap structural / IO faults that a real run would
+reject as unusable inputs fail here with exit `2` (same diagnostics either
+way). Dry-run still makes no model calls, takes no locks, and writes no
+results.
+
+| Fault | Stages | Dry-run | Real run |
+|---|---|---|---|
+| Manifest / path / glossary / result-ownership contract | any | exit `2` | exit `2` |
+| Unreadable or invalid original JSON | any | exit `2` | exit `2` |
+| Root JSON `null` (original) | any | exit `2` | exit `2` |
+| Draft missing / unreadable / structure or marker mismatch | verify via `draft` | exit `2` | exit `2` |
+| Verify-only without `draft`: missing / unreadable / null / structure-mismatched `translated/` | `verify` | exit `2` | exit `2` |
+| Profile / conductor load failure | any | exit `3` | exit `3` |
+| Duplicate object keys in input JSON | any | WARNING; exit `0` | WARNING; continues |
+| API unavailable | stages that call the model | not checked | exit `4` |
+| Target / cache / result lock held | any | not checked | exit `7` |
+| Leaf degradation / request or file failure ratio | processing | not applicable | exit `5` (or `6` on circuit breaker) |
+| Stale / missing leaves sidecar gates during verify | `verify` without `draft` | not checked (sidecar optional) | warning or per-file fail as documented in [pipeline.md](pipeline.md) |
+
+`translate` and `all` do not require a prior `translated/` tree (the run
+writes it). `verify` without `draft` does.
+
 ## Run manifest (`.toml`)
 
 Batch input is a **run manifest**: a `.toml` file with a non-empty
@@ -162,9 +187,10 @@ Only `main()` calls `sys.exit`. Priority when several problems apply:
 | `7` | Target, cache dir, or result root locked by another run |
 | `130` | Interrupted (SIGINT/SIGTERM); caches saved, results incomplete |
 
-Unreadable or invalid input JSON (and draft structure faults) fail shared
-preflight with usage error `2` before inference. A file that parses but then
-fails during processing still counts as a failed file (ratio may yield `5`).
+Unreadable or invalid input JSON, root `null`, draft faults, and verify-only
+missing/`null`/structure-mismatched `translated/` fail shared preflight with
+usage error `2` before inference. A file that passes preflight but then fails
+during processing still counts as a failed file (ratio may yield `5`).
 
 **Warm cache + exit 5:** rejected replies are not cached. A rerun that only
 hits residual misses can exceed the failure ratio even if an earlier full

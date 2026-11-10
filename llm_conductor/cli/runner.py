@@ -516,8 +516,8 @@ class TargetRunner:
         Raises:
             ConfigValidationError: If a runtime configuration is invalid.
         """
-        # Original/draft JSON preflight runs in cli.main._execute_run before
-        # locks (and before --dry-run) via validate_target_inputs.
+        # Shared input preflight (original/draft/null/verify-only translated/)
+        # runs in cli.main._execute_run before locks (and before --dry-run).
         heartbeat.start()
 
         if not self._endpoints_available():

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-System tests for ``run --dry-run`` (GH-9).
+System tests for ``run --dry-run`` (GH-9, GH-19, GH-21).
 """
 import pytest
 
@@ -163,4 +163,41 @@ draft = "drafts/main.ru.json"
     out = capsys.readouterr().out
     assert "verify" in out
     assert "drafts" in out.replace("\\", "/") or "main.ru.json" in out
+    assert model.requests == []
+
+
+def test_dry_run_root_null_exit_2(project, model, run_main, capsys):
+    """Root JSON null fails shared preflight (GH-19 / GH-21 scenario A)."""
+    project.write_text("project/menu/null.json", "null")
+    assert run_main(
+        "run", "--target", "project/menu/null.json", "--dry-run",
+    ) == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "null data" in combined
+    assert model.requests == []
+    assert not (project.root / "result").exists()
+
+
+def test_dry_run_verify_without_translated_exit_2(project, model, run_main, capsys):
+    """Verify-only without translated/ fails dry-run (GH-19 / GH-21 scenario B)."""
+    assert run_main(
+        "run", "--target", "project/menu/main.json", "--stage", "verify", "--dry-run",
+    ) == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "Input validation failed" in combined or "translated data" in combined
+    assert model.requests == []
+    assert not (project.root / "result").exists()
+
+
+def test_dry_run_verify_with_translated_exit_0(project, model, run_main, capsys):
+    """Verify-only dry-run succeeds when translated/ is present and matches."""
+    project.write_json(
+        project.result("translated", "main.json", target="main.json"),
+        {"title": "Главное меню"},
+    )
+    code = run_main(
+        "run", "--target", "project/menu/main.json", "--stage", "verify", "--dry-run",
+    )
+    assert code == EXIT_SUCCESS
+    assert "verify" in capsys.readouterr().out
     assert model.requests == []

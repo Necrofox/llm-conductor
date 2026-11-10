@@ -263,7 +263,10 @@ def _execute_run(config: Config, args: argparse.Namespace,
     options = RunOptions(stage=stage, strict=args.strict)
 
     # Shared input preflight before locks / API (and before dry-run table).
-    validate_target_inputs(target, config.file_ops, config.logger)
+    validate_target_inputs(
+        target, config.file_ops, config.logger,
+        layout=layout, default_options=options,
+    )
 
     if args.dry_run:
         return run_dry_run(

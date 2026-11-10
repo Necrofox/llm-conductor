@@ -99,9 +99,13 @@ def test_stage_verify_reads_the_translated_result_of_an_earlier_run(workspace, m
     assert model.calls_with(TRANSLATE_PROMPT) == []
 
 
-def test_stage_verify_without_translated_result_fails_the_file(workspace, model, run_main):
-    assert run_main(*RUN, "--stage", "verify") == EXIT_FAILURE_RATIO_EXCEEDED
+def test_stage_verify_without_translated_result_fails_the_file(
+        workspace, model, run_main, capsys):
+    """Verify-only without translated/ fails shared preflight (exit 2)."""
+    assert run_main(*RUN, "--stage", "verify") == EXIT_USAGE_ERROR
 
+    combined = "".join(capsys.readouterr())
+    assert "Input validation failed" in combined or "translated data" in combined
     assert not workspace.exists(workspace.result("final"))
     assert model.model_calls == []
 
@@ -425,9 +429,13 @@ def test_json_target_under_shared_result_root_is_rejected(
 
 @pytest.mark.parametrize("max_failure_ratio, expected", [(0.5, EXIT_SUCCESS), (0.0, EXIT_FAILURE_RATIO_EXCEEDED)])
 def test_failed_file_does_not_stop_the_others(project, model, run_main, max_failure_ratio, expected):
-    """One of two files is JSON null (fails per-file validation after shared preflight)."""
+    """One of two files fails mid-run (blocked stage dir); the other still finishes."""
     project.write_configs(resilience__max_failure_ratio=max_failure_ratio)
-    project.write_text("project/menu/main.json", "null")
+    # Relative path menu/main.json needs result/.../translated/menu/ as a directory.
+    # A plain file at that path makes prepare() raise OSError → FileStatus.FAILED.
+    blocker = project.root / "result" / "ui.toml" / "translated" / "menu"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("not-a-directory", encoding="utf-8")
 
     assert run_main("run", "--target", "project/ui.toml") == expected
 
@@ -679,6 +687,17 @@ def test_broken_input_file_is_a_usage_error(workspace, model, run_main, capsys):
     combined = "".join(capsys.readouterr())
     assert "invalid JSON" in combined or "Input validation failed" in combined
     assert model.model_calls == []
+
+
+def test_root_null_input_is_a_usage_error(workspace, model, run_main, capsys):
+    """Root JSON null fails shared preflight with exit 2 (GH-19 / GH-21)."""
+    (workspace.root / "sample.json").write_text("null", encoding="utf-8")
+
+    assert run_main(*RUN) == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "null data" in combined
+    assert model.model_calls == []
+    assert not workspace.exists(workspace.result("final"))
 
 
 def test_check_validates_both_files_without_side_effects(workspace, model, run_main, capsys):
