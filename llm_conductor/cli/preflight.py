@@ -15,23 +15,11 @@ from llm_conductor.cli.draft_validate import (
     format_draft_marker_errors,
     format_draft_structure_errors,
 )
-from llm_conductor.cli.runner import RunOptions
-from llm_conductor.cli.targets import ResultLayout, RunTarget, TargetEntry
-from llm_conductor.constants import STAGE_TRANSLATED
+from llm_conductor.cli.targets import ResultLayout, RunTarget
+from llm_conductor.constants import RUN_STAGE_VERIFY, STAGE_TRANSLATED
 from llm_conductor.core.io import safe_read_file
 from llm_conductor.exceptions import FileOperationError, TargetError
 from llm_conductor.interfaces import FileOperationsProtocol, Logger
-
-
-def _options_for(
-        entry: TargetEntry,
-        target: RunTarget,
-        default_options: RunOptions,
-) -> RunOptions:
-    """Effective stage/strict for one entry (manifest row or CLI default)."""
-    if target.is_manifest:
-        return RunOptions.for_entry(entry)
-    return default_options
 
 
 def _reject_null_root(index: int, path: str, data: Any, label: str) -> Optional[str]:
@@ -47,7 +35,7 @@ def validate_target_inputs(
         logger: Logger,
         *,
         layout: ResultLayout,
-        default_options: RunOptions,
+        default_stage: str,
 ) -> None:
     """
     Ensure every input file is usable for the selected stage(s).
@@ -63,7 +51,7 @@ def validate_target_inputs(
         file_ops: File operations for reads.
         logger: Logger of the run.
         layout: Result paths (needed for verify-only ``translated/``).
-        default_options: Stage/strict for a lone JSON target (CLI).
+        default_stage: Stage for a lone JSON target (CLI).
 
     Raises:
         TargetError: Collecting all IO / JSON / null / draft / translated
@@ -117,10 +105,8 @@ def validate_target_inputs(
             blocks.append(format_draft_marker_errors(entry.index, marker_issues))
 
     for entry in target.entries:
-        options = _options_for(entry, target, default_options)
-        if not (options.verifies and not options.translates):
-            continue
-        if entry.draft_path is not None:
+        stage = entry.stage if target.is_manifest else default_stage
+        if stage != RUN_STAGE_VERIFY or entry.draft_path is not None:
             continue
         if entry.source_path not in originals:
             continue

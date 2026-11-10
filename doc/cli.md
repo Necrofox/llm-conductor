@@ -33,19 +33,20 @@ layout as the frozen exe). After `pip install`: `llm-conductor …`.
 `run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary/draft
 errors, exit `3` when a resolved profile/config fails to load (same as a real
 `run`). On success it prints an effective-settings table (index, original,
-draft, stage, strict, llm_config, glossary, result paths). Duplicate object
-keys in input JSON emit one WARNING per file (last value wins) and do **not**
-fail the plan. Dry-run does not acquire locks and does not report lock
-contention. There is no `plan` / `inspect` command and no `dry_run` field in
-the manifest (unknown key → exit 2).
+draft, stage, strict, llm_config, glossary, result paths). During dry-run,
+duplicate object keys in originals and drafts emit one WARNING per file
+(last value wins) and do **not** fail the plan. Dry-run does not acquire locks
+or report lock contention. There is no `plan` / `inspect` command and no
+`dry_run` field in the manifest (unknown key → exit 2).
 
 ### Dry-run vs real-run failure modes
 
-Shared input preflight runs for both `run` and `run --dry-run` **before**
-locks and API probes. Cheap structural / IO faults that a real run would
-reject as unusable inputs fail here with exit `2` (same diagnostics either
-way). Dry-run still makes no model calls, takes no locks, and writes no
-results.
+Both modes check any existing result owner marker and run the same input
+preflight. Dry-run reads the marker without claiming ownership. A real run
+takes its locks first, then validates the inputs before claiming an unowned
+result directory or probing the API. A real run can create lock files even
+when input preflight fails. Dry-run makes no model calls, takes no locks, and
+writes no results.
 
 | Fault | Stages | Dry-run | Real run |
 |---|---|---|---|
@@ -55,10 +56,10 @@ results.
 | Draft missing / unreadable / structure or marker mismatch | verify via `draft` | exit `2` | exit `2` |
 | Verify-only without `draft`: missing / unreadable / null / structure-mismatched `translated/` | `verify` | exit `2` | exit `2` |
 | Profile / conductor load failure | any | exit `3` | exit `3` |
-| Duplicate object keys in input JSON | any | WARNING; exit `0` | WARNING; continues |
+| Duplicate object keys in an original or draft | any | WARNING; exit `0` | Last value wins; continues |
 | API unavailable | stages that call the model | not checked | exit `4` |
 | Target / cache / result lock held | any | not checked | exit `7` |
-| Leaf degradation / request or file failure ratio | processing | not applicable | exit `5` (or `6` on circuit breaker) |
+| Leaf degradation / request or file failure ratio | processing | not applicable | exit `5` when a failure ratio exceeds its threshold or `fail_on_any_error` is enabled and a leaf is degraded (exit `6` on circuit breaker) |
 | Stale / missing leaves sidecar gates during verify | `verify` without `draft` | not checked (sidecar optional) | warning or per-file fail as documented in [pipeline.md](pipeline.md) |
 
 `translate` and `all` do not require a prior `translated/` tree (the run
@@ -172,8 +173,10 @@ target from another path cannot silently overwrite.
 
 ## Exit codes
 
-Only `main()` calls `sys.exit`. Priority when several problems apply:
-`1 > 3 > 2 > 4 > 7 > 6 > 5 > 130 > 0`.
+Only `main()` calls `sys.exit`. When a run records multiple exit codes, it
+uses this priority order.
+
+`1 > 3 > 2 > 4 > 7 > 6 > 5 > 130 > 0`
 
 | Code | When |
 |---|---|

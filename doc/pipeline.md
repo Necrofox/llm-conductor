@@ -84,10 +84,10 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
     same manifest.
   - translation `source_hash` present and unequal to the hash of the current
     original leaf → `degraded` with `error_kind=source_stale`; restore the
-    current original (no editor call). Counts toward failure ratio /
-    `fail_on_any_error`. Evaluated before the blank / format-only skip, so a
-    stale empty or placeholder-only draft cannot keep the old value in
-    `final/`.
+    current original (no editor call). With `fail_on_any_error` enabled,
+    this yields exit `5`. The request and file failure ratios exclude it.
+    The check runs before the blank / format-only skip, so `final/` gets
+    the current original even when the old draft is blank or placeholder-only.
   - Verify-only from `translated/`: JSON structure (keys, types, array lengths)
     must match the current original before any editor call or `final/` write.
     Text-only leaf changes at the same path stay on the `source_stale` path.

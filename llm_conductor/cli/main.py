@@ -262,13 +262,11 @@ def _execute_run(config: Config, args: argparse.Namespace,
     stage = args.stage if args.stage is not None else RUN_STAGE_ALL
     options = RunOptions(stage=stage, strict=args.strict)
 
-    # Shared input preflight before locks / API (and before dry-run table).
-    validate_target_inputs(
-        target, config.file_ops, config.logger,
-        layout=layout, default_options=options,
-    )
-
     if args.dry_run:
+        layout.check_owner(target.path, config.file_ops, config.logger)
+        validate_target_inputs(
+            target, config.file_ops, config.logger, layout=layout, default_stage=stage,
+        )
         return run_dry_run(
             config, target, layout, profiles, glossaries,
             default_options=options, bootstrap_llm=locations.llm_path,

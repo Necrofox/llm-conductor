@@ -22,6 +22,7 @@ from llm_conductor.constants import (
     EXIT_TARGET_LOCKED,
     EXIT_USAGE_ERROR,
     LEAF_REPORT_SCHEMA_VERSION,
+    RESULT_OWNER_FILENAME,
 )
 from llm_conductor.core import shutdown
 from llm_conductor.core.locking import FileLock
@@ -99,15 +100,24 @@ def test_stage_verify_reads_the_translated_result_of_an_earlier_run(workspace, m
     assert model.calls_with(TRANSLATE_PROMPT) == []
 
 
-def test_stage_verify_without_translated_result_fails_the_file(
-        workspace, model, run_main, capsys):
-    """Verify-only without translated/ fails shared preflight (exit 2)."""
-    assert run_main(*RUN, "--stage", "verify") == EXIT_USAGE_ERROR
+@pytest.mark.parametrize("mode", [(), ("--dry-run",)], ids=["real", "dry-run"])
+@pytest.mark.parametrize(
+    "translated, diagnostic",
+    [(None, "not found"), ("null", "contains null data"), ("{broken", "contains invalid JSON")],
+    ids=["missing", "null", "invalid-json"],
+)
+def test_verify_rejects_unusable_translated_result(
+        workspace, model, run_main, capsys, mode, translated, diagnostic):
+    if translated is not None:
+        workspace.write_text(workspace.result("translated"), translated)
 
+    assert run_main(*RUN, "--stage", "verify", *mode) == EXIT_USAGE_ERROR
     combined = "".join(capsys.readouterr())
-    assert "Input validation failed" in combined or "translated data" in combined
+    assert "target 1:" in combined and diagnostic in combined
+    assert "translated" in combined
     assert not workspace.exists(workspace.result("final"))
-    assert model.model_calls == []
+    assert not workspace.exists(f"result/sample.json/{RESULT_OWNER_FILENAME}")
+    assert model.requests == []
 
 
 @pytest.mark.parametrize("flag, prompt", [("--strict", STRICT_PROMPT), (None, TRANSLATE_PROMPT)])
@@ -555,9 +565,10 @@ def test_unusable_explicit_glossary_is_a_usage_error(workspace, model, run_main,
 # Locks
 # ============================================================================
 
-def test_locked_target_exits_with_the_locked_code(workspace, model, run_main, capsys):
+@pytest.mark.parametrize("stage", ["all", "verify"])
+def test_locked_target_exits_with_the_locked_code(workspace, model, run_main, capsys, stage):
     with FileLock(str(workspace.root / "sample.json")):
-        assert run_main(*RUN) == EXIT_TARGET_LOCKED
+        assert run_main(*RUN, "--stage", stage) == EXIT_TARGET_LOCKED
 
     assert "sample.json is locked by another run" in capsys.readouterr().out
     assert model.requests == []
@@ -572,9 +583,10 @@ def test_locked_cache_exits_with_the_locked_code(workspace, model, run_main, cap
     assert model.requests == []
 
 
-def test_locked_result_root_exits_with_the_locked_code(workspace, model, run_main, capsys):
+@pytest.mark.parametrize("stage", ["all", "verify"])
+def test_locked_result_root_exits_with_the_locked_code(workspace, model, run_main, capsys, stage):
     with FileLock(str(workspace.root / "result" / "sample.json" / CACHE_LOCK_FILENAME), create=True):
-        assert run_main(*RUN) == EXIT_TARGET_LOCKED
+        assert run_main(*RUN, "--stage", stage) == EXIT_TARGET_LOCKED
 
     assert f"{CACHE_LOCK_FILENAME} is locked by another run" in capsys.readouterr().out
     assert model.requests == []
@@ -686,7 +698,7 @@ def test_broken_input_file_is_a_usage_error(workspace, model, run_main, capsys):
     assert run_main(*RUN) == EXIT_USAGE_ERROR
     combined = "".join(capsys.readouterr())
     assert "invalid JSON" in combined or "Input validation failed" in combined
-    assert model.model_calls == []
+    assert model.requests == []
 
 
 def test_root_null_input_is_a_usage_error(workspace, model, run_main, capsys):
@@ -696,7 +708,7 @@ def test_root_null_input_is_a_usage_error(workspace, model, run_main, capsys):
     assert run_main(*RUN) == EXIT_USAGE_ERROR
     combined = "".join(capsys.readouterr())
     assert "null data" in combined
-    assert model.model_calls == []
+    assert model.requests == []
     assert not workspace.exists(workspace.result("final"))
 
 
@@ -956,33 +968,40 @@ def test_verify_restores_original_when_source_hash_is_stale(workspace, model, ru
 
 
 @pytest.mark.parametrize(
+    "fail_on_any_error, expected",
+    [(True, EXIT_FAILURE_RATIO_EXCEEDED), (False, EXIT_SUCCESS)],
+    ids=["fail-on-any-error", "request-and-file-ratios-only"],
+)
+@pytest.mark.parametrize(
     "translated_value, mutated_original",
     [
         ("", "New text"),
+        (" \t", "New text"),
         ("{0}", "New text {0}"),
     ],
-    ids=["blank", "format-only"],
+    ids=["blank", "whitespace", "format-only"],
 )
 def test_verify_detects_stale_source_for_blank_or_format_only_leaf(
-        workspace, model, run_main, translated_value, mutated_original):
+        workspace, model, run_main, translated_value, mutated_original,
+        fail_on_any_error, expected):
     """#28: blank/format-only draft must not skip the source_hash check."""
     from llm_conductor.constants import LEAF_ERROR_KIND_SOURCE_STALE
     from llm_conductor.l10n.context import KeyPath
 
     workspace.write_configs(
-        resilience__max_failure_ratio=1.0,
-        resilience__fail_on_any_error=True,
+        resilience__max_failure_ratio=0.0,
+        resilience__fail_on_any_error=fail_on_any_error,
         preflight__check_availability=False,
     )
     workspace.write_json("sample.json", {"line": translated_value})
     assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
-    assert model.model_calls == []
+    assert model.requests == []
 
     workspace.write_json("sample.json", {"line": mutated_original})
-    before = len(model.model_calls)
-    assert run_main(*RUN, "--stage", "verify") == EXIT_FAILURE_RATIO_EXCEEDED
-    assert model.model_calls[before:] == []
-    assert "fail_on_any_error" in workspace.log_text()
+    assert run_main(*RUN, "--stage", "verify") == expected
+    assert model.requests == []
+    if fail_on_any_error:
+        assert "fail_on_any_error" in workspace.log_text()
 
     leaf_path = KeyPath(("line",)).report_key()
     report = workspace.read_json("result/sample.json/run_report.json")
@@ -1148,6 +1167,7 @@ def _drop_meta(data):
     return {key: value for key, value in data.items() if key != "meta"}
 
 
+@pytest.mark.parametrize("mode", [(), ("--dry-run",)], ids=["real", "dry-run"])
 @pytest.mark.parametrize(
     "mutate,fragment",
     [
@@ -1159,7 +1179,7 @@ def _drop_meta(data):
     ids=["added_key", "removed_key", "type_change", "array_length"],
 )
 def test_verify_rejects_stale_translated_structure(
-        workspace, model, run_main, mutate, fragment,
+        workspace, model, run_main, capsys, mode, mutate, fragment,
 ):
     """Structural drift between original and translated/ stops verify before final."""
     assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
@@ -1170,11 +1190,10 @@ def test_verify_rejects_stale_translated_structure(
     original = workspace.read_json("sample.json")
     workspace.write_json("sample.json", mutate(original))
 
-    before = len(model.model_calls)
-    assert run_main(*RUN, "--stage", "verify") != EXIT_SUCCESS
-    assert model.model_calls[before:] == []
+    model.requests.clear()
+    assert run_main(*RUN, "--stage", "verify", *mode) == EXIT_USAGE_ERROR
+    assert model.requests == []
     assert workspace.read_json(workspace.result("final")) == sentinel
-    log = workspace.log_text()
-    assert "structure" in log
-    assert fragment in log
-    assert "sample.json" in log
+    combined = "".join(capsys.readouterr())
+    assert "translated structure does not match original" in combined
+    assert fragment in combined
