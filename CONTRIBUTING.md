@@ -21,6 +21,11 @@ pytest -m unit         # or integration | system
 
 Live inference (`pytest -m live`) is opt-in — only with a prepared endpoint.
 Mutation shield (when touching critical paths): `python tools/mutation_check.py`.
+`KILLED` means a test detected the changed behavior; `SURVIVED` means it passed.
+`HARNESS_ERROR` means pytest could not provide a valid verdict (collection,
+setup/teardown, import, timeout, or runner failure). Fix the harness before
+interpreting mutation coverage. Harness errors fail the command even for an
+equivalent mutant and never count as kills.
 
 ## Conventions
 
