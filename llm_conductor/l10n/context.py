@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import re
 import threading
 from collections import OrderedDict
@@ -58,6 +59,16 @@ class KeyPath:
                     parts.append(segment)
 
         return ''.join(parts)
+
+    def report_key(self) -> str:
+        """
+        Canonical leaf identity for sidecars and ``run_report.json``.
+
+        Encodes segments as a compact JSON array so a literal object key
+        ``"a.b"`` (``["a.b"]``) cannot collide with nested ``a → b``
+        (``["a","b"]``). Human logs keep using ``str(self)``.
+        """
+        return json.dumps(list(self.segments), separators=(',', ':'), ensure_ascii=False)
 
     def __repr__(self) -> str:
         """Debug representation."""

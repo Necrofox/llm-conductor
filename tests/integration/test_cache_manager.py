@@ -36,6 +36,7 @@ SAMPLE_IDENTITY = build_sampling_identity(SAMPLE_RUNTIME)
 
 KEY_PARTS = {
     'operation_type': T,
+    'api_url': "http://llm.test/api/chat",
     'model': "qwen",
     'system_prompt': "SYS",
     'enhanced_prompt': "Translate: ",
@@ -46,6 +47,7 @@ KEY_PARTS = {
 
 FINGERPRINT_PARTS = {
     'operation_type': T,
+    'api_url': KEY_PARTS['api_url'],
     'model': "qwen",
     'system_prompt': "SYS",
     'prompt_template': "Translate: ",
@@ -105,6 +107,12 @@ def test_every_request_component_changes_the_key(manager, component):
     assert manager.create_cache_key(**changed) != manager.create_cache_key(**KEY_PARTS)
 
 
+def test_allowed_scripts_separate_cached_replies(manager):
+    key = manager.create_cache_key(**KEY_PARTS, allowed_scripts=("cyrillic", "latin"))
+    assert key == manager.create_cache_key(**KEY_PARTS, allowed_scripts=("latin", "cyrillic"))
+    assert key != manager.create_cache_key(**KEY_PARTS, allowed_scripts=("latin",))
+
+
 @pytest.mark.parametrize("field_name,runtime_key", CACHE_SAMPLING_IDENTITY_FIELDS)
 def test_each_sampling_field_changes_the_key(manager, field_name, runtime_key):
     """Issue #12: changing any generation-affecting param must miss the cache."""
@@ -138,6 +146,7 @@ def test_fingerprints_cover_all_components_with_fixed_length(manager):
     assert set(fingerprints) == {
         'cache_key_version', 'operation_type', 'model', 'system_prompt',
         'prompt_template', 'hints', 'glossary', 'mode', 'sampling',
+        'api_url', 'allowed_scripts',
     }
     assert {len(fp) for fp in fingerprints.values()} == {12}
 

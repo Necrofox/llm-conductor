@@ -61,11 +61,14 @@ not cwd. Edit `llm.toml` for your endpoint and prompts; set
 ```bash
 llm-conductor run --target path/to/strings.json
 llm-conductor run --target path/to/strings.json --stage translate --strict
-llm-conductor run --target project/ui.list --result2target
+llm-conductor run --target project/ui.toml
+llm-conductor run --target project/ui.toml --dry-run   # same resolver; no API
 ```
 
+Batch runs use a `.toml` run manifest (`[[targets]]`); `.list` is removed.
 Results land under `result/<target-name>/` (`translated/`, `redacted/`,
-`final/`) unless `--result2target`. See
+`final/`) unless `result2target` (CLI for a lone JSON, or a field in the
+manifest). See
 [doc/cli.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/cli.md).
 
 ### Ollama vs OpenAI-compatible

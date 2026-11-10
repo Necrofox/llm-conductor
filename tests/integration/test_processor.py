@@ -464,6 +464,7 @@ def _key_for_leaf(config, value, path=("t",), mode=MODE_STYLE):
     return config.cache_manager.create_cache_key(
         OPERATION_TRANSLATION, runtime['model'], runtime['system_prompt'], prompt, mode, value,
         build_sampling_identity(runtime),
+        api_url=runtime['api_url'], allowed_scripts=runtime['allowed_scripts'],
     )
 
 
@@ -545,8 +546,9 @@ def test_verification_skips_translation_degraded_without_model_call(make_config)
     """Normal verify must not run on translation_degraded (outcome-based, not ==)."""
     config = make_config()
     config.leaf_outcomes.set_active_file("sample.json")
+    leaf_path = KeyPath(("t",)).report_key()
     config.leaf_outcomes.record(
-        "t", OPERATION_TRANSLATION, make_degraded("Hello", FAILURE_KIND_PARSE)
+        leaf_path, OPERATION_TRANSLATION, make_degraded("Hello", FAILURE_KIND_PARSE)
     )
     model = FakeModel(verification=True)
 
@@ -557,15 +559,16 @@ def test_verification_skips_translation_degraded_without_model_call(make_config)
     assert result == {"t": "Hello"}
     assert model.calls == []
     sidecar = config.leaf_outcomes.file_sidecar_dict("sample.json")
-    assert sidecar["leaves"]["t"][OPERATION_VERIFICATION]["status"] == LEAF_STATUS_VERIFY_SKIPPED
+    assert sidecar["leaves"][leaf_path][OPERATION_VERIFICATION]["status"] == LEAF_STATUS_VERIFY_SKIPPED
 
 
 def test_identical_translation_still_verified_when_not_degraded(make_config):
     """Names/ids that legally equal the source still get normal verification."""
     config = make_config()
     config.leaf_outcomes.set_active_file("sample.json")
+    leaf_path = KeyPath(("name",)).report_key()
     config.leaf_outcomes.record(
-        "name", OPERATION_TRANSLATION, make_ok("Necron", "Necron")
+        leaf_path, OPERATION_TRANSLATION, make_ok("Necron", "Necron")
     )
     model = FakeModel(verification=True)
 
@@ -576,18 +579,19 @@ def test_identical_translation_still_verified_when_not_degraded(make_config):
 
     assert model.values == ["Necron"]
     assert result == {"name": "RU(Necron)"}
-    assert config.leaf_outcomes.is_translation_degraded("name") is False
+    assert config.leaf_outcomes.is_translation_degraded(leaf_path) is False
 
 
 def test_rejected_translation_records_degraded_status(make_config):
     config = make_config()
     config.leaf_outcomes.set_active_file("sample.json")
+    leaf_path = KeyPath(("t",)).report_key()
 
     _run(config, {"t": "Hello"}, FakeModel(valid=False))
 
     sidecar = config.leaf_outcomes.file_sidecar_dict("sample.json")
-    assert sidecar["leaves"]["t"][OPERATION_TRANSLATION]["status"] == LEAF_STATUS_DEGRADED
-    assert sidecar["leaves"]["t"][OPERATION_TRANSLATION]["error_kind"] == FAILURE_KIND_PARSE
+    assert sidecar["leaves"][leaf_path][OPERATION_TRANSLATION]["status"] == LEAF_STATUS_DEGRADED
+    assert sidecar["leaves"][leaf_path][OPERATION_TRANSLATION]["error_kind"] == FAILURE_KIND_PARSE
 
 
 def test_rejected_reply_is_logged_with_a_preview(make_config):

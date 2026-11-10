@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Mapping, Optional, Set
+from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
 
 from llm_conductor.constants import (
     CACHE_FINGERPRINT_LENGTH,
@@ -786,13 +786,15 @@ class CacheManager:
 
     def create_cache_key(self, operation_type: str, model: str, system_prompt: str,
                           enhanced_prompt: str, mode: str, value: str,
-                          sampling_identity: str) -> str:
+                          sampling_identity: str, *, api_url: str = '',
+                          allowed_scripts: Tuple[str, ...] = ()) -> str:
         """
         Build an MD5 cache key from the full request sent to the model.
 
         The key is MD5 of the canonical JSON
         ``[CACHE_KEY_VERSION, operation_type, model, system_prompt,
-        enhanced_prompt, mode, value, sampling_identity]``.
+        enhanced_prompt, mode, value, sampling_identity, api_url,
+        sorted_allowed_scripts]``.
         ``enhanced_prompt`` is the already assembled prompt (linguistic hints
         and glossary included — see RecursiveProcessor._build_enhanced_prompt)
         and is hashed whole, not by component, so any future prompt ingredient
@@ -810,6 +812,8 @@ class CacheManager:
             value: Leaf source value.
             sampling_identity: Canonical sampling JSON from
                 ``build_sampling_identity``.
+            api_url: Endpoint that generates the reply.
+            allowed_scripts: Writing systems allowed by the active profile.
 
         Returns:
             32-character MD5 hex digest.
@@ -817,20 +821,23 @@ class CacheManager:
         cache_key_data = [
             CACHE_KEY_VERSION, operation_type, model, system_prompt,
             enhanced_prompt, mode, value, sampling_identity,
+            api_url, sorted(set(allowed_scripts)),
         ]
         cache_key_str = json.dumps(cache_key_data, ensure_ascii=False)
         return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
 
     def compute_fingerprints(self, operation_type: str, model: str, system_prompt: str,
                               prompt_template: str, hints_text: str, glossary_string: str,
-                              mode: str, sampling_identity: str) -> dict:
+                              mode: str, sampling_identity: str, *, api_url: str = '',
+                              allowed_scripts: Tuple[str, ...] = ()) -> dict:
         """
         Build short component fingerprints for miss diagnostics.
 
         Fingerprints are not part of the cache key (see create_cache_key) —
         only the full key decides a hit. They are stored in entry metadata
         and used by diagnose_miss() to name which component changed (model,
-        system prompt, prompt template, hints, glossary, mode, or sampling)
+        system prompt, prompt template, hints, glossary, mode, sampling,
+        endpoint, or allowed scripts)
         without logging the component contents.
 
         Args:
@@ -844,6 +851,8 @@ class CacheManager:
             mode: Mode string (strict / style / verification).
             sampling_identity: Canonical sampling JSON from
                 ``build_sampling_identity``.
+            api_url: Endpoint that generates the reply.
+            allowed_scripts: Writing systems allowed by the active profile.
 
         Returns:
             Mapping of component name to truncated hex digest.
@@ -858,6 +867,8 @@ class CacheManager:
             'glossary': glossary_string,
             'mode': mode,
             'sampling': sampling_identity,
+            'api_url': api_url,
+            'allowed_scripts': json.dumps(sorted(set(allowed_scripts))),
         }
         return {
             name: hashlib.md5(text.encode('utf-8')).hexdigest()[:CACHE_FINGERPRINT_LENGTH]

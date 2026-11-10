@@ -337,14 +337,23 @@ RUN_STAGE_TRANSLATE = 'translate'
 RUN_STAGE_VERIFY = 'verify'
 VALID_RUN_STAGES = (RUN_STAGE_ALL, RUN_STAGE_TRANSLATE, RUN_STAGE_VERIFY)
 
-# A target with this extension is a manifest: one input path per line,
-# relative to the manifest directory; '#' starts a comment line.
-MANIFEST_EXTENSION = '.list'
-MANIFEST_COMMENT_PREFIX = '#'
+# A target with this extension is a TOML run manifest ([[targets]]).
+MANIFEST_EXTENSION = '.toml'
+# Former line-oriented batch format; rejected with a migration hint.
+LEGACY_LIST_EXTENSION = '.list'
 UTF8_BOM = '\ufeff'
 # A drive prefix ("D:\x.json", "D:x.json") is rejected on every OS, so one
 # manifest behaves the same on Windows and POSIX.
 MANIFEST_DRIVE_PATTERN = re.compile(r'^[A-Za-z]:')
+
+# Allowed top-level keys of a run manifest (unknown → exit 2).
+RUN_MANIFEST_RUN_KEYS = frozenset({
+    'verb', 'result2target', 'cache2target', 'stage', 'strict',
+    'llm_config', 'glossary', 'targets',
+})
+RUN_MANIFEST_TARGET_KEYS = frozenset({
+    'original', 'draft', 'stage', 'strict', 'llm_config', 'glossary',
+})
 
 # Results go to <root>/result/{translated,redacted,final}/<relative path>.
 RESULT_DIR_NAME = 'result'
@@ -352,7 +361,7 @@ RESULT_DIR_NAME = 'result'
 LEAVES_DIR_NAME = 'leaves'
 RUN_REPORT_FILENAME = 'run_report.json'
 USAGE_REPORT_FILENAME = 'usage.json'
-LEAF_REPORT_SCHEMA_VERSION = 1
+LEAF_REPORT_SCHEMA_VERSION = 2
 USAGE_REPORT_SCHEMA_VERSION = 1
 
 # Per-leaf outcome statuses (machine report / verify-skip contract).
@@ -365,6 +374,10 @@ LEAF_STATUS_VERIFY_SKIPPED = 'verify_skipped'
 
 # Why verification was skipped for a leaf (never inferred from string equality).
 LEAF_SKIP_REASON_TRANSLATION_DEGRADED = 'translation_degraded'
+LEAF_SKIP_REASON_TRANSLATION_MISSING = 'translation_missing'
+
+# Verification degraded because translated/sidecar English no longer matches.
+LEAF_ERROR_KIND_SOURCE_STALE = 'source_stale'
 
 # UsageLedger attempt outcomes and the separate preflight bucket.
 USAGE_OUTCOME_SUCCESS = 'success'
@@ -425,7 +438,7 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # discards entries without it or with another value, so a key format change
 # never needs a manual cleanup of cache_dir.
 # v2: generation-affecting sampling parameters join the key identity.
-CACHE_KEY_VERSION = 2
+CACHE_KEY_VERSION = 3
 
 # Generation-affecting sampling fields in the cache key / fingerprints:
 # (canonical name in the identity JSON, runtime_config key). keep_alive and

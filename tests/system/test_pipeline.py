@@ -21,6 +21,7 @@ from llm_conductor.constants import (
     EXIT_SUCCESS,
     EXIT_TARGET_LOCKED,
     EXIT_USAGE_ERROR,
+    LEAF_REPORT_SCHEMA_VERSION,
 )
 from llm_conductor.core import shutdown
 from llm_conductor.core.locking import FileLock
@@ -289,11 +290,21 @@ def test_cache_logs_and_results_live_next_to_the_config_not_the_cwd(workspace, m
 
 
 # ============================================================================
-# Manifests
+# Run manifests (TOML [[targets]])
 # ============================================================================
 
 MENU = {"title": "Main menu"}
 GUARD = {"line": "Halt!"}
+
+UI_MANIFEST = """\
+result2target = false
+
+[[targets]]
+original = "menu/main.json"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+"""
 
 
 @pytest.fixture
@@ -301,105 +312,156 @@ def project(workspace):
     """project/ with two inputs in nested directories and a manifest naming both."""
     workspace.write_json("project/menu/main.json", MENU)
     workspace.write_json("project/dialogs/npc/guard.json", GUARD)
-    workspace.write_text("project/ui.list",
-                         "# UI strings\n\n   menu/main.json   \ndialogs\\npc\\guard.json\n")
+    workspace.write_text("project/ui.toml", UI_MANIFEST)
     return workspace
 
 
 def test_manifest_results_mirror_the_nested_directories(project, model, run_main, preserve_logs):
-    assert run_main("run", "--target", "project/ui.list") == EXIT_SUCCESS
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
 
     def final(relative):
-        return project.read_json(project.result("final", relative, target="ui.list"))
+        return project.read_json(project.result("final", relative, target="ui.toml"))
 
     assert final("menu/main.json") == {"title": "OK(RU(Main menu))"}
     assert final("dialogs/npc/guard.json") == {"line": "OK(RU(Halt!))"}
     assert "File 2/2" in project.log_text()
 
 
-def test_manifest_with_result2target_mirrors_next_to_the_manifest(project, model, run_main):
-    assert run_main("run", "--target", "project/ui.list", "--result2target") == EXIT_SUCCESS
+def test_manifest_with_result2target_in_toml_mirrors_next_to_the_manifest(project, model, run_main):
+    project.write_text("project/ui.toml", """
+result2target = true
+
+[[targets]]
+original = "menu/main.json"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
 
     assert project.read_json("project/result/final/menu/main.json") == {"title": "OK(RU(Main menu))"}
 
 
-@pytest.mark.parametrize("bad_line", [
+@pytest.mark.parametrize("bad_original", [
     "../outside.json",
     "menu/../../outside.json",
     "ABSOLUTE",
 ], ids=["parent", "parent-after-normalization", "absolute"])
 def test_manifest_path_outside_its_directory_fails_before_anything_is_written(project, model, run_main,
-                                                                               bad_line, capsys):
+                                                                               bad_original, capsys):
     outside = project.write_json("outside.json", {"secret": "Keep me"})
-    line = str(outside) if bad_line == "ABSOLUTE" else bad_line
-    project.write_text("project/ui.list", f"menu/main.json\n{line}\n")
+    original = str(outside).replace("\\", "/") if bad_original == "ABSOLUTE" else bad_original
+    project.write_text("project/ui.toml", f"""
+result2target = true
 
-    assert run_main("run", "--target", "project/ui.list", "--result2target") == EXIT_USAGE_ERROR
+[[targets]]
+original = "menu/main.json"
 
-    assert "line 2" in capsys.readouterr().out
+[[targets]]
+original = "{original}"
+""")
+
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+
+    err = capsys.readouterr()
+    combined = err.out + err.err
+    assert "target 2:" in combined
     assert model.requests == []
     assert not project.exists("result") and not project.exists("project/result")
     assert project.read_json("outside.json") == {"secret": "Keep me"}
 
 
 def test_manifest_duplicate_after_normalization_is_an_error(project, model, run_main, capsys):
-    project.write_text("project/ui.list", "menu/main.json\ndialogs\\..\\menu\\main.json\n")
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_USAGE_ERROR
+[[targets]]
+original = "dialogs/../menu/main.json"
+""")
 
-    assert "duplicate of line 1" in capsys.readouterr().out
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+
+    captured = capsys.readouterr()
+    assert "duplicate original of target 1" in (captured.out + captured.err)
     assert model.requests == []
 
 
 def test_empty_manifest_is_an_error(project, model, run_main):
-    project.write_text("project/ui.list", "# nothing yet\n\n")
+    project.write_text("project/ui.toml", 'verb = "INFO"\n')
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_USAGE_ERROR
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
 
 
 def test_input_inside_the_result_directory_is_rejected(project, model, run_main):
     project.write_json("project/result/final/menu/main.json", MENU)
-    project.write_text("project/ui.list", "result/final/menu/main.json\n")
+    project.write_text("project/ui.toml", """
+result2target = true
 
-    assert run_main("run", "--target", "project/ui.list", "--result2target") == EXIT_USAGE_ERROR
+[[targets]]
+original = "result/final/menu/main.json"
+""")
+
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
     assert model.requests == []
+
+
+def test_json_target_under_shared_result_root_is_rejected(
+        workspace, model, run_main, preserve_logs):
+    """
+    Direct JSON under result/<name>/ must hit ResultLayout.check_disjoint in main.
+
+    Manifest parsing already rejects result/ originals (covered above); this
+    path is the call site that mutation result_overlap_unchecked removes.
+    """
+    workspace.write_json("result/sample.json/sample.json", SAMPLE)
+
+    assert run_main(
+        "run", "--target", "result/sample.json/sample.json",
+    ) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert "would be overwritten" in workspace.log_text()
 
 
 @pytest.mark.parametrize("max_failure_ratio, expected", [(0.5, EXIT_SUCCESS), (0.0, EXIT_FAILURE_RATIO_EXCEEDED)])
 def test_failed_file_does_not_stop_the_others(project, model, run_main, max_failure_ratio, expected):
-    """One of two files is broken: 50% of files failed - an error only above the threshold."""
+    """One of two files is JSON null (fails per-file validation after shared preflight)."""
     project.write_configs(resilience__max_failure_ratio=max_failure_ratio)
-    project.write_text("project/menu/main.json", "{broken")
+    project.write_text("project/menu/main.json", "null")
 
-    assert run_main("run", "--target", "project/ui.list") == expected
+    assert run_main("run", "--target", "project/ui.toml") == expected
 
-    assert project.read_json(project.result("final", "dialogs/npc/guard.json", target="ui.list"))
-    assert not project.exists(project.result("final", "menu/main.json", target="ui.list"))
+    assert project.read_json(project.result("final", "dialogs/npc/guard.json", target="ui.toml"))
+    assert not project.exists(project.result("final", "menu/main.json", target="ui.toml"))
     assert "1 of 2 file(s) failed: " in project.log_text()
 
 
-def test_missing_manifest_entry_is_a_failed_file(project, model, run_main):
-    project.write_text("project/ui.list", "menu/main.json\nmenu/missing.json\n")
+def test_missing_manifest_entry_exits_2_before_any_file(project, model, run_main, capsys):
+    """Shared input preflight rejects missing originals before inference (GH-9)."""
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_SUCCESS
+[[targets]]
+original = "menu/missing.json"
+""")
 
-    assert project.exists(project.result("final", "menu/main.json", target="ui.list"))
-    assert "missing.json" in project.log_text()
-    snap = project.read_json("cache/progress_state.json")
-    failed = {(item["path"].replace("\\", "/"), item["status"]) for item in snap["files"]["failed"]}
-    done = {path.replace("\\", "/") for path in snap["files"]["done"]}
-    assert ("menu/missing.json", "failed") in failed
-    assert "menu/main.json" in done
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 2:" in combined
+    assert "missing.json" in combined.replace("\\", "/")
+    assert model.requests == []
+    assert not project.exists(project.result("final", "menu/main.json", target="ui.toml"))
 
 
 def test_circuit_breaker_stops_the_remaining_files(project, model, run_main, no_sleep):
     project.write_configs(resilience__max_consecutive_failures=1)
     model.fail_model_calls = True
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_CONSECUTIVE_FAILURES
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_CONSECUTIVE_FAILURES
 
-    assert project.exists(project.result("final", "menu/main.json", target="ui.list"))
-    assert not project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.list"))
+    assert project.exists(project.result("final", "menu/main.json", target="ui.toml"))
+    assert not project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.toml"))
     assert "1 remaining file(s) not processed" in project.log_text()
 
     snap = project.read_json("cache/progress_state.json")
@@ -417,17 +479,17 @@ def test_crashed_file_is_recorded_in_heartbeat_and_does_not_stop_others(
     """Unexpected error in one file → status crashed, exit 1; the rest still run."""
     real_process = FilePipeline._process
 
-    def boom(self, entry):
+    def boom(self, entry, *args, **kwargs):
         if entry.relative_path.replace("\\", "/") == "menu/main.json":
             raise RuntimeError("injected crash")
-        return real_process(self, entry)
+        return real_process(self, entry, *args, **kwargs)
 
     monkeypatch.setattr(FilePipeline, "_process", boom)
 
-    assert run_main("run", "--target", "project/ui.list") == EXIT_INTERNAL_ERROR
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_INTERNAL_ERROR
 
-    assert not project.exists(project.result("final", "menu/main.json", target="ui.list"))
-    assert project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.list"))
+    assert not project.exists(project.result("final", "menu/main.json", target="ui.toml"))
+    assert project.exists(project.result("final", "dialogs/npc/guard.json", target="ui.toml"))
 
     snap = project.read_json("cache/progress_state.json")
     failed = {(item["path"].replace("\\", "/"), item["status"]) for item in snap["files"]["failed"]}
@@ -604,14 +666,18 @@ def test_preflight_can_be_switched_off(workspace, model, run_main):
 def test_missing_target_is_a_usage_error(workspace, model, run_main, capsys):
     assert run_main("run", "--target", "absent.json") == EXIT_USAGE_ERROR
 
-    assert "absent.json not found" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "absent.json not found" in (captured.out + captured.err)
     assert model.requests == []
 
 
-def test_broken_input_file_fails_the_run(workspace, model, run_main):
+def test_broken_input_file_is_a_usage_error(workspace, model, run_main, capsys):
+    """Invalid JSON fails shared preflight with exit 2 (GH-9); not a per-file ratio exit."""
     (workspace.root / "sample.json").write_text("{broken", encoding="utf-8")
 
-    assert run_main(*RUN) == EXIT_FAILURE_RATIO_EXCEEDED
+    assert run_main(*RUN) == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "invalid JSON" in combined or "Input validation failed" in combined
     assert model.model_calls == []
 
 
@@ -781,21 +847,44 @@ def test_fail_on_any_error_exits_when_ratio_still_allows(workspace, model, run_m
     assert "LEAF OUTCOME SUMMARY" in workspace.log_text()
 
 
+@pytest.mark.parametrize("old_sidecar", [False, True], ids=["absent", "verify-only"])
+def test_repeated_verify_without_translation_history(workspace, model, run_main, old_sidecar):
+    workspace.write_json("sample.json", {"line": "Original"})
+    workspace.write_json(workspace.result("translated"), {"line": "Draft"})
+    sidecar_path = workspace.result("leaves")
+    if old_sidecar:
+        workspace.write_json(sidecar_path, {
+            "schema_version": LEAF_REPORT_SCHEMA_VERSION,
+            "relative_path": "sample.json",
+            "leaves": {'["line"]': {"verification": {"status": "ok"}}},
+        })
+
+    for call_count in (1, 2):
+        assert run_main(*RUN, "--stage", "verify", "--no-cache") == EXIT_SUCCESS
+        assert len(model.model_calls) == call_count
+        assert workspace.read_json(workspace.result("final")) == {"line": "OK(Draft)"}
+    assert workspace.exists(sidecar_path) is old_sidecar
+
+
 def test_verify_only_skips_translation_degraded_from_sidecar(workspace, model, run_main):
     """Standalone verify loads leaves sidecar and does not call the editor for degraded leaves."""
+    from llm_conductor.core.leaf_report import hash_text
+    from llm_conductor.l10n.context import KeyPath
+
     assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
 
     leaves_path = "result/sample.json/leaves/sample.json"
     sidecar = workspace.read_json(leaves_path)
-    leaf_path = "ui.title"
+    leaf_path = KeyPath(("ui", "title")).report_key()
     assert leaf_path in sidecar["leaves"]
+    original_digest = hash_text(SAMPLE["ui"]["title"])
     sidecar["leaves"][leaf_path]["translation"] = {
         "status": "degraded",
         "cache_hit": False,
         "degraded": True,
         "error_kind": "rejected",
-        "source_hash": "abc",
-        "output_hash": "abc",
+        "source_hash": original_digest,
+        "output_hash": original_digest,
     }
     workspace.write_json(leaves_path, sidecar)
 
@@ -813,3 +902,197 @@ def test_verify_only_skips_translation_degraded_from_sidecar(workspace, model, r
     assert updated["leaves"][leaf_path]["verification"]["status"] == "verify_skipped"
     final = workspace.read_json(workspace.result("final"))
     assert final["ui"]["title"] == SAMPLE["ui"]["title"]
+
+
+def test_verify_restores_original_when_source_hash_is_stale(workspace, model, run_main):
+    """D1: changed original must not keep the old translation through verify."""
+    from llm_conductor.constants import LEAF_ERROR_KIND_SOURCE_STALE
+    from llm_conductor.l10n.context import KeyPath
+
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    mutated = dict(SAMPLE)
+    mutated["ui"] = dict(SAMPLE["ui"])
+    mutated["ui"]["title"] = "Close {1}."
+    workspace.write_json("sample.json", mutated)
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify", "--no-cache") == EXIT_SUCCESS
+    # Stale leaf must not be sent to the editor as draft text.
+    for payload in model.model_calls[before:]:
+        content = payload["messages"][-1]["content"]
+        if VERIFY_PROMPT not in content:
+            continue
+        after_prompt = content.split(VERIFY_PROMPT, 1)[-1]
+        draft_body = after_prompt.split("[ORIGINAL]:", 1)[0]
+        assert "Close {1}." not in draft_body
+
+    leaf_path = KeyPath(("ui", "title")).report_key()
+    report = workspace.read_json("result/sample.json/run_report.json")
+    verification = report["files"]["sample.json"][leaf_path]["verification"]
+    assert verification["status"] == "degraded"
+    assert verification["error_kind"] == LEAF_ERROR_KIND_SOURCE_STALE
+    final = workspace.read_json(workspace.result("final"))
+    assert final["ui"]["title"] == "Close {1}."
+
+
+def test_report_distinguishes_literal_dotted_key_from_nested_path(workspace, model, run_main):
+    """D3: literal 'a.b' and nested a→b must not share one report key."""
+    from llm_conductor.l10n.context import KeyPath
+
+    payload = {"a.b": "Literal.", "a": {"b": "Nested."}}
+    workspace.write_json("sample.json", payload)
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    report = workspace.read_json("result/sample.json/run_report.json")
+    leaves = report["files"]["sample.json"]
+    literal = KeyPath(("a.b",)).report_key()
+    nested = KeyPath(("a", "b")).report_key()
+    assert literal != nested
+    assert literal in leaves
+    assert nested in leaves
+    assert report["schema_version"] == 2
+
+
+def test_verify_after_breaker_skips_untouched_leaves(workspace, model, run_main, no_sleep):
+    """D4: verify must not send circuit-breaker-untouched English to the editor."""
+    from llm_conductor.constants import LEAF_SKIP_REASON_TRANSLATION_MISSING
+    from llm_conductor.l10n.context import KeyPath
+
+    workspace.write_json("sample.json", {
+        "first": "Open {0}.",
+        "second": "Close {0}.",
+        "after": "Another leaf.",
+    })
+    workspace.write_configs(
+        resilience__max_consecutive_failures=1,
+        resilience__max_failure_ratio=1.0,
+    )
+    model.fail_model_calls = True
+    assert run_main(*RUN, "--stage", "translate") == EXIT_CONSECUTIVE_FAILURES
+
+    model.fail_model_calls = False
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") == EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+
+    after_key = KeyPath(("after",)).report_key()
+    report = workspace.read_json("result/sample.json/run_report.json")
+    verification = report["files"]["sample.json"][after_key]["verification"]
+    assert verification["status"] == "verify_skipped"
+    assert verification["reason"] == LEAF_SKIP_REASON_TRANSLATION_MISSING
+    final = workspace.read_json(workspace.result("final"))
+    assert final["after"] == "Another leaf."
+
+
+def test_mixed_manifest_sidecar_does_not_poison_draft_verify(project, model, run_main):
+    """
+    Sidecar merge for file A must not mark draft-file B leaves translation_missing.
+
+    Mixed manifest: first entry verify-from-translated (loads sidecar), second
+    entry verify-from-draft (no sidecar). Draft text must reach the editor.
+    """
+    project.write_json("project/menu/main.json", {"title": "Main menu"})
+    project.write_json("project/dialogs/npc/guard.json", {"line": "Halt!"})
+    project.write_json("project/drafts/guard.ru.json", {"line": "Стой!"})
+
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+stage = "translate"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
+
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+stage = "verify"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+draft = "drafts/guard.ru.json"
+""")
+    before = len(model.model_calls)
+    assert run_main("run", "--target", "project/ui.toml", "--no-cache") == EXIT_SUCCESS
+
+    verify_bodies = [
+        payload["messages"][-1]["content"]
+        for payload in model.model_calls[before:]
+        if VERIFY_PROMPT in payload["messages"][-1]["content"]
+    ]
+    assert any("Стой!" in body for body in verify_bodies), (
+        "draft leaf must be sent to the editor after a prior sidecar merge"
+    )
+    final_guard = project.read_json(
+        project.result("final", "dialogs/npc/guard.json", target="ui.toml")
+    )
+    assert final_guard["line"] == "OK(Стой!)"
+
+
+def test_verify_rejects_sidecar_v1_before_editor_and_final(workspace, model, run_main):
+    """Schema v1 sidecars must fail verify before any editor call or final write."""
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    sentinel = {"ui": {"title": "DO-NOT-OVERWRITE"}}
+    workspace.write_json(workspace.result("final"), sentinel)
+
+    leaves_path = "result/sample.json/leaves/sample.json"
+    workspace.write_json(leaves_path, {
+        "schema_version": 1,
+        "relative_path": "sample.json",
+        "leaves": {
+            "ui.title": {
+                "translation": {
+                    "status": "ok",
+                    "cache_hit": False,
+                    "degraded": False,
+                    "source_hash": "abc",
+                    "output_hash": "def",
+                }
+            }
+        },
+    })
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") != EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+    assert workspace.read_json(workspace.result("final")) == sentinel
+    log = workspace.log_text()
+    assert "schema v1" in log
+    assert "re-run translate" in log
+
+
+def _drop_meta(data):
+    return {key: value for key, value in data.items() if key != "meta"}
+
+
+@pytest.mark.parametrize(
+    "mutate,fragment",
+    [
+        (lambda data: {**data, "extra": "new"}, "extra"),
+        (_drop_meta, "meta"),
+        (lambda data: {**data, "ui": {**data["ui"], "title": 7}}, "type mismatch"),
+        (lambda data: {**data, "dialogues": []}, "array length"),
+    ],
+    ids=["added_key", "removed_key", "type_change", "array_length"],
+)
+def test_verify_rejects_stale_translated_structure(
+        workspace, model, run_main, mutate, fragment,
+):
+    """Structural drift between original and translated/ stops verify before final."""
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    sentinel = {"keep": "prior-final"}
+    workspace.write_json(workspace.result("final"), sentinel)
+
+    original = workspace.read_json("sample.json")
+    workspace.write_json("sample.json", mutate(original))
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") != EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+    assert workspace.read_json(workspace.result("final")) == sentinel
+    log = workspace.log_text()
+    assert "structure" in log
+    assert fragment in log
+    assert "sample.json" in log

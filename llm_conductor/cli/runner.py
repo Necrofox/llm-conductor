@@ -10,10 +10,11 @@ import os
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
+from llm_conductor.cli.draft_validate import compare_json_structure
 from llm_conductor.cli.exit_status import ExitStatus
-from llm_conductor.cli.glossary import GlossarySource
+from llm_conductor.cli.glossary import GlossaryResolver, GlossarySource
 from llm_conductor.cli.heartbeat import HeartbeatWriter
 from llm_conductor.cli.targets import ResultLayout, RunTarget, TargetEntry
 from llm_conductor.cli.validators import (
@@ -49,6 +50,7 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core.api_client import translate_key, verify_key
 from llm_conductor.core.io import safe_read_file, safe_write_file
+from llm_conductor.core.leaf_report import legacy_sidecar_v1_reason
 from llm_conductor.core.locking import FileLock
 from llm_conductor.exceptions import (
     ConfigValidationError,
@@ -56,16 +58,34 @@ from llm_conductor.exceptions import (
     LockUnavailableError,
     RunInterrupted,
 )
-from llm_conductor.interfaces import ConfigProtocol, HeartbeatProgressProtocol
+from llm_conductor.interfaces import (
+    APIConfigProtocol,
+    ConfigProtocol,
+    HeartbeatProgressProtocol,
+    RuntimeConfigFactoryProtocol,
+)
 from llm_conductor.l10n.processor import process_stage_recursive
 
 
 @dataclass(frozen=True)
+class ProfileEndpoints:
+    """Translation and verification endpoints for one llm.toml profile."""
+
+    translation: APIConfigProtocol
+    verification: APIConfigProtocol
+
+
+@dataclass(frozen=True)
 class RunOptions:
-    """Pipeline choices of the run command that apply to every file."""
+    """Pipeline choices for one file (or the default for a lone JSON target)."""
 
     stage: str = RUN_STAGE_ALL
     strict: bool = False
+
+    @classmethod
+    def for_entry(cls, entry: TargetEntry) -> 'RunOptions':
+        """Build options from a resolved ``TargetEntry``."""
+        return cls(stage=entry.stage, strict=entry.strict)
 
     @property
     def translates(self) -> bool:
@@ -121,38 +141,36 @@ class FilePipeline:
     the shared state (caches, metrics, circuit breaker) lives in the Config.
     """
 
-    def __init__(self, config: ConfigProtocol, options: RunOptions, layout: ResultLayout,
-                 glossary: Dict[str, str], runtime_configs: Dict[str, dict],
+    def __init__(self, config: ConfigProtocol, layout: ResultLayout,
                  heartbeat: Optional[HeartbeatProgressProtocol] = None):
         """
         Args:
-            config: Configuration of the run.
-            options: Stage and mode selection.
+            config: Configuration of the run (logger, caches, resilience).
             layout: Where results are written.
-            glossary: Glossary {term: translation}.
-            runtime_configs: Validated runtime_config per operation type that runs.
             heartbeat: Optional progress ticks for process_stage_recursive.
         """
         self._config = config
-        self._options = options
         self._layout = layout
-        self._glossary = glossary
-        self._runtime_configs = runtime_configs
         self._heartbeat = heartbeat
 
-    def process(self, entry: TargetEntry) -> FileOutcome:
+    def process(self, entry: TargetEntry, options: RunOptions,
+                glossary: Dict[str, str],
+                runtime_configs: Dict[str, dict]) -> FileOutcome:
         """
         Process one file; never raises for a problem of this file alone.
 
         Args:
-            entry: The input file.
+            entry: The input file (and optional draft).
+            options: Stage and mode selection for this file.
+            glossary: Glossary {term: translation}.
+            runtime_configs: Validated runtime_config per operation type that runs.
 
         Returns:
             The outcome; FAILED and CRASHED are already logged.
         """
         logger = self._config.logger
         try:
-            return self._process(entry)
+            return self._process(entry, options, glossary, runtime_configs)
         except (FileOperationError, OSError) as e:
             logger.error(f"{entry.relative_path}: {e}")
             return FileOutcome(entry, FileStatus.FAILED)
@@ -160,7 +178,9 @@ class FilePipeline:
             logger.error(f"{entry.relative_path}: unexpected {type(e).__name__}: {e}", include_traceback=True)
             return FileOutcome(entry, FileStatus.CRASHED)
 
-    def _process(self, entry: TargetEntry) -> FileOutcome:
+    def _process(self, entry: TargetEntry, options: RunOptions,
+                 glossary: Dict[str, str],
+                 runtime_configs: Dict[str, dict]) -> FileOutcome:
         """
         The stages of one file.
 
@@ -175,20 +195,30 @@ class FilePipeline:
         self._config.leaf_outcomes.set_active_file(entry.relative_path)
 
         data = source
-        if self._options.translates:
-            data = self._run_stage(entry, STAGE_TRANSLATED, data, source, translate_key, OPERATION_TRANSLATION)
+        if options.translates:
+            data = self._run_stage(
+                entry, STAGE_TRANSLATED, data, source, translate_key,
+                OPERATION_TRANSLATION, glossary, runtime_configs)
             self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_TRANSLATION):
                 return self._abort(entry, data, OPERATION_TRANSLATION)
 
-        if self._options.verifies:
-            if not self._options.translates:
-                translated_path = self._layout.stage_path(STAGE_TRANSLATED, entry)
-                data = self._read_json(translated_path, "translated data")
-                self._config.logger.info(f"Loaded translated data from {translated_path}")
-                self._load_leaves_sidecar(entry)
-            data = self._run_stage(entry, STAGE_REDACTED, data, source, verify_key, OPERATION_VERIFICATION)
-            self._write_leaves_sidecar(entry)
+        if options.verifies:
+            if not options.translates:
+                if entry.draft_path is not None:
+                    data = self._read_json(entry.draft_path, "draft data")
+                    self._config.logger.info(f"Loaded draft data from {entry.draft_path}")
+                else:
+                    translated_path = self._layout.stage_path(STAGE_TRANSLATED, entry)
+                    data = self._read_json(translated_path, "translated data")
+                    self._config.logger.info(f"Loaded translated data from {translated_path}")
+                    self._reject_stale_translated_structure(entry, source, data)
+                    self._load_leaves_sidecar(entry)
+            data = self._run_stage(
+                entry, STAGE_REDACTED, data, source, verify_key,
+                OPERATION_VERIFICATION, glossary, runtime_configs)
+            if options.translates or self._config.leaf_outcomes.sidecar_was_merged():
+                self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_VERIFICATION):
                 return self._abort(entry, data, OPERATION_VERIFICATION)
 
@@ -197,7 +227,9 @@ class FilePipeline:
         return FileOutcome(entry, FileStatus.DONE)
 
     def _run_stage(self, entry: TargetEntry, stage: str, data: Any, source: Any,
-                   process_func: StageFunction, operation_type: str) -> Any:
+                   process_func: StageFunction, operation_type: str,
+                   glossary: Dict[str, str],
+                   runtime_configs: Dict[str, dict]) -> Any:
         """Run one stage over the tree and write its stage result."""
         return process_stage_recursive(
             self._layout.prepare(stage, entry),
@@ -207,9 +239,9 @@ class FilePipeline:
             process_func,
             operation_type == OPERATION_VERIFICATION,
             self._config,
-            self._glossary,
+            glossary,
             operation_type,
-            runtime_config=dict(self._runtime_configs[operation_type]),
+            runtime_config=dict(runtime_configs[operation_type]),
             heartbeat=self._heartbeat,
         )
 
@@ -223,20 +255,41 @@ class FilePipeline:
         ):
             self._config.logger.warning(f"Failed to write leaf status sidecar {path}")
 
+    def _reject_stale_translated_structure(
+            self, entry: TargetEntry, source: Any, translated: Any,
+    ) -> None:
+        """
+        Fail verify-only when ``translated/`` no longer matches the original shape.
+
+        Text-only leaf changes at the same path stay allowed (``source_stale``
+        handles those). Structural drift must not reach the editor or overwrite
+        ``final/``.
+        """
+        issues = compare_json_structure(source, translated)
+        if not issues:
+            return
+        detail = "\n".join(f"  {issue}" for issue in issues)
+        raise FileOperationError(
+            f"{entry.relative_path}: translated structure does not match original; "
+            f"re-run translate before verify\n{detail}"
+        )
+
     def _load_leaves_sidecar(self, entry: TargetEntry) -> None:
         """
-        Load translation statuses so verify-only can skip translation_degraded.
+        Load translation statuses for verify-only gates (degraded / missing / stale).
 
         Missing sidecar: verification still runs; log once that skip protection
-        is unavailable.
+        is unavailable. Loading a translation record enables
+        ``translation_missing`` skips for that file only.
+        Schema v1 sidecars are rejected with an instruction to re-run translate.
         """
         path = self._layout.leaves_path(entry)
         if not os.path.isfile(path):
             if self._config.leaf_outcomes.note_sidecar_missing():
                 self._config.logger.warning(
-                    "Leaf status sidecar missing; verification cannot skip "
-                    "translation_degraded leaves (status is not inferred from "
-                    "string equality)."
+                    "Leaf status sidecar missing; verification cannot apply "
+                    "translation_degraded / translation_missing gates (status "
+                    "is not inferred from string equality)."
                 )
             return
         try:
@@ -244,8 +297,16 @@ class FilePipeline:
         except FileOperationError as exc:
             self._config.logger.warning(f"Failed to load leaf status sidecar {path}: {exc}")
             return
-        if isinstance(payload, dict):
-            self._config.leaf_outcomes.merge_sidecar(entry.relative_path, payload)
+        if not isinstance(payload, dict):
+            return
+        v1_reason = legacy_sidecar_v1_reason(payload)
+        if v1_reason is not None:
+            raise FileOperationError(
+                f"{entry.relative_path}: leaf status sidecar uses schema v1 "
+                f"({v1_reason}); re-run translate to regenerate schema v2 "
+                f"sidecars before verify"
+            )
+        self._config.leaf_outcomes.merge_sidecar(entry.relative_path, payload)
 
     def _abort(self, entry: TargetEntry, data: Any, operation_type: str) -> FileOutcome:
         """Write the partial final result of a stage stopped by the circuit breaker."""
@@ -300,21 +361,30 @@ class TargetRunner:
     so the entry point can exit; locks unwind on the way out.
     """
 
-    def __init__(self, config: ConfigProtocol, options: RunOptions, target: RunTarget,
-                 layout: ResultLayout, glossary: GlossarySource):
+    def __init__(self, config: ConfigProtocol, target: RunTarget,
+                 layout: ResultLayout,
+                 factories: Mapping[str, RuntimeConfigFactoryProtocol],
+                 endpoints: Mapping[str, ProfileEndpoints],
+                 glossaries: Dict[Optional[str], GlossarySource],
+                 default_options: Optional[RunOptions] = None):
         """
         Args:
-            config: Configuration of the run.
-            options: Stage and mode selection.
+            config: Bootstrap configuration (logger, caches, resilience).
             target: The resolved target.
             layout: Where results are written.
-            glossary: The glossary of the run.
+            factories: Runtime config factories keyed by absolute llm.toml path.
+            endpoints: API endpoints keyed by the same llm.toml paths.
+            glossaries: Glossary sources keyed by absolute path (``None`` → empty).
+            default_options: Fallback stage/strict when an entry has no overrides
+                (lone JSON path); unused when every entry carries its own settings.
         """
         self._config = config
-        self._options = options
         self._target = target
         self._layout = layout
-        self._glossary = glossary
+        self._factories = factories
+        self._endpoints = endpoints
+        self._glossaries = glossaries
+        self._default_options = default_options or RunOptions()
 
     def run(self) -> int:
         """
@@ -325,6 +395,12 @@ class TargetRunner:
         """
         status = ExitStatus()
         self._log_parameters()
+        union_ops = self._union_operations()
+        # Heartbeat profile/glossary: bootstrap profile and first non-empty glossary.
+        first_glossary = next(
+            (g for g in self._glossaries.values() if g.terms),
+            GlossarySource(),
+        )
         heartbeat = HeartbeatWriter(
             cache_dir=self._config.cache_dir,
             interval=self._config.heartbeat_interval,
@@ -332,8 +408,8 @@ class TargetRunner:
             logger=self._config.logger,
             target=self._target,
             profile_name=self._config.profile_name,
-            stages=self._options.operations,
-            glossary=self._glossary,
+            stages=union_ops,
+            glossary=first_glossary,
         )
         try:
             with ExitStack() as locks:
@@ -358,18 +434,59 @@ class TargetRunner:
         log(f"Run finished with exit code {code}")
         return code
 
+    def _options_for(self, entry: TargetEntry) -> RunOptions:
+        """Effective stage/strict for one entry."""
+        if self._target.is_manifest:
+            return RunOptions.for_entry(entry)
+        return self._default_options
+
+    def _profile_path_for(self, entry: TargetEntry) -> str:
+        """Absolute llm.toml path for one entry."""
+        if entry.llm_config_path is not None:
+            return entry.llm_config_path
+        # Bootstrap profile: the only key when a lone JSON uses CLI --llm-config.
+        return next(iter(self._factories))
+
+    def _glossary_for(self, entry: TargetEntry) -> GlossarySource:
+        """Glossary source for one entry."""
+        return self._glossaries.get(entry.glossary_path, GlossarySource())
+
+    def _union_operations(self) -> Tuple[str, ...]:
+        """Union of operation types across all entries, in pipeline order."""
+        need_translate = False
+        need_verify = False
+        for entry in self._target.entries:
+            options = self._options_for(entry)
+            need_translate = need_translate or options.translates
+            need_verify = need_verify or options.verifies
+        selected = []
+        if need_translate:
+            selected.append(OPERATION_TRANSLATION)
+        if need_verify:
+            selected.append(OPERATION_VERIFICATION)
+        return tuple(selected)
+
     def _log_parameters(self) -> None:
         """Log what the run is about to do."""
         logger = self._config.logger
         kind = f"manifest, {len(self._target.entries)} file(s)" if self._target.is_manifest else "file"
         logger.info(f"  - Target: {self._target.path} ({kind})")
-        logger.info(f"  - Stages: {', '.join(self._options.operations)}")
-        if self._options.translates:
-            logger.info(f"  - Translation mode: {self._options.translation_mode.upper()}")
+        if self._target.is_manifest:
+            logger.info("  - Stages: per-target (see each file)")
+        else:
+            options = self._options_for(self._target.entries[0]) if self._target.entries else self._default_options
+            logger.info(f"  - Stages: {', '.join(options.operations)}")
+            if options.translates:
+                logger.info(f"  - Translation mode: {options.translation_mode.upper()}")
         logger.info(f"  - Results: {self._layout.root}")
         cache = self._config.cache_dir if self._config.cache_enabled else "disabled"
         logger.info(f"  - Cache: {cache}")
-        logger.info(f"  - {self._glossary.describe()}")
+        if self._target.is_manifest:
+            logger.info("  - Glossary: per-target")
+        else:
+            entry = self._target.entries[0] if self._target.entries else None
+            glossary = self._glossary_for(entry) if entry else GlossarySource()
+            logger.info(f"  - {glossary.describe()}")
         logger.info(f"  - Log level: {self._config.log_level}")
 
     def _acquire_locks(self, locks: ExitStack) -> None:
@@ -399,8 +516,9 @@ class TargetRunner:
         Raises:
             ConfigValidationError: If a runtime configuration is invalid.
         """
+        # Original/draft JSON preflight runs in cli.main._execute_run before
+        # locks (and before --dry-run) via validate_target_inputs.
         heartbeat.start()
-        runtime_configs = self._runtime_configs()
 
         if not self._endpoints_available():
             status.record(EXIT_API_UNAVAILABLE, "an API endpoint is not available")
@@ -410,29 +528,30 @@ class TargetRunner:
         self._config.cache_manager.load(OPERATION_TRANSLATION)
         self._config.cache_manager.load(OPERATION_VERIFICATION)
 
-        outcomes = self._process_files(runtime_configs, status, heartbeat)
+        outcomes = self._process_files(status, heartbeat)
 
-        for operation_type in self._options.operations:
+        for operation_type in self._union_operations():
             self._config.cache_manager.save(operation_type)
         self._config.logger.info("Cache saved.")
 
         self._report(outcomes, status)
 
-    def _runtime_configs(self) -> Dict[str, dict]:
+    def _runtime_configs_for(self, entry: TargetEntry, options: RunOptions) -> Dict[str, dict]:
         """
-        Validated runtime configurations of the stages that run.
+        Validated runtime configurations of the stages that run for one entry.
 
         Raises:
             ConfigValidationError: If one is invalid.
         """
+        factory = self._factories[self._profile_path_for(entry)]
         configs: Dict[str, dict] = {}
-        if self._options.translates:
-            translation = self._config.get_translation_config_for_mode(self._options.translation_mode)
-            translation['mode'] = self._options.translation_mode
+        if options.translates:
+            translation = factory.get_translation_config_for_mode(options.translation_mode)
+            translation['mode'] = options.translation_mode
             configs[OPERATION_TRANSLATION] = validate_runtime_config(
                 translation, self._config, OPERATION_TRANSLATION)
-        if self._options.verifies:
-            verification = self._config.get_verification_config()
+        if options.verifies:
+            verification = factory.get_verification_config()
             verification['mode'] = MODE_VERIFICATION
             configs[OPERATION_VERIFICATION] = validate_runtime_config(
                 verification, self._config, OPERATION_VERIFICATION)
@@ -440,11 +559,9 @@ class TargetRunner:
 
     def _endpoints_available(self) -> bool:
         """
-        Preflight check of the endpoints of the stages that run.
+        Preflight check of every endpoint required by any entry.
 
-        Skipped when [preflight].check_availability is false. The
-        verification endpoint is checked only when it differs from the
-        translation one that was already checked.
+        Skipped when [preflight].check_availability is false.
 
         Returns:
             False if an endpoint failed the check (the reason is logged).
@@ -455,21 +572,29 @@ class TargetRunner:
             return True
 
         checked: List[Tuple[str, str]] = []
-        for operation_type, api in ((OPERATION_TRANSLATION, config.translation_api),
-                                    (OPERATION_VERIFICATION, config.verification_api)):
-            if operation_type not in self._options.operations or (api.url, api.model) in checked:
-                continue
-            config.logger.info(f"Checking {operation_type} API availability...")
-            if not check_api_availability(api.url, api.model, api.api_type, config,
-                                          api_key=api.api_key, timeout=config.preflight.timeout,
-                                          max_tokens_param=api.max_tokens_param):
-                config.logger.error(f"{operation_type.capitalize()} API is not available. "
-                                    f"Check the profile and the API server.")
-                return False
-            checked.append((api.url, api.model))
+        for entry in self._target.entries:
+            options = self._options_for(entry)
+            ends = self._endpoints[self._profile_path_for(entry)]
+            pairs = []
+            if options.translates:
+                pairs.append((OPERATION_TRANSLATION, ends.translation))
+            if options.verifies:
+                pairs.append((OPERATION_VERIFICATION, ends.verification))
+            for operation_type, api in pairs:
+                if (api.url, api.model) in checked:
+                    continue
+                config.logger.info(f"Checking {operation_type} API availability "
+                                   f"({os.path.basename(self._profile_path_for(entry))})...")
+                if not check_api_availability(api.url, api.model, api.api_type, config,
+                                              api_key=api.api_key, timeout=config.preflight.timeout,
+                                              max_tokens_param=api.max_tokens_param):
+                    config.logger.error(f"{operation_type.capitalize()} API is not available. "
+                                        f"Check the profile and the API server.")
+                    return False
+                checked.append((api.url, api.model))
         return True
 
-    def _process_files(self, runtime_configs: Dict[str, dict], status: ExitStatus,
+    def _process_files(self, status: ExitStatus,
                        heartbeat: HeartbeatWriter) -> List[FileOutcome]:
         """
         Process the files in order; the circuit breaker stops the rest.
@@ -477,20 +602,28 @@ class TargetRunner:
         Returns:
             The outcomes of the processed files.
         """
-        pipeline = FilePipeline(self._config, self._options, self._layout,
-                                self._glossary.terms, runtime_configs,
-                                heartbeat=heartbeat)
+        pipeline = FilePipeline(self._config, self._layout, heartbeat=heartbeat)
         entries = self._target.entries
         outcomes: List[FileOutcome] = []
 
         for index, entry in enumerate(entries, 1):
+            options = self._options_for(entry)
+            glossary = self._glossary_for(entry)
+            runtime_configs = self._runtime_configs_for(entry, options)
+
             if self._target.is_manifest:
                 self._config.logger.info("=" * 70)
                 self._config.logger.info(f"File {index}/{len(entries)}: {entry.relative_path}")
+                self._config.logger.info(
+                    f"  stage={options.stage} strict={options.strict} "
+                    f"llm_config={entry.llm_config_path or '(bootstrap)'} "
+                    f"glossary={glossary.path or '(none)'}"
+                    + (f" draft={entry.draft_path}" if entry.draft_path else "")
+                )
                 self._config.logger.info("=" * 70)
 
             heartbeat.on_file_start(entry, index)
-            outcome = pipeline.process(entry)
+            outcome = pipeline.process(entry, options, glossary.terms, runtime_configs)
             outcomes.append(outcome)
             heartbeat.on_file_done(entry.relative_path, outcome.status.value)
 
@@ -510,7 +643,7 @@ class TargetRunner:
         """Print the run metrics and record failure shares above [resilience].max_failure_ratio."""
         config = self._config
         config.print_api_metrics()
-        if self._glossary.terms:
+        if any(g.terms for g in self._glossaries.values()):
             config.print_glossary_cache_stats()
         config.print_token_metrics()
         config.print_leaf_outcome_banner()
@@ -597,3 +730,43 @@ class TargetRunner:
             f"on a cache rerun if those residual leaves fail again. "
             f"Fix the prompt/model, or remeasure with --no-cache."
         )
+
+
+def load_glossaries_for_target(
+        target: RunTarget,
+        file_ops,
+        logger,
+        *,
+        cli_glossary: Optional[str] = None,
+) -> Dict[Optional[str], GlossarySource]:
+    """
+    Load every glossary referenced by the target (plus CLI glossary for JSON).
+
+    Args:
+        target: Resolved run target.
+        file_ops: File operations.
+        logger: Logger.
+        cli_glossary: ``--glossary`` for a lone JSON target.
+
+    Returns:
+        Map of absolute glossary path → source; ``None`` key is the empty glossary.
+    """
+    resolver = GlossaryResolver(file_ops, logger)
+    found: Dict[Optional[str], GlossarySource] = {None: GlossarySource()}
+
+    if not target.is_manifest:
+        source = resolver.resolve(cli_glossary, target)
+        found[source.path] = source
+        # Lone JSON entries leave glossary_path as None; map None to the
+        # resolved CLI / beside-target glossary (or empty).
+        found[None] = source
+        return found
+
+    for entry in target.entries:
+        path = entry.glossary_path
+        if path in found:
+            continue
+        if path is None:
+            continue
+        found[path] = resolver.load_path(path)
+    return found

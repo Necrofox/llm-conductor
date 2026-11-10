@@ -33,6 +33,15 @@ def test_keypath_str(segments, expected):
     assert str(KeyPath(segments)) == expected
 
 
+def test_keypath_report_key_distinguishes_literal_dot_from_nested():
+    literal = KeyPath(("a.b",)).report_key()
+    nested = KeyPath(("a", "b")).report_key()
+    assert literal == '["a.b"]'
+    assert nested == '["a","b"]'
+    assert literal != nested
+    assert str(KeyPath(("a.b",))) == str(KeyPath(("a", "b"))) == "a.b"
+
+
 def test_keypath_append_returns_new_path_without_mutating_original():
     base = KeyPath(('a',))
 

@@ -2,150 +2,62 @@
 """
 What a run processes and where its results go.
 
-A target is one JSON file or a .list manifest of JSON files. Manifest paths
-are relative to the manifest directory and must stay inside it; results
+A target is one JSON file or a TOML run manifest (``[[targets]]``). Manifest
+paths are relative to the manifest directory and must stay inside it; results
 mirror those relative paths under result/{translated,redacted,final}/ with
 the original file names.
 """
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Optional, Tuple, cast
 
+from llm_conductor.cli.paths import is_inside
+from llm_conductor.cli.run_manifest import (
+    RunManifestParser,
+    RunSettings,
+    is_legacy_list_path,
+    is_run_manifest_path,
+)
 from llm_conductor.constants import (
     LEAVES_DIR_NAME,
-    MANIFEST_COMMENT_PREFIX,
-    MANIFEST_DRIVE_PATTERN,
+    LEGACY_LIST_EXTENSION,
     MANIFEST_EXTENSION,
     RESULT_DIR_NAME,
     RESULT_OWNER_FILENAME,
-    UTF8_BOM,
+    RUN_STAGE_ALL,
 )
 from llm_conductor.core.io import safe_read_file, safe_write_file
 from llm_conductor.exceptions import FileOperationError, TargetError
 from llm_conductor.interfaces import FileOperationsProtocol, Logger
 
+# Re-export for callers that imported containment from this module.
+__all__ = [
+    'ResultLayout',
+    'RunTarget',
+    'TargetEntry',
+    'TargetResolver',
+    'is_inside',
+    'is_manifest_path',
+]
+
 
 def is_manifest_path(path: str) -> bool:
-    """True when the path names a manifest (by its extension)."""
-    return os.path.splitext(path)[1].lower() == MANIFEST_EXTENSION
-
-
-def is_inside(path: str, directory: str) -> bool:
-    """
-    Whether path lies inside directory (or is the directory itself).
-
-    Both are compared absolute, normalized and case-folded where the file
-    system is case-insensitive.
-    """
-    path_key = os.path.normcase(os.path.abspath(path))
-    dir_key = os.path.normcase(os.path.abspath(directory))
-    try:
-        return os.path.commonpath([path_key, dir_key]) == dir_key
-    except ValueError:  # different drives
-        return False
+    """True when the path names a TOML run manifest (by its extension)."""
+    return is_run_manifest_path(path)
 
 
 @dataclass(frozen=True)
 class TargetEntry:
-    """One input file of a run."""
+    """One input file of a run, with effective stage settings."""
 
     source_path: str      # absolute path of the input file
     relative_path: str    # its path under every result/<stage>/ directory
-
-
-@dataclass(frozen=True)
-class ManifestViolation:
-    """A manifest line that breaks the path rules."""
-
-    line_number: int
-    line: str
-    reason: str
-
-    def __str__(self) -> str:
-        return f"  line {self.line_number}: {self.line} - {self.reason}"
-
-
-class ManifestParser:
-    """
-    Turns manifest text into run entries.
-
-    Rules: one path per line; surrounding whitespace is stripped; blank
-    lines and '#' comments are skipped; '\\' and '/' both separate path
-    parts. Every path must be relative and resolve inside the manifest
-    directory - an absolute path or one escaping through '..' would make
-    the result layout ambiguous or overwrite a source file. Two lines
-    naming the same file after normalization are an error too.
-    """
-
-    def __init__(self, manifest_path: str):
-        """
-        Args:
-            manifest_path: Path of the manifest; relative lines resolve from its directory.
-        """
-        self.manifest_path = os.path.abspath(manifest_path)
-        self.base_dir = os.path.dirname(self.manifest_path)
-
-    def parse(self, text: str) -> Tuple[TargetEntry, ...]:
-        """
-        Parse the manifest, checking every line before reporting.
-
-        Args:
-            text: Manifest content.
-
-        Returns:
-            The entries in manifest order.
-
-        Raises:
-            TargetError: Listing every violating line, or when the manifest
-                names no file at all.
-        """
-        entries: List[TargetEntry] = []
-        violations: List[ManifestViolation] = []
-        first_line_of: Dict[str, int] = {}
-
-        for number, raw_line in enumerate(text.lstrip(UTF8_BOM).splitlines(), 1):
-            line = raw_line.strip()
-            if not line or line.startswith(MANIFEST_COMMENT_PREFIX):
-                continue
-
-            try:
-                entry = self._resolve_line(line)
-            except ValueError as e:
-                violations.append(ManifestViolation(number, line, str(e)))
-                continue
-
-            key = os.path.normcase(entry.source_path)
-            if key in first_line_of:
-                violations.append(ManifestViolation(number, line, f"duplicate of line {first_line_of[key]}"))
-                continue
-
-            first_line_of[key] = number
-            entries.append(entry)
-
-        if violations:
-            details = "\n".join(str(violation) for violation in violations)
-            raise TargetError(f"Manifest {self.manifest_path} has invalid lines:\n{details}")
-        if not entries:
-            raise TargetError(f"Manifest {self.manifest_path} lists no files")
-        return tuple(entries)
-
-    def _resolve_line(self, line: str) -> TargetEntry:
-        """
-        Resolve one manifest path.
-
-        Raises:
-            ValueError: With the reason when the path breaks the rules.
-        """
-        portable = line.replace('\\', '/')
-        drive, _ = os.path.splitdrive(portable)
-        if drive or MANIFEST_DRIVE_PATTERN.match(portable) or os.path.isabs(portable) or portable.startswith('/'):
-            raise ValueError("absolute path; manifest paths must be relative to the manifest directory")
-
-        source_path = os.path.normpath(os.path.join(self.base_dir, portable))
-        if source_path == self.base_dir or not is_inside(source_path, self.base_dir):
-            raise ValueError(f"outside the manifest directory {self.base_dir}")
-
-        return TargetEntry(source_path, os.path.relpath(source_path, self.base_dir))
+    index: int = 1        # 1-based [[targets]] index (1 for a lone JSON)
+    draft_path: Optional[str] = None
+    stage: str = RUN_STAGE_ALL
+    strict: bool = False
+    llm_config_path: Optional[str] = None  # absolute llm.toml; None → bootstrap Config
+    glossary_path: Optional[str] = None    # absolute glossary; None → empty terms
 
 
 @dataclass(frozen=True)
@@ -154,6 +66,8 @@ class RunTarget:
 
     path: str
     entries: Tuple[TargetEntry, ...]
+    # Populated for TOML manifests so the CLI can read layout / verb defaults.
+    settings: Optional[RunSettings] = None
 
     @property
     def name(self) -> str:
@@ -167,21 +81,25 @@ class RunTarget:
 
     @property
     def is_manifest(self) -> bool:
-        """True for a manifest target."""
+        """True for a TOML run-manifest target."""
         return is_manifest_path(self.path)
 
 
 class TargetResolver:
     """Checks the --target path and builds the RunTarget, reading a manifest if needed."""
 
-    def __init__(self, file_ops: FileOperationsProtocol, logger: Logger):
+    def __init__(self, file_ops: FileOperationsProtocol, logger: Logger,
+                 conductor_dir: Optional[str] = None):
         """
         Args:
             file_ops: File operations for reading the manifest.
             logger: Logger of the run.
+            conductor_dir: Directory of conductor.toml (default llm profile anchor).
+                Required when resolving a TOML run manifest.
         """
         self._file_ops = file_ops
         self._logger = logger
+        self._conductor_dir = conductor_dir
 
     def resolve(self, target_path: str) -> RunTarget:
         """
@@ -201,15 +119,29 @@ class TargetResolver:
         if not os.path.isfile(path):
             raise TargetError(f"Target {path} not found")
 
+        if is_legacy_list_path(path):
+            raise TargetError(
+                f"{LEGACY_LIST_EXTENSION} manifests are no longer supported "
+                f"(target was {path}). Migrate each line to a {MANIFEST_EXTENSION} "
+                f"run manifest:\n"
+                f"  [[targets]]\n"
+                f"  original = \"path/from/line.json\"\n"
+                f"See doc/cli.md."
+            )
+
         if not is_manifest_path(path):
             return RunTarget(path, (TargetEntry(path, os.path.basename(path)),))
 
-        try:
-            text = cast(str, safe_read_file(path, f"manifest {path}", self._file_ops, self._logger,
-                                            critical=True, as_text=True))
-        except FileOperationError as e:
-            raise TargetError(str(e)) from e
-        return RunTarget(path, ManifestParser(path).parse(text))
+        if self._conductor_dir is None:
+            raise TargetError(
+                f"Internal error: conductor directory required to resolve run manifest {path}"
+            )
+
+        settings = RunManifestParser(
+            path, self._conductor_dir, self._file_ops, self._logger
+        ).parse_file()
+        entries = tuple(target.as_entry() for target in settings.targets)
+        return RunTarget(path, entries, settings=settings)
 
 
 @dataclass(frozen=True)
@@ -295,10 +227,16 @@ class ResultLayout:
         Raises:
             TargetError: Naming the inputs inside the result root.
         """
-        clashing = [entry.source_path for entry in target.entries if is_inside(entry.source_path, self.root)]
+        clashing = []
+        for entry in target.entries:
+            if is_inside(entry.source_path, self.root):
+                clashing.append(entry.source_path)
+            if entry.draft_path is not None and is_inside(entry.draft_path, self.root):
+                clashing.append(entry.draft_path)
         if clashing:
             raise TargetError(
-                f"Inputs inside the result directory {self.root} would be overwritten: " + ", ".join(clashing))
+                f"Inputs inside the result directory {self.root} would be overwritten: "
+                + ", ".join(clashing))
 
     def claim_owner(self, target_path: str, file_ops: FileOperationsProtocol,
                     logger: Optional[Logger] = None) -> None:

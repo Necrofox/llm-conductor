@@ -4,15 +4,21 @@ Per-leaf outcome recording, sidecars, and the run-level leaf report.
 
 Status comes from request/validation outcomes only — never from comparing
 the output string to the source (names and ids may legally stay identical).
+
+Leaf keys in schema v2 are ``KeyPath.report_key()`` JSON segment arrays.
+Schema v1 dotted keys (``ui.title``) are rejected at load time — re-run
+``translate`` to regenerate v2 sidecars. New writes always use v2 keys.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from llm_conductor.constants import (
+    LEAF_ERROR_KIND_SOURCE_STALE,
     LEAF_REPORT_SCHEMA_VERSION,
     LEAF_SKIP_REASON_TRANSLATION_DEGRADED,
     LEAF_STATUS_CACHE_HIT,
@@ -78,7 +84,7 @@ def make_skipped(source: str) -> LeafStageRecord:
 
 
 def make_degraded(source: str, error_kind: Optional[str]) -> LeafStageRecord:
-    """Transport/validation/unexpected failure; stage input kept."""
+    """Transport/validation/unexpected failure; stage input kept (or restored)."""
     digest = hash_text(source)
     return LeafStageRecord(
         status=LEAF_STATUS_DEGRADED,
@@ -89,15 +95,54 @@ def make_degraded(source: str, error_kind: Optional[str]) -> LeafStageRecord:
     )
 
 
-def make_verify_skipped(source: str) -> LeafStageRecord:
-    """Normal verification skipped because translation_degraded."""
+def make_verify_skipped(
+        source: str,
+        *,
+        reason: str = LEAF_SKIP_REASON_TRANSLATION_DEGRADED,
+) -> LeafStageRecord:
+    """Normal verification skipped (degraded translation or never attempted)."""
     digest = hash_text(source)
     return LeafStageRecord(
         status=LEAF_STATUS_VERIFY_SKIPPED,
         source_hash=digest,
         output_hash=digest,
-        reason=LEAF_SKIP_REASON_TRANSLATION_DEGRADED,
+        reason=reason,
     )
+
+
+def make_source_stale(original: str) -> LeafStageRecord:
+    """Verification refused: translation ``source_hash`` no longer matches original."""
+    return make_degraded(original, LEAF_ERROR_KIND_SOURCE_STALE)
+
+
+def _is_v2_report_key(key: str) -> bool:
+    """True when ``key`` is a schema v2 ``KeyPath.report_key()`` JSON array."""
+    try:
+        parsed = json.loads(key)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(parsed, list)
+
+
+def legacy_sidecar_v1_reason(payload: Dict[str, Any]) -> Optional[str]:
+    """
+    Return a short reason when ``payload`` is a schema v1 leaves sidecar.
+
+    Detection: explicit ``schema_version == 1``, or any leaf identity that is
+    not a v2 ``KeyPath.report_key()`` JSON array (dotted keys like ``ui.title``).
+    """
+    version = payload.get('schema_version')
+    if version == 1:
+        return "schema_version is 1 (dotted leaf keys)"
+    leaves = payload.get('leaves')
+    if isinstance(leaves, dict):
+        for key in leaves:
+            if isinstance(key, str) and not _is_v2_report_key(key):
+                return (
+                    f"leaf key {key!r} uses schema v1 dotted identity; "
+                    f"expected KeyPath.report_key() JSON arrays"
+                )
+    return None
 
 
 def _record_from_dict(raw: Any) -> Optional[LeafStageRecord]:
@@ -133,6 +178,9 @@ class LeafOutcomeRecorder:
         self._files: Dict[str, Dict[str, Dict[str, LeafStageRecord]]] = {}
         self._active_file: Optional[str] = None
         self._sidecar_missing_logged = False
+        # Files whose translation records were loaded this run (translation_missing
+        # applies only to those files — never leak across a mixed manifest).
+        self._sidecar_merged_files: Set[str] = set()
 
     def set_active_file(self, relative_path: str) -> None:
         """Select the target-relative file path for subsequent record/lookup calls."""
@@ -153,6 +201,12 @@ class LeafOutcomeRecorder:
             self._sidecar_missing_logged = True
             return True
 
+    def sidecar_was_merged(self) -> bool:
+        """True when a translation record was loaded for the active file."""
+        with self._lock:
+            file_key = self._active_file or ''
+            return file_key in self._sidecar_merged_files
+
     def record(self, leaf_path: str, stage: str, record: LeafStageRecord) -> None:
         """Store the outcome of one stage for the active file's leaf."""
         with self._lock:
@@ -160,6 +214,12 @@ class LeafOutcomeRecorder:
             leaves = self._files.setdefault(file_key, {})
             stages = leaves.setdefault(leaf_path, {})
             stages[stage] = record
+
+    def get_translation_record(self, leaf_path: str) -> Optional[LeafStageRecord]:
+        """Return the active file's translation stage record, or None."""
+        with self._lock:
+            file_key = self._active_file or ''
+            return self._files.get(file_key, {}).get(leaf_path, {}).get(OPERATION_TRANSLATION)
 
     def is_translation_degraded(self, leaf_path: str) -> bool:
         """True when the active file's translation stage recorded degraded for this leaf."""
@@ -176,6 +236,9 @@ class LeafOutcomeRecorder:
 
         Existing in-memory stage records for the same leaf win over sidecar
         entries (same-run translate then verify must not be overwritten).
+        A verification-only sidecar cannot establish translation provenance.
+        Callers must reject schema v1 payloads before invoking this method;
+        new recordings use v2 ``KeyPath.report_key()`` identities.
         """
         leaves_raw = payload.get('leaves')
         if not isinstance(leaves_raw, dict):
@@ -192,9 +255,11 @@ class LeafOutcomeRecorder:
                     parsed = _record_from_dict(stage_raw)
                     if parsed is not None:
                         stages[stage] = parsed
+                        if stage == OPERATION_TRANSLATION:
+                            self._sidecar_merged_files.add(relative_path)
 
     def file_sidecar_dict(self, relative_path: str) -> Dict[str, Any]:
-        """Build the JSON document written under ``leaves/<relative>.json``."""
+        """Build the JSON document written under ``leaves/<relative>``."""
         with self._lock:
             leaves = self._files.get(relative_path, {})
             serialized: Dict[str, Dict[str, Any]] = {}
@@ -213,8 +278,12 @@ class LeafOutcomeRecorder:
         Run-wide counters for the human banner and fail_on_any_error.
 
         ``untranslated`` / ``degraded`` count translation-stage degradations
-        (source kept). ``verify_skipped`` counts leaves that skipped normal
-        verification because of translation_degraded.
+        (source kept) plus verification ``source_stale``. ``verify_skipped``
+        counts leaves that skipped normal verification
+        (``translation_degraded`` or ``translation_missing``).
+        ``skipped`` counts format/blank stage records (a leaf may contribute
+        once per stage). ``api_calls`` counts leaf stage outcomes with status
+        ``ok`` or ``degraded`` — not HTTP attempts (see ``usage.json``).
         """
         with self._lock:
             return self._aggregates_unlocked()
@@ -265,6 +334,11 @@ class LeafOutcomeRecorder:
                     and translation is None
                 ):
                     # Verify-only degradation of a leaf with no translation record.
+                    totals['untranslated'] += 1
+                elif (
+                    verification is not None
+                    and verification.error_kind == LEAF_ERROR_KIND_SOURCE_STALE
+                ):
                     totals['untranslated'] += 1
         return totals
 

@@ -816,8 +816,7 @@ class RuntimeConfigFactory:
     def __init__(self, config_data: ConfigData):
         self.config_data = config_data
 
-    @staticmethod
-    def _build(api: APIConfig, sampling: TranslationConfig) -> dict:
+    def _build(self, api: APIConfig, sampling: TranslationConfig) -> dict:
         """Flatten one endpoint and one mode into the runtime_config contract of call_model_api()."""
         return {
             'api_url': api.url,
@@ -827,6 +826,7 @@ class RuntimeConfigFactory:
             'max_retries': api.max_retries,
             'retry_backoff_factor': api.retry_backoff_factor,
             'model': api.model,
+            'allowed_scripts': self.config_data.validation.allowed_scripts,
             'system_prompt': api.system_prompt,
             'keep_alive': api.keep_alive,
             'max_tokens_param': api.max_tokens_param,

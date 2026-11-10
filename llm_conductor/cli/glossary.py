@@ -75,6 +75,21 @@ class GlossaryResolver:
             return self._load(candidate, GLOSSARY_ORIGIN_TARGET)
         return GlossarySource()
 
+    def load_path(self, path: str, origin: str = GLOSSARY_ORIGIN_TARGET) -> GlossarySource:
+        """
+        Load a glossary from an absolute path already resolved by the manifest.
+
+        Args:
+            path: Absolute path of the glossary JSON.
+            origin: Label for log lines.
+
+        Raises:
+            TargetError: If the file is missing, unreadable or not string→string.
+        """
+        if not os.path.isfile(path):
+            raise TargetError(f"Glossary {path} not found")
+        return self._load(path, origin)
+
     def _load(self, path: str, origin: str) -> GlossarySource:
         """
         Read and check one glossary file.

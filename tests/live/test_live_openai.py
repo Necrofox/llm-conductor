@@ -27,8 +27,9 @@ from llm_conductor.constants import (
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
 )
-from llm_conductor.core.api_client import call_model_api
+from llm_conductor.core.api_client import CallOutcome, call_model_api
 from llm_conductor.core.metrics import MetricsCollector
+from llm_conductor.core.usage import UsageLedger
 from tests.live.runner import CYRILLIC
 from tests.support import RecordingLogger
 
@@ -44,13 +45,14 @@ SOURCE = "You found [T0] gold coins!"
 
 
 class _Config:
-    """Minimal ProcessorConfigProtocol: logger, metrics and debug flag."""
+    """Minimal ProcessorConfigProtocol: logger, metrics, usage ledger, debug flag."""
 
     is_debug_mode = False
 
     def __init__(self):
         self.logger = RecordingLogger()
         self.metrics = MetricsCollector()
+        self.usage_ledger = UsageLedger()
 
 
 @pytest.fixture(scope="module")
@@ -164,7 +166,7 @@ def test_reasoning_model_rejects_default_max_tokens_param(reasoning_runtime):
 
     outcome = call_model_api("Hi", OPERATION_TRANSLATION, config, runtime)
 
-    assert outcome == ("Hi", False, FAILURE_KIND_NETWORK)
+    assert outcome == CallOutcome("Hi", False, FAILURE_KIND_NETWORK)
     assert _metrics(config)['network_failures'] == 1
     assert config.logger.contains("Unsupported parameter", level='WARNING')
     assert config.logger.contains("max_tokens", level='WARNING')
@@ -214,7 +216,7 @@ def test_rejected_key_is_reported_with_provider_text_and_not_retried(runtime):
 
     outcome = call_model_api(SOURCE, OPERATION_TRANSLATION, config, {**runtime, 'api_key': secret})
 
-    assert outcome == (SOURCE, False, FAILURE_KIND_NETWORK)
+    assert outcome == CallOutcome(SOURCE, False, FAILURE_KIND_NETWORK)
     metrics = _metrics(config)
     assert (metrics['failed_requests'], metrics['network_failures']) == (1, 1)
     assert config.logger.contains("non-retryable status 401", level='WARNING')
@@ -229,7 +231,7 @@ def test_unknown_model_is_a_fatal_client_error(runtime):
     outcome = call_model_api(SOURCE, OPERATION_TRANSLATION, config,
                              {**runtime, 'model': 'mistralai/no-such-model'})
 
-    assert outcome == (SOURCE, False, FAILURE_KIND_NETWORK)
+    assert outcome == CallOutcome(SOURCE, False, FAILURE_KIND_NETWORK)
     assert config.logger.contains("Failed after 1 attempt(s)", level='WARNING')
 
 
@@ -240,6 +242,6 @@ def test_key_with_embedded_newline_is_rejected_locally_without_leaking(runtime):
 
     outcome = call_model_api(SOURCE, OPERATION_TRANSLATION, config, {**runtime, 'api_key': broken})
 
-    assert outcome == (SOURCE, False, FAILURE_KIND_NETWORK)
+    assert outcome == CallOutcome(SOURCE, False, FAILURE_KIND_NETWORK)
     assert config.logger.contains("invalid HTTP header", level='WARNING')
     assert not config.logger.contains(key[8:])
