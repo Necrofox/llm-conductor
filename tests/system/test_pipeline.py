@@ -405,6 +405,23 @@ original = "result/final/menu/main.json"
     assert model.requests == []
 
 
+def test_json_target_under_shared_result_root_is_rejected(
+        workspace, model, run_main, preserve_logs):
+    """
+    Direct JSON under result/<name>/ must hit ResultLayout.check_disjoint in main.
+
+    Manifest parsing already rejects result/ originals (covered above); this
+    path is the call site that mutation result_overlap_unchecked removes.
+    """
+    workspace.write_json("result/sample.json/sample.json", SAMPLE)
+
+    assert run_main(
+        "run", "--target", "result/sample.json/sample.json",
+    ) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert "would be overwritten" in workspace.log_text()
+
+
 @pytest.mark.parametrize("max_failure_ratio, expected", [(0.5, EXIT_SUCCESS), (0.0, EXIT_FAILURE_RATIO_EXCEEDED)])
 def test_failed_file_does_not_stop_the_others(project, model, run_main, max_failure_ratio, expected):
     """One of two files is JSON null (fails per-file validation after shared preflight)."""
