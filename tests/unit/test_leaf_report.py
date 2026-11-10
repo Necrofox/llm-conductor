@@ -13,6 +13,7 @@ from llm_conductor.constants import (
 from llm_conductor.core.leaf_report import (
     LeafOutcomeRecorder,
     hash_text,
+    legacy_sidecar_v1_reason,
     make_degraded,
     make_ok,
     make_source_stale,
@@ -89,6 +90,7 @@ def test_note_sidecar_missing_only_once():
 
 def test_sidecar_merge_sets_flag_and_exposes_translation_record():
     recorder = LeafOutcomeRecorder()
+    recorder.set_active_file("ui.json")
     assert recorder.sidecar_was_merged() is False
     recorder.merge_sidecar("ui.json", {
         "leaves": {
@@ -97,12 +99,41 @@ def test_sidecar_merge_sets_flag_and_exposes_translation_record():
             }
         }
     })
-    recorder.set_active_file("ui.json")
     assert recorder.sidecar_was_merged() is True
     record = recorder.get_translation_record('["t"]')
     assert record is not None
     assert record.source_hash == hash_text("Hello")
     assert recorder.get_translation_record('["missing"]') is None
+
+
+def test_sidecar_merged_flag_is_scoped_to_active_file():
+    """A sidecar for file A must not enable translation_missing on file B."""
+    recorder = LeafOutcomeRecorder()
+    recorder.merge_sidecar("a.json", {
+        "leaves": {
+            '["t"]': {
+                OPERATION_TRANSLATION: make_ok("A", "А").to_dict(),
+            }
+        }
+    })
+    recorder.set_active_file("a.json")
+    assert recorder.sidecar_was_merged() is True
+
+    recorder.set_active_file("b.json")
+    assert recorder.sidecar_was_merged() is False
+    assert recorder.get_translation_record('["t"]') is None
+
+
+def test_legacy_sidecar_v1_reason_detects_version_and_dotted_keys():
+    assert legacy_sidecar_v1_reason({"schema_version": 1, "leaves": {}}) is not None
+    assert legacy_sidecar_v1_reason({
+        "schema_version": 2,
+        "leaves": {"ui.title": {OPERATION_TRANSLATION: make_ok("a", "b").to_dict()}},
+    }) is not None
+    assert legacy_sidecar_v1_reason({
+        "schema_version": 2,
+        "leaves": {'["ui","title"]': {OPERATION_TRANSLATION: make_ok("a", "b").to_dict()}},
+    }) is None
 
 
 def test_make_verify_skipped_accepts_translation_missing_reason():

@@ -6,15 +6,16 @@ Status comes from request/validation outcomes only — never from comparing
 the output string to the source (names and ids may legally stay identical).
 
 Leaf keys in schema v2 are ``KeyPath.report_key()`` JSON segment arrays.
-Schema v1 dotted strings are accepted on sidecar merge (best-effort) but
-new writes always use v2 keys.
+Schema v1 dotted keys (``ui.title``) are rejected at load time — re-run
+``translate`` to regenerate v2 sidecars. New writes always use v2 keys.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from llm_conductor.constants import (
     LEAF_ERROR_KIND_SOURCE_STALE,
@@ -114,6 +115,36 @@ def make_source_stale(original: str) -> LeafStageRecord:
     return make_degraded(original, LEAF_ERROR_KIND_SOURCE_STALE)
 
 
+def _is_v2_report_key(key: str) -> bool:
+    """True when ``key`` is a schema v2 ``KeyPath.report_key()`` JSON array."""
+    try:
+        parsed = json.loads(key)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(parsed, list)
+
+
+def legacy_sidecar_v1_reason(payload: Dict[str, Any]) -> Optional[str]:
+    """
+    Return a short reason when ``payload`` is a schema v1 leaves sidecar.
+
+    Detection: explicit ``schema_version == 1``, or any leaf identity that is
+    not a v2 ``KeyPath.report_key()`` JSON array (dotted keys like ``ui.title``).
+    """
+    version = payload.get('schema_version')
+    if version == 1:
+        return "schema_version is 1 (dotted leaf keys)"
+    leaves = payload.get('leaves')
+    if isinstance(leaves, dict):
+        for key in leaves:
+            if isinstance(key, str) and not _is_v2_report_key(key):
+                return (
+                    f"leaf key {key!r} uses schema v1 dotted identity; "
+                    f"expected KeyPath.report_key() JSON arrays"
+                )
+    return None
+
+
 def _record_from_dict(raw: Any) -> Optional[LeafStageRecord]:
     """Parse a sidecar stage dict; ignore malformed entries."""
     if not isinstance(raw, dict):
@@ -147,7 +178,9 @@ class LeafOutcomeRecorder:
         self._files: Dict[str, Dict[str, Dict[str, LeafStageRecord]]] = {}
         self._active_file: Optional[str] = None
         self._sidecar_missing_logged = False
-        self._sidecar_merged = False
+        # Files whose leaves sidecar was merged this run (translation_missing
+        # applies only to those files — never leak across a mixed manifest).
+        self._sidecar_merged_files: Set[str] = set()
 
     def set_active_file(self, relative_path: str) -> None:
         """Select the target-relative file path for subsequent record/lookup calls."""
@@ -169,9 +202,10 @@ class LeafOutcomeRecorder:
             return True
 
     def sidecar_was_merged(self) -> bool:
-        """True after a leaves sidecar was successfully merged this run."""
+        """True when the active file's leaves sidecar was merged this run."""
         with self._lock:
-            return self._sidecar_merged
+            file_key = self._active_file or ''
+            return file_key in self._sidecar_merged_files
 
     def record(self, leaf_path: str, stage: str, record: LeafStageRecord) -> None:
         """Store the outcome of one stage for the active file's leaf."""
@@ -202,14 +236,14 @@ class LeafOutcomeRecorder:
 
         Existing in-memory stage records for the same leaf win over sidecar
         entries (same-run translate then verify must not be overwritten).
-        Schema v1 dotted leaf keys are kept as opaque strings (best-effort);
+        Callers must reject schema v1 payloads before invoking this method;
         new recordings use v2 ``KeyPath.report_key()`` identities.
         """
         leaves_raw = payload.get('leaves')
         if not isinstance(leaves_raw, dict):
             return
         with self._lock:
-            self._sidecar_merged = True
+            self._sidecar_merged_files.add(relative_path)
             file_leaves = self._files.setdefault(relative_path, {})
             for leaf_path, stages_raw in leaves_raw.items():
                 if not isinstance(leaf_path, str) or not isinstance(stages_raw, dict):

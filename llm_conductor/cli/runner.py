@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
+from llm_conductor.cli.draft_validate import compare_json_structure
 from llm_conductor.cli.exit_status import ExitStatus
 from llm_conductor.cli.glossary import GlossaryResolver, GlossarySource
 from llm_conductor.cli.heartbeat import HeartbeatWriter
@@ -49,6 +50,7 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core.api_client import translate_key, verify_key
 from llm_conductor.core.io import safe_read_file, safe_write_file
+from llm_conductor.core.leaf_report import legacy_sidecar_v1_reason
 from llm_conductor.core.locking import FileLock
 from llm_conductor.exceptions import (
     ConfigValidationError,
@@ -210,6 +212,7 @@ class FilePipeline:
                     translated_path = self._layout.stage_path(STAGE_TRANSLATED, entry)
                     data = self._read_json(translated_path, "translated data")
                     self._config.logger.info(f"Loaded translated data from {translated_path}")
+                    self._reject_stale_translated_structure(entry, source, data)
                     self._load_leaves_sidecar(entry)
             data = self._run_stage(
                 entry, STAGE_REDACTED, data, source, verify_key,
@@ -251,13 +254,33 @@ class FilePipeline:
         ):
             self._config.logger.warning(f"Failed to write leaf status sidecar {path}")
 
+    def _reject_stale_translated_structure(
+            self, entry: TargetEntry, source: Any, translated: Any,
+    ) -> None:
+        """
+        Fail verify-only when ``translated/`` no longer matches the original shape.
+
+        Text-only leaf changes at the same path stay allowed (``source_stale``
+        handles those). Structural drift must not reach the editor or overwrite
+        ``final/``.
+        """
+        issues = compare_json_structure(source, translated)
+        if not issues:
+            return
+        detail = "\n".join(f"  {issue}" for issue in issues)
+        raise FileOperationError(
+            f"{entry.relative_path}: translated structure does not match original; "
+            f"re-run translate before verify\n{detail}"
+        )
+
     def _load_leaves_sidecar(self, entry: TargetEntry) -> None:
         """
         Load translation statuses for verify-only gates (degraded / missing / stale).
 
         Missing sidecar: verification still runs; log once that skip protection
         is unavailable. A successful merge enables ``translation_missing`` skips
-        for leaves the prior translate stage never recorded.
+        for that file only (never for later draft entries in the same run).
+        Schema v1 sidecars are rejected with an instruction to re-run translate.
         """
         path = self._layout.leaves_path(entry)
         if not os.path.isfile(path):
@@ -273,8 +296,16 @@ class FilePipeline:
         except FileOperationError as exc:
             self._config.logger.warning(f"Failed to load leaf status sidecar {path}: {exc}")
             return
-        if isinstance(payload, dict):
-            self._config.leaf_outcomes.merge_sidecar(entry.relative_path, payload)
+        if not isinstance(payload, dict):
+            return
+        v1_reason = legacy_sidecar_v1_reason(payload)
+        if v1_reason is not None:
+            raise FileOperationError(
+                f"{entry.relative_path}: leaf status sidecar uses schema v1 "
+                f"({v1_reason}); re-run translate to regenerate schema v2 "
+                f"sidecars before verify"
+            )
+        self._config.leaf_outcomes.merge_sidecar(entry.relative_path, payload)
 
     def _abort(self, entry: TargetEntry, data: Any, operation_type: str) -> FileOutcome:
         """Write the partial final result of a stage stopped by the circuit breaker."""

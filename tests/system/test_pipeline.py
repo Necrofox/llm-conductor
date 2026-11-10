@@ -963,3 +963,116 @@ def test_verify_after_breaker_skips_untouched_leaves(workspace, model, run_main,
     assert verification["reason"] == LEAF_SKIP_REASON_TRANSLATION_MISSING
     final = workspace.read_json(workspace.result("final"))
     assert final["after"] == "Another leaf."
+
+
+def test_mixed_manifest_sidecar_does_not_poison_draft_verify(project, model, run_main):
+    """
+    Sidecar merge for file A must not mark draft-file B leaves translation_missing.
+
+    Mixed manifest: first entry verify-from-translated (loads sidecar), second
+    entry verify-from-draft (no sidecar). Draft text must reach the editor.
+    """
+    project.write_json("project/menu/main.json", {"title": "Main menu"})
+    project.write_json("project/dialogs/npc/guard.json", {"line": "Halt!"})
+    project.write_json("project/drafts/guard.ru.json", {"line": "Стой!"})
+
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+stage = "translate"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
+
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+stage = "verify"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+draft = "drafts/guard.ru.json"
+""")
+    before = len(model.model_calls)
+    assert run_main("run", "--target", "project/ui.toml", "--no-cache") == EXIT_SUCCESS
+
+    verify_bodies = [
+        payload["messages"][-1]["content"]
+        for payload in model.model_calls[before:]
+        if VERIFY_PROMPT in payload["messages"][-1]["content"]
+    ]
+    assert any("Стой!" in body for body in verify_bodies), (
+        "draft leaf must be sent to the editor after a prior sidecar merge"
+    )
+    final_guard = project.read_json(
+        project.result("final", "dialogs/npc/guard.json", target="ui.toml")
+    )
+    assert final_guard["line"] == "OK(Стой!)"
+
+
+def test_verify_rejects_sidecar_v1_before_editor_and_final(workspace, model, run_main):
+    """Schema v1 sidecars must fail verify before any editor call or final write."""
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    sentinel = {"ui": {"title": "DO-NOT-OVERWRITE"}}
+    workspace.write_json(workspace.result("final"), sentinel)
+
+    leaves_path = "result/sample.json/leaves/sample.json"
+    workspace.write_json(leaves_path, {
+        "schema_version": 1,
+        "relative_path": "sample.json",
+        "leaves": {
+            "ui.title": {
+                "translation": {
+                    "status": "ok",
+                    "cache_hit": False,
+                    "degraded": False,
+                    "source_hash": "abc",
+                    "output_hash": "def",
+                }
+            }
+        },
+    })
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") != EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+    assert workspace.read_json(workspace.result("final")) == sentinel
+    log = workspace.log_text()
+    assert "schema v1" in log
+    assert "re-run translate" in log
+
+
+def _drop_meta(data):
+    return {key: value for key, value in data.items() if key != "meta"}
+
+
+@pytest.mark.parametrize(
+    "mutate,fragment",
+    [
+        (lambda data: {**data, "extra": "new"}, "extra"),
+        (_drop_meta, "meta"),
+        (lambda data: {**data, "ui": {**data["ui"], "title": 7}}, "type mismatch"),
+        (lambda data: {**data, "dialogues": []}, "array length"),
+    ],
+    ids=["added_key", "removed_key", "type_change", "array_length"],
+)
+def test_verify_rejects_stale_translated_structure(
+        workspace, model, run_main, mutate, fragment,
+):
+    """Structural drift between original and translated/ stops verify before final."""
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    sentinel = {"keep": "prior-final"}
+    workspace.write_json(workspace.result("final"), sentinel)
+
+    original = workspace.read_json("sample.json")
+    workspace.write_json("sample.json", mutate(original))
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") != EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+    assert workspace.read_json(workspace.result("final")) == sentinel
+    log = workspace.log_text()
+    assert "structure" in log
+    assert fragment in log
+    assert "sample.json" in log

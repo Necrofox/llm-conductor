@@ -75,13 +75,21 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
   hashes — never from `value == original`:
   - `translation_degraded` → `verify_skipped` (no editor call on the English
     fallback).
-  - no translation stage record after a successful sidecar merge →
+  - no translation stage record after a successful **per-file** sidecar merge →
     `verify_skipped` with reason `translation_missing` (e.g. leaf never
     reached after a circuit-breaker abort). Keeps the current tree value.
+    A sidecar loaded for one file must not gate later draft entries in the
+    same manifest.
   - translation `source_hash` present and unequal to the hash of the current
     original leaf → `degraded` with `error_kind=source_stale`; restore the
     current original (no editor call). Counts toward failure ratio /
     `fail_on_any_error`.
+  - Verify-only from `translated/`: JSON structure (keys, types, array lengths)
+    must match the current original before any editor call or `final/` write.
+    Text-only leaf changes at the same path stay on the `source_stale` path.
+  - Schema v1 sidecars (dotted leaf keys) are rejected; re-run `translate` to
+    regenerate schema v2. Missing sidecar still allows verify (skip gates
+    unavailable; warning once per run).
   - Frozen `draft` verify does not load the sidecar; draft marker/structure
     preflight covers that path instead.
   Status is persisted under `result/<target>/leaves/<relative>` so a later
