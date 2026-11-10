@@ -6,7 +6,8 @@ Each mutation is a plausible bug (swapped condition, dropped cache-key
 component, reversed traversal order...). The script copies llm_conductor/, tests/,
 the entry point and pytest.ini into a temp directory, applies mutations
 one at a time and runs ``pytest -x``. A mutation is "killed" if at least
-one test fails; "survived" means the tests would have missed the defect.
+one test fails during its call; "survived" means the tests would have missed the defect.
+Collection, setup/teardown, import and runner failures are HARNESS_ERROR, never kills.
 
 Why: check that tests catch errors, not only confirm the claimed
 behaviour. mutmut does not work natively on Windows, so mutations are
@@ -17,7 +18,8 @@ Run from the repository root (~3 min, does not touch working files):
     python tools/mutation_check.py key_no_model dedup_by_value   # selective
 
 Exit code 1 — unexpected survivors or mutations whose pattern is no
-longer found in the code (SKIP: code changed — update the list).
+longer found in the code (SKIP: code changed — update the list), or any
+HARNESS_ERROR (including timeout); these do not count as successful kills.
 
 Equivalent mutations (5th tuple element = True) do not change behaviour
 and are expected to survive; the list is for the history of findings:
@@ -29,7 +31,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from llm_conductor.core.io import FileOperations, safe_read_file
+from llm_conductor.exceptions import FileOperationError
 
 REPO = Path(__file__).resolve().parents[1]
 COPIED_DIRS = ("llm_conductor", "tests")
@@ -134,18 +140,38 @@ def _run_mutant(work: Path, rel: str, old: str, new: str):
         return "SKIP", f"pattern found {original.count(old)} time(s)"
     path.write_text(original.replace(old, new), encoding="utf-8")
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider",
-             "-m", "not live and not meta"],  # meta syncs docs that are not in the copy
-            cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=300, check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="llmc-pytest-") as report_dir:
+            report_path = Path(report_dir) / "results.xml"
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider",
+                     "-m", "not live and not meta", "--junitxml", str(report_path)],
+                    cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=300, check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                return "HARNESS_ERROR", str(exc)
+            if result.returncode == 0:
+                return "SURVIVED", ""
+            diagnostics = f"pytest exit {result.returncode}:\n{result.stdout}\n{result.stderr}".strip()
+            if result.returncode != 1:
+                return "HARNESS_ERROR", diagnostics
+            try:
+                report = ET.fromstring(safe_read_file(
+                    str(report_path), "pytest report", FileOperations(), as_text=True,
+                ))
+            except (ET.ParseError, FileOperationError) as exc:
+                return "HARNESS_ERROR", f"{exc}\n{diagnostics}"
+            failures = report.findall(".//failure")
+            if (report.find(".//error") is not None or not failures
+                    or any(failure.get("message", "").startswith(("ImportError:", "ModuleNotFoundError:"))
+                           for failure in failures)):
+                return "HARNESS_ERROR", diagnostics
+            failed = next((ln[len("FAILED "):] for ln in result.stdout.splitlines()
+                           if ln.startswith("FAILED ")), failures[0].get("message", "test failure"))
+            return "KILLED", failed.split(" - ")[0]
     finally:
         path.write_text(original, encoding="utf-8")
-    if result.returncode == 0:
-        return "SURVIVED", ""
-    failed = next((ln[len("FAILED "):] for ln in result.stdout.splitlines() if ln.startswith("FAILED")), "")
-    return "KILLED", failed.split(" - ")[0]
 
 
 def main(selected) -> int:
@@ -159,11 +185,11 @@ def main(selected) -> int:
             status, detail = _run_mutant(work, rel, old, new)
             label = status + (" (equivalent)" if equivalent and status == "SURVIVED" else "")
             print(f"{label:26} {mutant_id:24} {description}  {detail}")
-            if status == "SKIP" or (status == "SURVIVED" and not equivalent):
+            if status in {"SKIP", "HARNESS_ERROR"} or (status == "SURVIVED" and not equivalent):
                 unexpected.append(mutant_id)
 
     killed_total = len(mutants) - len(unexpected)
-    print(f"\nMutations: {len(mutants)}; unexpectedly survived or skipped: {unexpected or 'none'}")
+    print(f"\nMutations: {len(mutants)}; unexpectedly survived, skipped or harness errors: {unexpected or 'none'}")
     print(f"Killed or expected survivors: {killed_total}/{len(mutants)}")
     return 1 if unexpected else 0
 
