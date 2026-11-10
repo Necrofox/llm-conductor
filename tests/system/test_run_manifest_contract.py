@@ -3,10 +3,13 @@
 System tests for conflict / ambiguous cases of the TOML run-manifest contract
 (GH-13 precedence B, GH-14 draft). Happy-path batch runs live in test_pipeline.
 """
+import json
+
 import pytest
+import responses
 
 from llm_conductor.constants import EXIT_SUCCESS, EXIT_USAGE_ERROR
-from tests.support import write_configs
+from tests.support import OLLAMA_URL, ollama_reply, write_configs
 from tests.system.harness import TRANSLATE_PROMPT, VERIFY_PROMPT, base_docs
 
 MENU = {"title": "Main menu"}
@@ -290,6 +293,101 @@ llm_config = "profiles/{name}.toml"
     }
     assert project.read_json("project/menu/main.json") == MENU
     assert project.read_json("project/drafts/main.ru.json") == DRAFT
+
+
+def test_manifest_validates_each_stage_with_its_target_profile(project, run_main):
+    project.write_configs(validation__allowed_scripts=["cyrillic"])
+    llm_doc, _ = base_docs(
+        translation__api__model="cjk-model",
+        verification__api__model="cjk-model",
+        validation__allowed_scripts=["cjk"],
+    )
+    write_configs(project.root / "project" / "profiles", llm_doc, {})
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+
+[[targets]]
+original = "dialogs/npc/guard.json"
+llm_config = "profiles/llm.toml"
+""")
+
+    def reply(request):
+        payload = json.loads(request.body)
+        content = payload["messages"][-1]["content"]
+        if content == "test":
+            return 200, {}, json.dumps(ollama_reply("ok"))
+        translated, edited = ("你好", "你好世界") if payload["model"] == "cjk-model" else (
+            "Привет", "Привет мир"
+        )
+        text = edited if VERIFY_PROMPT in content else translated
+        return 200, {}, json.dumps(ollama_reply(text))
+
+    with responses.RequestsMock() as http:
+        http.add_callback(responses.POST, OLLAMA_URL, callback=reply)
+        assert run_main("run", "--target", "project/ui.toml") == EXIT_SUCCESS
+
+    for name, key, expected in (
+        ("menu/main.json", "title", "Привет мир"),
+        ("dialogs/npc/guard.json", "line", "你好世界"),
+    ):
+        assert project.read_json(project.result("final", name, target="ui.toml")) == {key: expected}
+
+
+def test_editor_cache_isolated_by_endpoint(project, run_main):
+    project.write_json("project/drafts/main.ru.json", DRAFT)
+    endpoints = {
+        "a": (OLLAMA_URL, "Первый ответ"),
+        "b": ("http://second.llm.test/api/chat", "Второй ответ"),
+    }
+
+    def reply(text):
+        def callback(request):
+            content = json.loads(request.body)["messages"][-1]["content"]
+            return 200, {}, json.dumps(ollama_reply("ok" if content == "test" else text))
+        return callback
+
+    with responses.RequestsMock() as http:
+        for name, (url, text) in endpoints.items():
+            llm_doc, _ = base_docs(verification__api__url=url,
+                                   validation__allowed_scripts=["cyrillic"])
+            write_configs(project.root / "project" / "profiles" / name, llm_doc, {})
+            project.write_text(f"project/{name}.toml", f"""
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+llm_config = "profiles/{name}/llm.toml"
+""")
+            http.add_callback(responses.POST, url, callback=reply(text))
+
+        for name in ("a", "b", "b"):
+            assert run_main("run", "--target", f"project/{name}.toml") == EXIT_SUCCESS
+            final_path = project.result("final", "menu/main.json", target=f"{name}.toml")
+            assert project.read_json(final_path) == {"title": endpoints[name][1]}
+
+        model_urls = [
+            call.request.url for call in http.calls
+            if json.loads(call.request.body)["messages"][-1]["content"] != "test"
+        ]
+        assert model_urls == [url for url, _ in endpoints.values()]
+
+
+def test_draft_verify_preserves_translation_sidecar_in_shared_result_root(project, model, run_main):
+    assert run_main("run", "--target", "project/menu/main.json",
+                    "--stage", "translate", "--result2target") == EXIT_SUCCESS
+    sidecar_path = "project/menu/result/leaves/main.json"
+    original_sidecar = project.read_json(sidecar_path)
+
+    project.write_text("project/menu/edit.toml", """
+result2target = true
+[[targets]]
+original = "main.json"
+draft = "draft.json"
+""")
+    project.write_json("project/menu/draft.json", DRAFT)
+    assert run_main("run", "--target", "project/menu/edit.toml") == EXIT_SUCCESS
+    assert model.calls_with(VERIFY_PROMPT)
+    assert project.read_json(sidecar_path) == original_sidecar
 
 
 def test_same_original_twice_in_one_manifest_is_rejected(project, model, run_main, capsys):

@@ -158,6 +158,8 @@ def validate_model_reply(
     orphaned_markers: List[str],
     glossary: dict,
     config: 'ProcessorConfigProtocol',
+    *,
+    allowed_scripts: Optional[Tuple[str, ...]] = None,
 ) -> ReplyValidationResult:
     """
     Run the sanity checks of [validation] on one accepted model reply.
@@ -179,7 +181,8 @@ def validate_model_reply(
         glossary: Glossary {term: translation}; translations are allowed
             Latin text even when absent from original_value.
         config: Supplies [validation] thresholds, policy, and
-            allowed_scripts.
+            the default allowed_scripts.
+        allowed_scripts: Writing systems allowed by the active profile.
 
     Returns:
         A ReplyValidationResult.
@@ -203,11 +206,11 @@ def validate_model_reply(
         return ReplyValidationResult(False, VALIDATION_REASON_RESPONSE_TOO_LONG, None)
 
     glossary_text = ''.join(str(translation) for translation in glossary.values()) if glossary else ''
-    allowed_scripts = set(config.validation.allowed_scripts)
+    scripts = set(config.validation.allowed_scripts if allowed_scripts is None else allowed_scripts)
     foreign_chars = set()
     latin_chars = set()
     for char in unmasked_reply:
-        classification = _classify_char(char, original_value, glossary_text, allowed_scripts)
+        classification = _classify_char(char, original_value, glossary_text, scripts)
         if classification == 'foreign':
             foreign_chars.add(char)
         elif classification == 'latin':

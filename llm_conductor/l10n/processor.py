@@ -520,9 +520,11 @@ class RecursiveProcessor:
         # The key hashes the whole request, so identical text with different
         # hints (`_male` / `_female`) or sampling never shares a cache/dedup entry.
         cache_manager = self.cache_manager
+        allowed_scripts = runtime_config.get('allowed_scripts', self.config.validation.allowed_scripts)
         cache_key: Optional[str] = None
         fingerprints: dict = {}
         if cache_manager is not None:
+            api_url = runtime_config.get('api_url', '')
             sampling_identity = build_sampling_identity(runtime_config)
             fingerprints = cache_manager.compute_fingerprints(
                 operation_type=operation_type,
@@ -533,6 +535,8 @@ class RecursiveProcessor:
                 glossary_string=glossary_string,
                 mode=mode,
                 sampling_identity=sampling_identity,
+                api_url=api_url,
+                allowed_scripts=allowed_scripts,
             )
             cache_key = cache_manager.create_cache_key(
                 operation_type=operation_type,
@@ -542,6 +546,8 @@ class RecursiveProcessor:
                 mode=mode,
                 value=value,
                 sampling_identity=sampling_identity,
+                api_url=api_url,
+                allowed_scripts=allowed_scripts,
             )
 
         if self.cache_enabled and cache_manager is not None and cache_key is not None:
@@ -650,6 +656,7 @@ class RecursiveProcessor:
                     core, outcome.text, unmask_result.text, tag_map,
                     unmask_result.missing_markers, unmask_result.orphaned_markers,
                     glossary, self.config,
+                    allowed_scripts=allowed_scripts,
                 )
                 if self.config.validation.enabled
                 else ReplyValidationResult(True, None, None)

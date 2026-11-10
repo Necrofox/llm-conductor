@@ -217,7 +217,8 @@ class FilePipeline:
             data = self._run_stage(
                 entry, STAGE_REDACTED, data, source, verify_key,
                 OPERATION_VERIFICATION, glossary, runtime_configs)
-            self._write_leaves_sidecar(entry)
+            if options.translates or self._config.leaf_outcomes.sidecar_was_merged():
+                self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_VERIFICATION):
                 return self._abort(entry, data, OPERATION_VERIFICATION)
 
@@ -278,8 +279,8 @@ class FilePipeline:
         Load translation statuses for verify-only gates (degraded / missing / stale).
 
         Missing sidecar: verification still runs; log once that skip protection
-        is unavailable. A successful merge enables ``translation_missing`` skips
-        for that file only (never for later draft entries in the same run).
+        is unavailable. Loading a translation record enables
+        ``translation_missing`` skips for that file only.
         Schema v1 sidecars are rejected with an instruction to re-run translate.
         """
         path = self._layout.leaves_path(entry)

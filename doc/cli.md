@@ -133,7 +133,7 @@ target / manifest.
 | `{result}/final/{rel}` | Always (also partial on circuit-breaker abort) |
 | `{result}/run_report.json` | Per-leaf stage status + aggregates |
 | `{result}/usage.json` | Token attempts by provider / model / stage |
-| `{result}/leaves/{rel}` | Sidecar for verify-skip across stage splits |
+| `{result}/leaves/{rel}` | Translation sidecar used by later verify runs |
 
 Semantics of statuses and usage outcomes:
 [pipeline.md](pipeline.md#reports).

@@ -464,6 +464,7 @@ def _key_for_leaf(config, value, path=("t",), mode=MODE_STYLE):
     return config.cache_manager.create_cache_key(
         OPERATION_TRANSLATION, runtime['model'], runtime['system_prompt'], prompt, mode, value,
         build_sampling_identity(runtime),
+        api_url=runtime['api_url'], allowed_scripts=runtime['allowed_scripts'],
     )
 
 

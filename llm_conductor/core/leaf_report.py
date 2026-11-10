@@ -178,7 +178,7 @@ class LeafOutcomeRecorder:
         self._files: Dict[str, Dict[str, Dict[str, LeafStageRecord]]] = {}
         self._active_file: Optional[str] = None
         self._sidecar_missing_logged = False
-        # Files whose leaves sidecar was merged this run (translation_missing
+        # Files whose translation records were loaded this run (translation_missing
         # applies only to those files — never leak across a mixed manifest).
         self._sidecar_merged_files: Set[str] = set()
 
@@ -202,7 +202,7 @@ class LeafOutcomeRecorder:
             return True
 
     def sidecar_was_merged(self) -> bool:
-        """True when the active file's leaves sidecar was merged this run."""
+        """True when a translation record was loaded for the active file."""
         with self._lock:
             file_key = self._active_file or ''
             return file_key in self._sidecar_merged_files
@@ -236,6 +236,7 @@ class LeafOutcomeRecorder:
 
         Existing in-memory stage records for the same leaf win over sidecar
         entries (same-run translate then verify must not be overwritten).
+        A verification-only sidecar cannot establish translation provenance.
         Callers must reject schema v1 payloads before invoking this method;
         new recordings use v2 ``KeyPath.report_key()`` identities.
         """
@@ -243,7 +244,6 @@ class LeafOutcomeRecorder:
         if not isinstance(leaves_raw, dict):
             return
         with self._lock:
-            self._sidecar_merged_files.add(relative_path)
             file_leaves = self._files.setdefault(relative_path, {})
             for leaf_path, stages_raw in leaves_raw.items():
                 if not isinstance(leaf_path, str) or not isinstance(stages_raw, dict):
@@ -255,6 +255,8 @@ class LeafOutcomeRecorder:
                     parsed = _record_from_dict(stage_raw)
                     if parsed is not None:
                         stages[stage] = parsed
+                        if stage == OPERATION_TRANSLATION:
+                            self._sidecar_merged_files.add(relative_path)
 
     def file_sidecar_dict(self, relative_path: str) -> Dict[str, Any]:
         """Build the JSON document written under ``leaves/<relative>``."""

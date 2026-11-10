@@ -37,11 +37,12 @@ client (not trusted to the model or reply `strip()`); the cache stores the
 | Dedup index | Memory, this run | Same as disk cache key |
 
 Full-request identity (see `CACHE_KEY_VERSION` / `CACHE_SAMPLING_IDENTITY_FIELDS`
-in `llm_conductor/constants.py`) includes: operation type, model name, system
-prompt, assembled user prompt (hints/glossary/original), mode, leaf value, and
-generation-affecting sampling — `temperature`, `top_p`, `top_k`,
+in `llm_conductor/constants.py`) includes the operation type, API URL, model name,
+system prompt, assembled user prompt (hints/glossary/original), mode, leaf value,
+the active profile's allowed writing systems, and generation-affecting sampling
+(`temperature`, `top_p`, `top_k`,
 `repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
-`num_ctx`, `stop`. There is **no** cross-parameter reuse: changing any of these
+`num_ctx`, `stop`). Changing any of these components
 misses the cache. Transport-only fields (`keep_alive`, `max_tokens_param`) are
 not part of identity. A key-schema bump drops stale disk entries on load.
 
@@ -75,7 +76,8 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
   hashes — never from `value == original`:
   - `translation_degraded` → `verify_skipped` (no editor call on the English
     fallback).
-  - no translation stage record after a successful **per-file** sidecar merge →
+  - no translation stage record for a leaf after loading translation history
+    for its file →
     `verify_skipped` with reason `translation_missing` (e.g. leaf never
     reached after a circuit-breaker abort). Keeps the current tree value.
     A sidecar loaded for one file must not gate later draft entries in the
@@ -88,12 +90,13 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
     must match the current original before any editor call or `final/` write.
     Text-only leaf changes at the same path stay on the `source_stale` path.
   - Schema v1 sidecars (dotted leaf keys) are rejected; re-run `translate` to
-    regenerate schema v2. Missing sidecar still allows verify (skip gates
-    unavailable; warning once per run).
-  - Frozen `draft` verify does not load the sidecar; draft marker/structure
-    preflight covers that path instead.
+    regenerate schema v2. A missing sidecar or a legacy verification-only
+    sidecar still allows verify without translation gates.
+  - Frozen `draft` verify uses the draft marker/structure preflight and leaves
+    any translation sidecar in place.
   Status is persisted under `result/<target>/leaves/<relative>` so a later
-  verify still sees prior translation outcomes.
+  verify still sees prior translation outcomes. Verify without translation
+  history records outcomes in `run_report.json`.
 - **Circuit breaker:** `[resilience].max_consecutive_failures` stops further
   leaves for that stage (same path as shutdown); exit `6`.
 - **Failure ratio:** after the run, request and file failure ratios vs

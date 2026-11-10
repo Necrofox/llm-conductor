@@ -21,6 +21,7 @@ from llm_conductor.constants import (
     EXIT_SUCCESS,
     EXIT_TARGET_LOCKED,
     EXIT_USAGE_ERROR,
+    LEAF_REPORT_SCHEMA_VERSION,
 )
 from llm_conductor.core import shutdown
 from llm_conductor.core.locking import FileLock
@@ -844,6 +845,25 @@ def test_fail_on_any_error_exits_when_ratio_still_allows(workspace, model, run_m
     assert run_main(*RUN) == EXIT_FAILURE_RATIO_EXCEEDED
     assert "fail_on_any_error" in workspace.log_text()
     assert "LEAF OUTCOME SUMMARY" in workspace.log_text()
+
+
+@pytest.mark.parametrize("old_sidecar", [False, True], ids=["absent", "verify-only"])
+def test_repeated_verify_without_translation_history(workspace, model, run_main, old_sidecar):
+    workspace.write_json("sample.json", {"line": "Original"})
+    workspace.write_json(workspace.result("translated"), {"line": "Draft"})
+    sidecar_path = workspace.result("leaves")
+    if old_sidecar:
+        workspace.write_json(sidecar_path, {
+            "schema_version": LEAF_REPORT_SCHEMA_VERSION,
+            "relative_path": "sample.json",
+            "leaves": {'["line"]': {"verification": {"status": "ok"}}},
+        })
+
+    for call_count in (1, 2):
+        assert run_main(*RUN, "--stage", "verify", "--no-cache") == EXIT_SUCCESS
+        assert len(model.model_calls) == call_count
+        assert workspace.read_json(workspace.result("final")) == {"line": "OK(Draft)"}
+    assert workspace.exists(sidecar_path) is old_sidecar
 
 
 def test_verify_only_skips_translation_degraded_from_sidecar(workspace, model, run_main):

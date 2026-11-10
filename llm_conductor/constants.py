@@ -438,7 +438,7 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # discards entries without it or with another value, so a key format change
 # never needs a manual cleanup of cache_dir.
 # v2: generation-affecting sampling parameters join the key identity.
-CACHE_KEY_VERSION = 2
+CACHE_KEY_VERSION = 3
 
 # Generation-affecting sampling fields in the cache key / fingerprints:
 # (canonical name in the identity JSON, runtime_config key). keep_alive and
