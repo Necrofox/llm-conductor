@@ -16,6 +16,7 @@ from llm_conductor.cli.draft_validate import compare_json_structure
 from llm_conductor.cli.exit_status import ExitStatus
 from llm_conductor.cli.glossary import GlossaryResolver, GlossarySource
 from llm_conductor.cli.heartbeat import HeartbeatWriter
+from llm_conductor.cli.preflight import validate_target_inputs
 from llm_conductor.cli.targets import ResultLayout, RunTarget, TargetEntry
 from llm_conductor.cli.validators import (
     check_api_availability,
@@ -493,12 +494,10 @@ class TargetRunner:
         """
         Lock the target, then the cache directory (when the disk cache is
         used), then the shared result root (when results are under
-        result/<target name>/). The result-root owner marker is claimed
-        under that lock so two same-named targets cannot race.
+        result/<target name>/).
 
         Raises:
             LockUnavailableError: If a lock is held by another run.
-            TargetError: If the shared result root belongs to another target.
         """
         locks.enter_context(FileLock(self._target.path))
         if self._config.cache_enabled:
@@ -506,8 +505,6 @@ class TargetRunner:
         if self._layout.shared_by_name:
             locks.enter_context(FileLock(
                 os.path.join(self._layout.root, CACHE_LOCK_FILENAME), create=True))
-            self._layout.claim_owner(
-                self._target.path, self._config.file_ops, self._config.logger)
 
     def _execute(self, status: ExitStatus, heartbeat: HeartbeatWriter) -> None:
         """
@@ -515,9 +512,16 @@ class TargetRunner:
 
         Raises:
             ConfigValidationError: If a runtime configuration is invalid.
+            TargetError: If ownership or input preflight fails.
         """
-        # Original/draft JSON preflight runs in cli.main._execute_run before
-        # locks (and before --dry-run) via validate_target_inputs.
+        config = self._config
+        has_owner = self._layout.check_owner(self._target.path, config.file_ops, config.logger)
+        validate_target_inputs(
+            self._target, config.file_ops, config.logger,
+            layout=self._layout, default_stage=self._default_options.stage,
+        )
+        if not has_owner:
+            self._layout.claim_owner(self._target.path, config.file_ops, config.logger)
         heartbeat.start()
 
         if not self._endpoints_available():

@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-System tests for ``run --dry-run`` (GH-9).
+System tests for ``run --dry-run`` (GH-9, GH-19, GH-21).
 """
 import pytest
 
-from llm_conductor.constants import EXIT_SUCCESS, EXIT_USAGE_ERROR
+from llm_conductor.constants import (
+    CACHE_LOCK_FILENAME,
+    EXIT_SUCCESS,
+    EXIT_USAGE_ERROR,
+    RESULT_OWNER_FILENAME,
+)
 from llm_conductor.core.locking import FileLock
 
 MENU = {"title": "Main menu"}
@@ -163,4 +168,51 @@ draft = "drafts/main.ru.json"
     out = capsys.readouterr().out
     assert "verify" in out
     assert "drafts" in out.replace("\\", "/") or "main.ru.json" in out
+    assert model.requests == []
+
+
+def test_dry_run_root_null_exit_2(project, model, run_main, capsys):
+    """Root JSON null fails shared preflight (GH-19 / GH-21 scenario A)."""
+    project.write_text("project/menu/null.json", "null")
+    assert run_main(
+        "run", "--target", "project/menu/null.json", "--dry-run",
+    ) == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "null data" in combined
+    assert model.requests == []
+    assert not (project.root / "result").exists()
+
+
+def test_dry_run_verify_with_translated_exit_0(project, model, run_main, capsys):
+    """Verify-only dry-run succeeds when translated/ is present and matches."""
+    project.write_json(
+        project.result("translated", "main.json", target="main.json"),
+        {"title": "Главное меню"},
+    )
+    code = run_main(
+        "run", "--target", "project/menu/main.json", "--stage", "verify", "--dry-run",
+    )
+    assert code == EXIT_SUCCESS
+    assert "verify" in capsys.readouterr().out
+    assert model.requests == []
+    assert not project.exists(f"result/main.json/{RESULT_OWNER_FILENAME}")
+    assert not project.exists(f"result/main.json/{CACHE_LOCK_FILENAME}")
+
+
+@pytest.mark.parametrize("mode", [(), ("--dry-run",)], ids=["real", "dry-run"])
+def test_verify_refuses_translated_result_owned_by_another_target(
+        project, model, run_main, capsys, mode):
+    project.write_json("other/main.json", MENU)
+    assert run_main(
+        "run", "--target", "project/menu/main.json", "--stage", "translate",
+    ) == EXIT_SUCCESS
+    marker = project.root / "result" / "main.json" / RESULT_OWNER_FILENAME
+    owner = marker.read_text(encoding="utf-8")
+    model.requests.clear()
+
+    assert run_main(
+        "run", "--target", "other/main.json", "--stage", "verify", *mode,
+    ) == EXIT_USAGE_ERROR
+    assert "belongs to" in "".join(capsys.readouterr())
+    assert marker.read_text(encoding="utf-8") == owner
     assert model.requests == []

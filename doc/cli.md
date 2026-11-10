@@ -33,11 +33,37 @@ layout as the frozen exe). After `pip install`: `llm-conductor …`.
 `run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary/draft
 errors, exit `3` when a resolved profile/config fails to load (same as a real
 `run`). On success it prints an effective-settings table (index, original,
-draft, stage, strict, llm_config, glossary, result paths). Duplicate object
-keys in input JSON emit one WARNING per file (last value wins) and do **not**
-fail the plan. Dry-run does not acquire locks and does not report lock
-contention. There is no `plan` / `inspect` command and no `dry_run` field in
-the manifest (unknown key → exit 2).
+draft, stage, strict, llm_config, glossary, result paths). During dry-run,
+duplicate object keys in originals and drafts emit one WARNING per file
+(last value wins) and do **not** fail the plan. Dry-run does not acquire locks
+or report lock contention. There is no `plan` / `inspect` command and no
+`dry_run` field in the manifest (unknown key → exit 2).
+
+### Dry-run vs real-run failure modes
+
+Both modes check any existing result owner marker and run the same input
+preflight. Dry-run reads the marker without claiming ownership. A real run
+takes its locks first, then validates the inputs before claiming an unowned
+result directory or probing the API. A real run can create lock files even
+when input preflight fails. Dry-run makes no model calls, takes no locks, and
+writes no results.
+
+| Fault | Stages | Dry-run | Real run |
+|---|---|---|---|
+| Manifest / path / glossary / result-ownership contract | any | exit `2` | exit `2` |
+| Unreadable or invalid original JSON | any | exit `2` | exit `2` |
+| Root JSON `null` (original) | any | exit `2` | exit `2` |
+| Draft missing / unreadable / structure or marker mismatch | verify via `draft` | exit `2` | exit `2` |
+| Verify-only without `draft`: missing / unreadable / null / structure-mismatched `translated/` | `verify` | exit `2` | exit `2` |
+| Profile / conductor load failure | any | exit `3` | exit `3` |
+| Duplicate object keys in an original or draft | any | WARNING; exit `0` | Last value wins; continues |
+| API unavailable | stages that call the model | not checked | exit `4` |
+| Target / cache / result lock held | any | not checked | exit `7` |
+| Leaf degradation / request or file failure ratio | processing | not applicable | exit `5` when a failure ratio exceeds its threshold or `fail_on_any_error` is enabled and a leaf is degraded (exit `6` on circuit breaker) |
+| Stale / missing leaves sidecar gates during verify | `verify` without `draft` | not checked (sidecar optional) | warning or per-file fail as documented in [pipeline.md](pipeline.md) |
+
+`translate` and `all` do not require a prior `translated/` tree (the run
+writes it). `verify` without `draft` does.
 
 ## Run manifest (`.toml`)
 
@@ -147,8 +173,10 @@ target from another path cannot silently overwrite.
 
 ## Exit codes
 
-Only `main()` calls `sys.exit`. Priority when several problems apply:
-`1 > 3 > 2 > 4 > 7 > 6 > 5 > 130 > 0`.
+Only `main()` calls `sys.exit`. When a run records multiple exit codes, it
+uses this priority order.
+
+`1 > 3 > 2 > 4 > 7 > 6 > 5 > 130 > 0`
 
 | Code | When |
 |---|---|
@@ -162,9 +190,10 @@ Only `main()` calls `sys.exit`. Priority when several problems apply:
 | `7` | Target, cache dir, or result root locked by another run |
 | `130` | Interrupted (SIGINT/SIGTERM); caches saved, results incomplete |
 
-Unreadable or invalid input JSON (and draft structure faults) fail shared
-preflight with usage error `2` before inference. A file that parses but then
-fails during processing still counts as a failed file (ratio may yield `5`).
+Unreadable or invalid input JSON, root `null`, draft faults, and verify-only
+missing/`null`/structure-mismatched `translated/` fail shared preflight with
+usage error `2` before inference. A file that passes preflight but then fails
+during processing still counts as a failed file (ratio may yield `5`).
 
 **Warm cache + exit 5:** rejected replies are not cached. A rerun that only
 hits residual misses can exceed the failure ratio even if an earlier full

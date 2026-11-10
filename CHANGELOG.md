@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-11
+
+### Fixed
+
+- Reject invalid stage inputs consistently in dry-run and real runs,
+  check result ownership in dry-run, and preserve the lock exit code
+  when a concurrent translation has yet to write its output.
+- Restore the current original when standalone verification finds a
+  stale blank or format-only translation. Honor `fail_on_any_error`.
+
 ## [1.1.0] - 2026-11-10
 
 ### Added

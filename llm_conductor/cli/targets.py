@@ -257,32 +257,48 @@ class ResultLayout:
             TargetError: If the directory already belongs to another target
                 or the marker is corrupt / unreadable / unwritable.
         """
-        if not self.shared_by_name:
+        if not self.shared_by_name or self.check_owner(target_path, file_ops, logger):
             return
 
         canonical = os.path.normcase(os.path.abspath(target_path))
         marker_path = os.path.join(self.root, RESULT_OWNER_FILENAME)
         os.makedirs(self.root, exist_ok=True)
 
+        try:
+            wrote = safe_write_file(
+                marker_path, canonical + '\n',
+                f"result owner marker {marker_path}",
+                file_ops, logger)
+        except FileOperationError as e:
+            raise TargetError(
+                f"Cannot write the owner marker of the result directory "
+                f"{self.root}: {e}"
+            ) from e
+        if not wrote:
+            raise TargetError(
+                f"Cannot write the owner marker of the result directory {self.root}")
+
+    def check_owner(self, target_path: str, file_ops: FileOperationsProtocol,
+                    logger: Optional[Logger] = None) -> bool:
+        """Check an existing shared result owner without creating any files.
+
+        Args:
+            target_path: Absolute or relative path of the run target.
+            file_ops: File operations used to read the marker.
+            logger: Optional logger for IO helpers.
+
+        Returns:
+            True if the marker matches. False if absent or ownership is unused.
+
+        Raises:
+            TargetError: If the marker is corrupt, unreadable or foreign.
+        """
+        if not self.shared_by_name:
+            return False
+
+        marker_path = os.path.join(self.root, RESULT_OWNER_FILENAME)
         if not os.path.exists(marker_path):
-            # safe_write_file may return False or raise FileOperationError
-            # (including after a fallback copy next to the path). Both mean
-            # the marker is not at marker_path — map to TargetError so the
-            # entry point exits EXIT_USAGE_ERROR (2), not INTERNAL (1).
-            try:
-                wrote = safe_write_file(
-                    marker_path, canonical + '\n',
-                    f"result owner marker {marker_path}",
-                    file_ops, logger)
-            except FileOperationError as e:
-                raise TargetError(
-                    f"Cannot write the owner marker of the result directory "
-                    f"{self.root}: {e}"
-                ) from e
-            if not wrote:
-                raise TargetError(
-                    f"Cannot write the owner marker of the result directory {self.root}")
-            return
+            return False
 
         try:
             text = cast(str, safe_read_file(
@@ -301,9 +317,11 @@ class ResultLayout:
                 f"({RESULT_OWNER_FILENAME}); delete it or use --result2target"
             )
 
+        canonical = os.path.normcase(os.path.abspath(target_path))
         recorded = os.path.normcase(os.path.abspath(content))
         if recorded != canonical:
             raise TargetError(
                 f"Result directory {self.root} belongs to {recorded}, not {canonical}; "
                 f"delete that directory or use --result2target"
             )
+        return True
