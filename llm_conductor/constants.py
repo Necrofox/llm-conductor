@@ -361,7 +361,7 @@ RESULT_DIR_NAME = 'result'
 LEAVES_DIR_NAME = 'leaves'
 RUN_REPORT_FILENAME = 'run_report.json'
 USAGE_REPORT_FILENAME = 'usage.json'
-LEAF_REPORT_SCHEMA_VERSION = 1
+LEAF_REPORT_SCHEMA_VERSION = 2
 USAGE_REPORT_SCHEMA_VERSION = 1
 
 # Per-leaf outcome statuses (machine report / verify-skip contract).
@@ -374,6 +374,10 @@ LEAF_STATUS_VERIFY_SKIPPED = 'verify_skipped'
 
 # Why verification was skipped for a leaf (never inferred from string equality).
 LEAF_SKIP_REASON_TRANSLATION_DEGRADED = 'translation_degraded'
+LEAF_SKIP_REASON_TRANSLATION_MISSING = 'translation_missing'
+
+# Verification degraded because translated/sidecar English no longer matches.
+LEAF_ERROR_KIND_SOURCE_STALE = 'source_stale'
 
 # UsageLedger attempt outcomes and the separate preflight bucket.
 USAGE_OUTCOME_SUCCESS = 'success'

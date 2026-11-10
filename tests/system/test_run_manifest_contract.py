@@ -144,6 +144,22 @@ draft = "drafts/main.ru.json"
     assert model.requests == []
 
 
+def test_draft_marker_mismatch_exits_2_before_api(project, model, run_main, capsys):
+    """D2: draft that already lost placeholders must fail preflight."""
+    project.write_json("project/menu/main.json", {"line": "Open {0}."})
+    project.write_json("project/drafts/main.ru.json", {"line": "Открой."})
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 1:" in combined
+    assert "marker" in combined
+    assert model.requests == []
+
+
 def test_draft_verify_calls_only_verification_and_keeps_inputs(
         project, model, run_main):
     project.write_json("project/drafts/main.ru.json", DRAFT)

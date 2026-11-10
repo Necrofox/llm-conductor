@@ -118,6 +118,22 @@ draft = "drafts/main.ru.json"
     assert not (project.root / "result").exists()
 
 
+def test_dry_run_draft_marker_mismatch_exit_2(project, model, run_main, capsys):
+    project.write_json("project/menu/main.json", {"line": "Open {0}."})
+    project.write_json("project/drafts/main.ru.json", {"line": "Открой."})
+    project.write_text("project/ui.toml", """
+[[targets]]
+original = "menu/main.json"
+draft = "drafts/main.ru.json"
+""")
+    assert run_main("run", "--target", "project/ui.toml", "--dry-run") == EXIT_USAGE_ERROR
+    combined = "".join(capsys.readouterr())
+    assert "target 1:" in combined
+    assert "marker" in combined
+    assert model.requests == []
+    assert not (project.root / "result").exists()
+
+
 def test_dry_run_collects_preflight_errors_across_targets(project, model, run_main, capsys):
     project.write_json("project/drafts/main.ru.json", {"title": "x", "extra": "nope"})
     project.write_text("project/ui.toml", """

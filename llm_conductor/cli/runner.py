@@ -253,18 +253,19 @@ class FilePipeline:
 
     def _load_leaves_sidecar(self, entry: TargetEntry) -> None:
         """
-        Load translation statuses so verify-only can skip translation_degraded.
+        Load translation statuses for verify-only gates (degraded / missing / stale).
 
         Missing sidecar: verification still runs; log once that skip protection
-        is unavailable.
+        is unavailable. A successful merge enables ``translation_missing`` skips
+        for leaves the prior translate stage never recorded.
         """
         path = self._layout.leaves_path(entry)
         if not os.path.isfile(path):
             if self._config.leaf_outcomes.note_sidecar_missing():
                 self._config.logger.warning(
-                    "Leaf status sidecar missing; verification cannot skip "
-                    "translation_degraded leaves (status is not inferred from "
-                    "string equality)."
+                    "Leaf status sidecar missing; verification cannot apply "
+                    "translation_degraded / translation_missing gates (status "
+                    "is not inferred from string equality)."
                 )
             return
         try:

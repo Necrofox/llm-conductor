@@ -30,8 +30,9 @@ layout as the frozen exe). After `pip install`: `llm-conductor …`.
 
 `check` validates TOML only (not manifests, locks, or live API).
 `run --dry-run` is the target/manifest audit: same settings resolver as a real
-`run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary
-errors. On success it prints an effective-settings table (index, original,
+`run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary/draft
+errors, exit `3` when a resolved profile/config fails to load (same as a real
+`run`). On success it prints an effective-settings table (index, original,
 draft, stage, strict, llm_config, glossary, result paths). Duplicate object
 keys in input JSON emit one WARNING per file (last value wins) and do **not**
 fail the plan. Dry-run does not acquire locks and does not report lock
@@ -86,8 +87,10 @@ result-path collisions are rejected.
 Optional `[[targets]].draft` is the only way to feed a frozen translation
 into verification. It implies stage `verify` (editor model only). Setting
 `stage` on the **same** target → exit 2. Run-level `stage` is unused for that
-target (not a conflict). Original and draft are matched by full JSON key
-path before any API call; neither file is mutated. There is **no** CLI
+target (not a conflict). Before any API call, original and draft are matched
+by full JSON key path **and** by tag/placeholder multiset per string leaf
+(`{N}`, newlines, XML-like tags — same pattern as reply masking). Structure
+or marker mismatch → exit 2. Neither file is mutated. There is **no** CLI
 `--draft` / `--original`. A lone `--target file.json` cannot take a draft —
 use a one-entry `.toml`.
 
@@ -130,16 +133,17 @@ target / manifest.
 | `{result}/final/{rel}` | Always (also partial on circuit-breaker abort) |
 | `{result}/run_report.json` | Per-leaf stage status + aggregates |
 | `{result}/usage.json` | Token attempts by provider / model / stage |
-| `{result}/leaves/{rel}.json` | Sidecar for verify-skip across stage splits |
+| `{result}/leaves/{rel}` | Sidecar for verify-skip across stage splits |
 
 Semantics of statuses and usage outcomes:
 [pipeline.md](pipeline.md#reports).
 
 `{rel}` is the path relative to the manifest directory (or the file name for
-a single target). Inputs are never modified. An input that already lies under
-`{result}` is rejected. Shared `result/<name>/` is claimed with
-`.llmc.target` so a same-named target from another path cannot silently
-overwrite.
+a single target), including its `.json` suffix when present — so a target
+`job.json` writes `leaves/job.json` (not `leaves/job.json.json`). Inputs are
+never modified. An input that already lies under `{result}` is rejected.
+Shared `result/<name>/` is claimed with `.llmc.target` so a same-named
+target from another path cannot silently overwrite.
 
 ## Exit codes
 

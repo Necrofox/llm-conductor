@@ -831,19 +831,23 @@ def test_fail_on_any_error_exits_when_ratio_still_allows(workspace, model, run_m
 
 def test_verify_only_skips_translation_degraded_from_sidecar(workspace, model, run_main):
     """Standalone verify loads leaves sidecar and does not call the editor for degraded leaves."""
+    from llm_conductor.core.leaf_report import hash_text
+    from llm_conductor.l10n.context import KeyPath
+
     assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
 
     leaves_path = "result/sample.json/leaves/sample.json"
     sidecar = workspace.read_json(leaves_path)
-    leaf_path = "ui.title"
+    leaf_path = KeyPath(("ui", "title")).report_key()
     assert leaf_path in sidecar["leaves"]
+    original_digest = hash_text(SAMPLE["ui"]["title"])
     sidecar["leaves"][leaf_path]["translation"] = {
         "status": "degraded",
         "cache_hit": False,
         "degraded": True,
         "error_kind": "rejected",
-        "source_hash": "abc",
-        "output_hash": "abc",
+        "source_hash": original_digest,
+        "output_hash": original_digest,
     }
     workspace.write_json(leaves_path, sidecar)
 
@@ -861,3 +865,84 @@ def test_verify_only_skips_translation_degraded_from_sidecar(workspace, model, r
     assert updated["leaves"][leaf_path]["verification"]["status"] == "verify_skipped"
     final = workspace.read_json(workspace.result("final"))
     assert final["ui"]["title"] == SAMPLE["ui"]["title"]
+
+
+def test_verify_restores_original_when_source_hash_is_stale(workspace, model, run_main):
+    """D1: changed original must not keep the old translation through verify."""
+    from llm_conductor.constants import LEAF_ERROR_KIND_SOURCE_STALE
+    from llm_conductor.l10n.context import KeyPath
+
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    mutated = dict(SAMPLE)
+    mutated["ui"] = dict(SAMPLE["ui"])
+    mutated["ui"]["title"] = "Close {1}."
+    workspace.write_json("sample.json", mutated)
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify", "--no-cache") == EXIT_SUCCESS
+    # Stale leaf must not be sent to the editor as draft text.
+    for payload in model.model_calls[before:]:
+        content = payload["messages"][-1]["content"]
+        if VERIFY_PROMPT not in content:
+            continue
+        after_prompt = content.split(VERIFY_PROMPT, 1)[-1]
+        draft_body = after_prompt.split("[ORIGINAL]:", 1)[0]
+        assert "Close {1}." not in draft_body
+
+    leaf_path = KeyPath(("ui", "title")).report_key()
+    report = workspace.read_json("result/sample.json/run_report.json")
+    verification = report["files"]["sample.json"][leaf_path]["verification"]
+    assert verification["status"] == "degraded"
+    assert verification["error_kind"] == LEAF_ERROR_KIND_SOURCE_STALE
+    final = workspace.read_json(workspace.result("final"))
+    assert final["ui"]["title"] == "Close {1}."
+
+
+def test_report_distinguishes_literal_dotted_key_from_nested_path(workspace, model, run_main):
+    """D3: literal 'a.b' and nested a→b must not share one report key."""
+    from llm_conductor.l10n.context import KeyPath
+
+    payload = {"a.b": "Literal.", "a": {"b": "Nested."}}
+    workspace.write_json("sample.json", payload)
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+
+    report = workspace.read_json("result/sample.json/run_report.json")
+    leaves = report["files"]["sample.json"]
+    literal = KeyPath(("a.b",)).report_key()
+    nested = KeyPath(("a", "b")).report_key()
+    assert literal != nested
+    assert literal in leaves
+    assert nested in leaves
+    assert report["schema_version"] == 2
+
+
+def test_verify_after_breaker_skips_untouched_leaves(workspace, model, run_main, no_sleep):
+    """D4: verify must not send circuit-breaker-untouched English to the editor."""
+    from llm_conductor.constants import LEAF_SKIP_REASON_TRANSLATION_MISSING
+    from llm_conductor.l10n.context import KeyPath
+
+    workspace.write_json("sample.json", {
+        "first": "Open {0}.",
+        "second": "Close {0}.",
+        "after": "Another leaf.",
+    })
+    workspace.write_configs(
+        resilience__max_consecutive_failures=1,
+        resilience__max_failure_ratio=1.0,
+    )
+    model.fail_model_calls = True
+    assert run_main(*RUN, "--stage", "translate") == EXIT_CONSECUTIVE_FAILURES
+
+    model.fail_model_calls = False
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") == EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+
+    after_key = KeyPath(("after",)).report_key()
+    report = workspace.read_json("result/sample.json/run_report.json")
+    verification = report["files"]["sample.json"][after_key]["verification"]
+    assert verification["status"] == "verify_skipped"
+    assert verification["reason"] == LEAF_SKIP_REASON_TRANSLATION_MISSING
+    final = workspace.read_json(workspace.result("final"))
+    assert final["after"] == "Another leaf."

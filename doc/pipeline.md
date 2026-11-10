@@ -70,10 +70,22 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
   whole tree; the original string is kept. The outcome is recorded as
   `degraded` from the request/validation result — never inferred from
   `result == source` (names and ids may legally stay identical).
-- **Verify skip:** by default, leaves with `translation_degraded` do **not**
-  enter normal verification (no editor call on the English fallback). Status
-  is persisted under `result/<target>/leaves/<relative>.json` so a standalone
-  `--stage verify` still sees the flag.
+- **Verify gates** (standalone `--stage verify` with a loaded leaves sidecar,
+  and same-run verify after translate). Decisions come from stage outcomes /
+  hashes — never from `value == original`:
+  - `translation_degraded` → `verify_skipped` (no editor call on the English
+    fallback).
+  - no translation stage record after a successful sidecar merge →
+    `verify_skipped` with reason `translation_missing` (e.g. leaf never
+    reached after a circuit-breaker abort). Keeps the current tree value.
+  - translation `source_hash` present and unequal to the hash of the current
+    original leaf → `degraded` with `error_kind=source_stale`; restore the
+    current original (no editor call). Counts toward failure ratio /
+    `fail_on_any_error`.
+  - Frozen `draft` verify does not load the sidecar; draft marker/structure
+    preflight covers that path instead.
+  Status is persisted under `result/<target>/leaves/<relative>` so a later
+  verify still sees prior translation outcomes.
 - **Circuit breaker:** `[resilience].max_consecutive_failures` stops further
   leaves for that stage (same path as shutdown); exit `6`.
 - **Failure ratio:** after the run, request and file failure ratios vs
@@ -92,7 +104,21 @@ After a run, the result root also gets:
 |---|---|
 | `run_report.json` | Per-leaf stage status (`ok` / `cache_hit` / `dedup` / `degraded` / `verify_skipped` / …), hashes, aggregates |
 | `usage.json` | Token attempts by provider/model/stage (retries included); outcomes `success` / `rejected` / `failed`; preflight separate; cache/dedup non-API counts; unknown usage marked |
-| `leaves/<relative>.json` | Per-file sidecar used for verify-skip across stage splits |
+| `leaves/<relative>` | Per-file sidecar used for verify gates across stage splits (`<relative>` is the same path as under `translated/` / `final/`) |
+
+Leaf identities in `run_report.json` / sidecars (schema version **2**) are
+compact JSON arrays of `KeyPath` segments (e.g. `["a.b"]` vs `["a","b"]`),
+so a literal dotted key cannot collide with a nested path. Logs still show
+the human dotted form.
+
+Aggregate units in `run_report.json`:
+
+| Field | Counts |
+|---|---|
+| `skipped` | Format/blank stage records (a leaf can contribute once per stage) |
+| `verify_skipped` | Verification skipped (`translation_degraded` or `translation_missing`) |
+| `api_calls` | Leaf stage outcomes with status `ok` or `degraded` — **not** HTTP attempts |
+| `usage.json` attempts | Every HTTP try including retries, plus a separate preflight bucket |
 
 The final log banner includes explicit `untranslated` / `degraded` /
 `verify_skipped` counts.

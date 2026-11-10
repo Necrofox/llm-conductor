@@ -3,12 +3,15 @@
 Shared input preflight for ``run`` and ``run --dry-run``.
 
 Reads every original (and draft when set), checks JSON parseability, and
-compares draft structure to the original. Collects all faults before raising.
+compares draft structure and marker multisets to the original. Collects all
+faults before raising.
 """
 from typing import Any, Dict, List
 
 from llm_conductor.cli.draft_validate import (
+    compare_draft_markers,
     compare_json_structure,
+    format_draft_marker_errors,
     format_draft_structure_errors,
 )
 from llm_conductor.cli.targets import RunTarget
@@ -31,8 +34,8 @@ def validate_target_inputs(
         logger: Logger of the run.
 
     Raises:
-        TargetError: Collecting all IO / JSON / draft-structure faults, with
-            1-based target index when the fault is per-entry.
+        TargetError: Collecting all IO / JSON / draft-structure / marker
+            faults, with 1-based target index when the fault is per-entry.
     """
     blocks: List[str] = []
     originals: Dict[str, Any] = {}
@@ -61,9 +64,13 @@ def validate_target_inputs(
         except FileOperationError as e:
             blocks.append(f"  target {entry.index}: {e}")
             continue
-        issues = compare_json_structure(originals[entry.source_path], draft)
-        if issues:
-            blocks.append(format_draft_structure_errors(entry.index, issues))
+        structure_issues = compare_json_structure(originals[entry.source_path], draft)
+        if structure_issues:
+            blocks.append(format_draft_structure_errors(entry.index, structure_issues))
+            continue
+        marker_issues = compare_draft_markers(originals[entry.source_path], draft)
+        if marker_issues:
+            blocks.append(format_draft_marker_errors(entry.index, marker_issues))
 
     if blocks:
         raise TargetError(

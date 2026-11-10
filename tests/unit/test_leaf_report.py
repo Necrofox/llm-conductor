@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """Unit tests for LeafOutcomeRecorder and helpers."""
 from llm_conductor.constants import (
+    LEAF_ERROR_KIND_SOURCE_STALE,
     LEAF_SKIP_REASON_TRANSLATION_DEGRADED,
+    LEAF_SKIP_REASON_TRANSLATION_MISSING,
     LEAF_STATUS_DEGRADED,
     LEAF_STATUS_OK,
     LEAF_STATUS_VERIFY_SKIPPED,
@@ -10,8 +12,10 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core.leaf_report import (
     LeafOutcomeRecorder,
+    hash_text,
     make_degraded,
     make_ok,
+    make_source_stale,
     make_verify_skipped,
 )
 
@@ -81,3 +85,36 @@ def test_note_sidecar_missing_only_once():
     recorder = LeafOutcomeRecorder()
     assert recorder.note_sidecar_missing() is True
     assert recorder.note_sidecar_missing() is False
+
+
+def test_sidecar_merge_sets_flag_and_exposes_translation_record():
+    recorder = LeafOutcomeRecorder()
+    assert recorder.sidecar_was_merged() is False
+    recorder.merge_sidecar("ui.json", {
+        "leaves": {
+            '["t"]': {
+                OPERATION_TRANSLATION: make_ok("Hello", "Привет").to_dict(),
+            }
+        }
+    })
+    recorder.set_active_file("ui.json")
+    assert recorder.sidecar_was_merged() is True
+    record = recorder.get_translation_record('["t"]')
+    assert record is not None
+    assert record.source_hash == hash_text("Hello")
+    assert recorder.get_translation_record('["missing"]') is None
+
+
+def test_make_verify_skipped_accepts_translation_missing_reason():
+    record = make_verify_skipped("x", reason=LEAF_SKIP_REASON_TRANSLATION_MISSING)
+    assert record.status == LEAF_STATUS_VERIFY_SKIPPED
+    assert record.reason == LEAF_SKIP_REASON_TRANSLATION_MISSING
+
+
+def test_make_source_stale_is_degraded_with_current_original_hashes():
+    record = make_source_stale("Close {1}.")
+    assert record.status == LEAF_STATUS_DEGRADED
+    assert record.degraded is True
+    assert record.error_kind == LEAF_ERROR_KIND_SOURCE_STALE
+    assert record.source_hash == hash_text("Close {1}.")
+    assert record.output_hash == hash_text("Close {1}.")

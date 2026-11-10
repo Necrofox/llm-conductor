@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from llm_conductor.constants import (
     FAILURE_KIND_REJECTED,
     GLOSSARY_MARKER,
+    LEAF_SKIP_REASON_TRANSLATION_MISSING,
     LINGUISTIC_CONTEXT_BLOCK_TEMPLATE,
     LINGUISTIC_CONTEXT_MARKER,
     MODE_STYLE,
@@ -26,9 +27,11 @@ from llm_conductor.constants import (
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
 from llm_conductor.core.leaf_report import (
+    hash_text,
     make_degraded,
     make_ok,
     make_skipped,
+    make_source_stale,
     make_verify_skipped,
 )
 from llm_conductor.core.shutdown import is_shutdown_requested
@@ -422,7 +425,8 @@ class RecursiveProcessor:
     ) -> str:
         """Body of ``_process_leaf``; the outer wrapper always notes the leaf."""
         operation_type = OPERATION_VERIFICATION if is_verification else OPERATION_TRANSLATION
-        leaf_path = str(path)
+        leaf_path = path.report_key()
+        path_label = str(path)
         outcomes = self.config.leaf_outcomes
 
         if not value.strip() or is_format_only_leaf(value):
@@ -431,17 +435,49 @@ class RecursiveProcessor:
             outcomes.record(leaf_path, operation_type, make_skipped(value))
             return value
 
-        # Skip normal verification when translation already degraded — decided
-        # from the prior stage outcome, never from value == original_data.
-        if is_verification and outcomes.is_translation_degraded(leaf_path):
-            with self._stats_lock:
-                self.stats['skipped_leaves'] += 1
-            outcomes.record(leaf_path, operation_type, make_verify_skipped(value))
-            if self.config.is_debug_mode:
-                self.config.logger.debug(
-                    f"Skipping verification for {leaf_path}: translation_degraded"
+        # Verify gates from sidecar / prior stage — never from value == original.
+        if is_verification:
+            translation = outcomes.get_translation_record(leaf_path)
+            if outcomes.sidecar_was_merged() and translation is None:
+                with self._stats_lock:
+                    self.stats['skipped_leaves'] += 1
+                outcomes.record(
+                    leaf_path,
+                    operation_type,
+                    make_verify_skipped(
+                        value, reason=LEAF_SKIP_REASON_TRANSLATION_MISSING,
+                    ),
                 )
-            return value
+                if self.config.is_debug_mode:
+                    self.config.logger.debug(
+                        f"Skipping verification for {path_label}: translation_missing"
+                    )
+                return value
+
+            if (
+                translation is not None
+                and translation.source_hash
+                and isinstance(original_data, str)
+                and hash_text(original_data) != translation.source_hash
+            ):
+                with self._stats_lock:
+                    self.stats['failed_leaves'] += 1
+                outcomes.record(leaf_path, operation_type, make_source_stale(original_data))
+                self.config.logger.warning(
+                    f"Stale translation for {path_label}: original changed since "
+                    f"translate; restoring current original (no editor call)"
+                )
+                return original_data
+
+            if outcomes.is_translation_degraded(leaf_path):
+                with self._stats_lock:
+                    self.stats['skipped_leaves'] += 1
+                outcomes.record(leaf_path, operation_type, make_verify_skipped(value))
+                if self.config.is_debug_mode:
+                    self.config.logger.debug(
+                        f"Skipping verification for {path_label}: translation_degraded"
+                    )
+                return value
 
         prefix, core, suffix = split_boundary_whitespace(value)
 
