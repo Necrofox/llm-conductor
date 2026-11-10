@@ -955,6 +955,69 @@ def test_verify_restores_original_when_source_hash_is_stale(workspace, model, ru
     assert final["ui"]["title"] == "Close {1}."
 
 
+@pytest.mark.parametrize(
+    "translated_value, mutated_original",
+    [
+        ("", "New text"),
+        ("{0}", "New text {0}"),
+    ],
+    ids=["blank", "format-only"],
+)
+def test_verify_detects_stale_source_for_blank_or_format_only_leaf(
+        workspace, model, run_main, translated_value, mutated_original):
+    """#28: blank/format-only draft must not skip the source_hash check."""
+    from llm_conductor.constants import LEAF_ERROR_KIND_SOURCE_STALE
+    from llm_conductor.l10n.context import KeyPath
+
+    workspace.write_configs(
+        resilience__max_failure_ratio=1.0,
+        resilience__fail_on_any_error=True,
+        preflight__check_availability=False,
+    )
+    workspace.write_json("sample.json", {"line": translated_value})
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+    assert model.model_calls == []
+
+    workspace.write_json("sample.json", {"line": mutated_original})
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") == EXIT_FAILURE_RATIO_EXCEEDED
+    assert model.model_calls[before:] == []
+    assert "fail_on_any_error" in workspace.log_text()
+
+    leaf_path = KeyPath(("line",)).report_key()
+    report = workspace.read_json("result/sample.json/run_report.json")
+    verification = report["files"]["sample.json"][leaf_path]["verification"]
+    assert verification["status"] == "degraded"
+    assert verification["error_kind"] == LEAF_ERROR_KIND_SOURCE_STALE
+    assert workspace.read_json(workspace.result("final")) == {"line": mutated_original}
+
+
+@pytest.mark.parametrize(
+    "leaf_value",
+    ["", "{0}"],
+    ids=["blank", "format-only"],
+)
+def test_verify_still_skips_unchanged_blank_or_format_only_leaf(
+        workspace, model, run_main, leaf_value):
+    """#28: unchanged blank/format-only leaves keep skipping the editor."""
+    from llm_conductor.l10n.context import KeyPath
+
+    workspace.write_configs(preflight__check_availability=False)
+    workspace.write_json("sample.json", {"line": leaf_value})
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+    assert model.model_calls == []
+
+    before = len(model.model_calls)
+    assert run_main(*RUN, "--stage", "verify") == EXIT_SUCCESS
+    assert model.model_calls[before:] == []
+
+    leaf_path = KeyPath(("line",)).report_key()
+    report = workspace.read_json("result/sample.json/run_report.json")
+    verification = report["files"]["sample.json"][leaf_path]["verification"]
+    assert verification["status"] == "skipped"
+    assert workspace.read_json(workspace.result("final")) == {"line": leaf_value}
+
+
 def test_report_distinguishes_literal_dotted_key_from_nested_path(workspace, model, run_main):
     """D3: literal 'a.b' and nested a→b must not share one report key."""
     from llm_conductor.l10n.context import KeyPath

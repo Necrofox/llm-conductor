@@ -85,7 +85,9 @@ write the full masked reply under `[logging].dir/rejected/<operation>/`.
   - translation `source_hash` present and unequal to the hash of the current
     original leaf → `degraded` with `error_kind=source_stale`; restore the
     current original (no editor call). Counts toward failure ratio /
-    `fail_on_any_error`.
+    `fail_on_any_error`. Evaluated before the blank / format-only skip, so a
+    stale empty or placeholder-only draft cannot keep the old value in
+    `final/`.
   - Verify-only from `translated/`: JSON structure (keys, types, array lengths)
     must match the current original before any editor call or `final/` write.
     Text-only leaf changes at the same path stay on the `source_stale` path.

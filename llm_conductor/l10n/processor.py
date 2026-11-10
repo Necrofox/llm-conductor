@@ -429,15 +429,34 @@ class RecursiveProcessor:
         path_label = str(path)
         outcomes = self.config.leaf_outcomes
 
+        # Verify gates from sidecar / prior stage — never from value == original.
+        # source_stale must run before blank/format-only skip: a blank or
+        # placeholder-only draft still hides a changed original (#28).
+        translation = (
+            outcomes.get_translation_record(leaf_path) if is_verification else None
+        )
+        if is_verification and (
+            translation is not None
+            and translation.source_hash
+            and isinstance(original_data, str)
+            and hash_text(original_data) != translation.source_hash
+        ):
+            with self._stats_lock:
+                self.stats['failed_leaves'] += 1
+            outcomes.record(leaf_path, operation_type, make_source_stale(original_data))
+            self.config.logger.warning(
+                f"Stale translation for {path_label}: original changed since "
+                f"translate; restoring current original (no editor call)"
+            )
+            return original_data
+
         if not value.strip() or is_format_only_leaf(value):
             with self._stats_lock:
                 self.stats['skipped_leaves'] += 1
             outcomes.record(leaf_path, operation_type, make_skipped(value))
             return value
 
-        # Verify gates from sidecar / prior stage — never from value == original.
         if is_verification:
-            translation = outcomes.get_translation_record(leaf_path)
             if outcomes.sidecar_was_merged() and translation is None:
                 with self._stats_lock:
                     self.stats['skipped_leaves'] += 1
@@ -453,21 +472,6 @@ class RecursiveProcessor:
                         f"Skipping verification for {path_label}: translation_missing"
                     )
                 return value
-
-            if (
-                translation is not None
-                and translation.source_hash
-                and isinstance(original_data, str)
-                and hash_text(original_data) != translation.source_hash
-            ):
-                with self._stats_lock:
-                    self.stats['failed_leaves'] += 1
-                outcomes.record(leaf_path, operation_type, make_source_stale(original_data))
-                self.config.logger.warning(
-                    f"Stale translation for {path_label}: original changed since "
-                    f"translate; restoring current original (no editor call)"
-                )
-                return original_data
 
             if outcomes.is_translation_degraded(leaf_path):
                 with self._stats_lock:
