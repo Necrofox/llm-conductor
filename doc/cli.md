@@ -115,7 +115,10 @@ into verification. It implies stage `verify` (editor model only). Setting
 `stage` on the **same** target → exit 2. Run-level `stage` is unused for that
 target (not a conflict). Before any API call, original and draft are matched
 by full JSON key path **and** by tag/placeholder multiset per string leaf
-(`{N}`, newlines, XML-like tags — same pattern as reply masking). Structure
+(selected by `[processing].mask_pattern` in the target's effective `llm_config`
+profile, the same rule as reply masking;
+defaults protect `{N}`, newlines, XML-like tags). See [content.md](content.md)
+for the contract and recipes. Structure
 or marker mismatch → exit 2. Neither file is mutated. There is **no** CLI
 `--draft` / `--original`. A lone `--target file.json` cannot take a draft —
 use a one-entry `.toml`.

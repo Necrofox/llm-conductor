@@ -38,14 +38,14 @@ from llm_conductor.core.io import FileOperations, safe_read_file
 from llm_conductor.exceptions import FileOperationError
 
 REPO = Path(__file__).resolve().parents[1]
-COPIED_DIRS = ("llm_conductor", "tests")
+COPIED_DIRS = ("llm_conductor", "tests", "doc")
 COPIED_FILES = ("llm-conductor.py", "pytest.ini")
 
 # (id, file, old, new, description[, equivalent])
 MUTANTS = [
     # (id, file, old, new, description)
     ("unmask_order", "llm_conductor/utils.py", "key=len, reverse=True", "key=len, reverse=False", "unmask: [T1]/[T10] replacement order", True),
-    ("mask_counter", "llm_conductor/utils.py", 'marker = f"[{prefix}{next(counter)}]"', 'marker = f"[{prefix}0]"', "mask: marker counter does not increment"),
+    ("mask_counter", "llm_conductor/utils.py", 'marker = f"[{prefix}{counter}]"', 'marker = f"[{prefix}0]"', "mask: marker counter does not increment"),
     ("mask_prefix_ignores_collision", "llm_conductor/utils.py",
      "if not re.search(r'\\[' + re.escape(prefix) + r'\\d+\\]', text):",
      "if True:",
@@ -55,6 +55,11 @@ MUTANTS = [
      "return prompt + original_text_block",
      "verify: [ORIGINAL] block is inserted after the text label, not before it"),
     ("mask_no_newline", "llm_conductor/constants.py", r"|(?:\n)|", "|", "regex does not mask \\n"),
+    ("content_joins_fragments", "llm_conductor/l10n/content.py", "parts.extend((core[previous:start], CONTENT_MASK_REPLACEMENT))", "parts.extend((core[previous:start], ''))", "content eligibility joins text across protection"),
+    ("content_gate_disabled", "llm_conductor/l10n/content.py", "return self._required.search(self.eligibility_text(text)) is not None", "return True", "content eligibility ignores the required pattern"),
+    ("custom_mask_ignored", "llm_conductor/l10n/processor.py", "masked_text, tag_map = mask_tags(core, rules)", "masked_text, tag_map = mask_tags(core)", "model masking ignores the custom content policy"),
+    ("profile_content_ignored", "llm_conductor/l10n/processor.py", "rules = runtime_config.get('processing', self.config.processing)", "rules = self.config.processing", "manifest processing uses the bootstrap profile"),
+    ("key_no_content", "llm_conductor/core/cache.py", "api_url, sorted(set(allowed_scripts)), content_identity,", "api_url, sorted(set(allowed_scripts)),", "cache key ignores content policy"),
     ("key_no_model", "llm_conductor/core/cache.py", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "CACHE_KEY_VERSION, operation_type, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "cache key without model"),
     ("key_no_prompt", "llm_conductor/core/cache.py", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            mode, value, sampling_identity,", "cache key without assembled prompt"),
     ("key_no_sampling", "llm_conductor/core/cache.py", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value,", "cache key without sampling identity"),

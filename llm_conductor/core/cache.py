@@ -13,6 +13,7 @@ from llm_conductor.constants import (
     CACHE_FINGERPRINT_LENGTH,
     CACHE_KEY_VERSION,
     CACHE_SAMPLING_IDENTITY_FIELDS,
+    DEFAULT_CONTENT_IDENTITY,
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
@@ -787,14 +788,15 @@ class CacheManager:
     def create_cache_key(self, operation_type: str, model: str, system_prompt: str,
                           enhanced_prompt: str, mode: str, value: str,
                           sampling_identity: str, *, api_url: str = '',
-                          allowed_scripts: Tuple[str, ...] = ()) -> str:
+                          allowed_scripts: Tuple[str, ...] = (),
+                          content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY) -> str:
         """
         Build an MD5 cache key from the full request sent to the model.
 
         The key is MD5 of the canonical JSON
         ``[CACHE_KEY_VERSION, operation_type, model, system_prompt,
         enhanced_prompt, mode, value, sampling_identity, api_url,
-        sorted_allowed_scripts]``.
+        sorted_allowed_scripts, content_identity]``.
         ``enhanced_prompt`` is the already assembled prompt (linguistic hints
         and glossary included — see RecursiveProcessor._build_enhanced_prompt)
         and is hashed whole, not by component, so any future prompt ingredient
@@ -814,6 +816,7 @@ class CacheManager:
                 ``build_sampling_identity``.
             api_url: Endpoint that generates the reply.
             allowed_scripts: Writing systems allowed by the active profile.
+            content_identity: Eligibility and masking expressions.
 
         Returns:
             32-character MD5 hex digest.
@@ -821,7 +824,7 @@ class CacheManager:
         cache_key_data = [
             CACHE_KEY_VERSION, operation_type, model, system_prompt,
             enhanced_prompt, mode, value, sampling_identity,
-            api_url, sorted(set(allowed_scripts)),
+            api_url, sorted(set(allowed_scripts)), content_identity,
         ]
         cache_key_str = json.dumps(cache_key_data, ensure_ascii=False)
         return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
@@ -829,7 +832,8 @@ class CacheManager:
     def compute_fingerprints(self, operation_type: str, model: str, system_prompt: str,
                               prompt_template: str, hints_text: str, glossary_string: str,
                               mode: str, sampling_identity: str, *, api_url: str = '',
-                              allowed_scripts: Tuple[str, ...] = ()) -> dict:
+                              allowed_scripts: Tuple[str, ...] = (),
+                              content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY) -> dict:
         """
         Build short component fingerprints for miss diagnostics.
 
@@ -853,6 +857,7 @@ class CacheManager:
                 ``build_sampling_identity``.
             api_url: Endpoint that generates the reply.
             allowed_scripts: Writing systems allowed by the active profile.
+            content_identity: Eligibility and masking expressions.
 
         Returns:
             Mapping of component name to truncated hex digest.
@@ -869,6 +874,7 @@ class CacheManager:
             'sampling': sampling_identity,
             'api_url': api_url,
             'allowed_scripts': json.dumps(sorted(set(allowed_scripts))),
+            'content_rules': json.dumps(content_identity, ensure_ascii=False),
         }
         return {
             name: hashlib.md5(text.encode('utf-8')).hexdigest()[:CACHE_FINGERPRINT_LENGTH]

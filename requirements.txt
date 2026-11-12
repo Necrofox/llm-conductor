@@ -18,3 +18,5 @@
 # HTTP-клиент для Ollama / OpenAI-совместимых API
 # llm_conductor/core/api_client.py, llm_conductor/cli/validators.py
 requests>=2.31.0,<3.0.0
+# Unicode-aware content rules, including \p{L}.
+regex>=2024.11.6

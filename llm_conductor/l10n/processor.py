@@ -49,7 +49,6 @@ from llm_conductor.l10n.context import (
 )
 from llm_conductor.l10n.validation import ReplyValidationResult, validate_model_reply
 from llm_conductor.utils import (
-    is_format_only_leaf,
     mask_tags,
     split_boundary_whitespace,
     unmask_tags,
@@ -433,6 +432,7 @@ class RecursiveProcessor:
         leaf_path = path.report_key()
         path_label = str(path)
         outcomes = self.config.leaf_outcomes
+        rules = runtime_config.get('processing', self.config.processing)
 
         # Verify gates from sidecar / prior stage — never from value == original.
         # source_stale must run before blank/format-only skip: a blank or
@@ -455,7 +455,7 @@ class RecursiveProcessor:
             )
             return original_data
 
-        if not value.strip() or is_format_only_leaf(value):
+        if not rules.accepts(value):
             with self._stats_lock:
                 self.stats['skipped_leaves'] += 1
             outcomes.record(leaf_path, operation_type, make_skipped(value))
@@ -502,7 +502,9 @@ class RecursiveProcessor:
         # masking (below) cannot corrupt either side.
         original_text_block = ""
         if is_verification and isinstance(original_data, str) and original_data.strip():
-            masked_original, original_tag_map = mask_tags(original_data)
+            original_prefix, original_core, original_suffix = split_boundary_whitespace(original_data)
+            masked_original, original_tag_map = mask_tags(original_core, rules)
+            masked_original = original_prefix + masked_original + original_suffix
             original_text_block = ORIGINAL_TEXT_BLOCK_TEMPLATE.format(
                 masked_original=masked_original
             )
@@ -546,6 +548,7 @@ class RecursiveProcessor:
                 sampling_identity=sampling_identity,
                 api_url=api_url,
                 allowed_scripts=allowed_scripts,
+                content_identity=rules.identity,
             )
             cache_key = cache_manager.create_cache_key(
                 operation_type=operation_type,
@@ -557,6 +560,7 @@ class RecursiveProcessor:
                 sampling_identity=sampling_identity,
                 api_url=api_url,
                 allowed_scripts=allowed_scripts,
+                content_identity=rules.identity,
             )
 
         if self.cache_enabled and cache_manager is not None and cache_key is not None:
@@ -632,7 +636,7 @@ class RecursiveProcessor:
         enhanced_config['prompt'] = enhanced_prompt
 
         # Model sees the peeled core; outer whitespace is restored after accept.
-        masked_text, tag_map = mask_tags(core)
+        masked_text, tag_map = mask_tags(core, rules)
 
         try:
             outcome = process_func(
@@ -658,14 +662,14 @@ class RecursiveProcessor:
                 )
                 return value
 
-            unmask_result = unmask_tags(outcome.text, tag_map, self.config)
+            unmask_result = unmask_tags(outcome.text, tag_map, self.config, rules=rules)
 
             validation = (
                 validate_model_reply(
                     core, outcome.text, unmask_result.text, tag_map,
                     unmask_result.missing_markers, unmask_result.orphaned_markers,
                     glossary, self.config,
-                    allowed_scripts=allowed_scripts,
+                    allowed_scripts=allowed_scripts, content_rules=rules,
                 )
                 if self.config.validation.enabled
                 else ReplyValidationResult(True, None, None)

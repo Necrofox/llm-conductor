@@ -113,6 +113,15 @@ def test_allowed_scripts_separate_cached_replies(manager):
     assert key != manager.create_cache_key(**KEY_PARTS, allowed_scripts=("latin",))
 
 
+@pytest.mark.parametrize('identity', [('', r'\{\d+\}'), (r'\p{L}', '')])
+def test_content_rules_separate_cache_keys_and_fingerprints(manager, identity):
+    key = manager.create_cache_key(**KEY_PARTS)
+    assert key != manager.create_cache_key(**KEY_PARTS, content_identity=identity)
+    before = manager.compute_fingerprints(**FINGERPRINT_PARTS)
+    after = manager.compute_fingerprints(**FINGERPRINT_PARTS, content_identity=identity)
+    assert before['content_rules'] != after['content_rules']
+
+
 @pytest.mark.parametrize("field_name,runtime_key", CACHE_SAMPLING_IDENTITY_FIELDS)
 def test_each_sampling_field_changes_the_key(manager, field_name, runtime_key):
     """Issue #12: changing any generation-affecting param must miss the cache."""
@@ -146,7 +155,7 @@ def test_fingerprints_cover_all_components_with_fixed_length(manager):
     assert set(fingerprints) == {
         'cache_key_version', 'operation_type', 'model', 'system_prompt',
         'prompt_template', 'hints', 'glossary', 'mode', 'sampling',
-        'api_url', 'allowed_scripts',
+        'api_url', 'allowed_scripts', 'content_rules',
     }
     assert {len(fp) for fp in fingerprints.values()} == {12}
 

@@ -9,7 +9,8 @@ are collected before any model call.
 from collections import Counter
 from typing import Any, List
 
-from llm_conductor.constants import TAG_MASK_PATTERN
+from llm_conductor.interfaces import ContentRulesProtocol
+from llm_conductor.l10n.content import DEFAULT_CONTENT_RULES
 from llm_conductor.l10n.context import KeyPath
 
 
@@ -67,29 +68,32 @@ def compare_json_structure(original: Any, draft: Any) -> List[str]:
     return issues
 
 
-def compare_draft_markers(original: Any, draft: Any) -> List[str]:
+def compare_draft_markers(
+        original: Any, draft: Any, rules: ContentRulesProtocol = DEFAULT_CONTENT_RULES,
+) -> List[str]:
     """
     Compare tag/placeholder multisets on matching string leaves.
 
-    Uses the same ``TAG_MASK_PATTERN`` as reply masking (``{N}``, newlines,
-    XML-like tags). Call after ``compare_json_structure`` succeeds so every
+    Uses the same content policy as reply masking. Call after
+    ``compare_json_structure`` succeeds so every
     string leaf is present on both sides.
 
     Args:
         original: Source JSON (English).
         draft: Frozen translated draft.
+        rules: Protected-fragment policy from conductor.toml.
 
     Returns:
         Human-readable marker mismatch issues (empty when multisets match).
     """
     issues: List[str] = []
-    _walk_markers(KeyPath(), original, draft, issues)
+    _walk_markers(KeyPath(), original, draft, issues, rules)
     return issues
 
 
-def _marker_multiset(text: str) -> Counter:
-    """Count structural markers that must be preserved across draft verify."""
-    return Counter(TAG_MASK_PATTERN.findall(text))
+def _marker_multiset(text: str, rules: ContentRulesProtocol) -> Counter:
+    """Count protected fragments on the same peeled core the model receives."""
+    return Counter(rules.protected_fragments(text.strip()))
 
 
 def _walk_structure(path: KeyPath, original: Any, draft: Any, issues: List[str]) -> None:
@@ -122,24 +126,26 @@ def _walk_structure(path: KeyPath, original: Any, draft: Any, issues: List[str])
         return
 
 
-def _walk_markers(path: KeyPath, original: Any, draft: Any, issues: List[str]) -> None:
+def _walk_markers(
+        path: KeyPath, original: Any, draft: Any, issues: List[str], rules: ContentRulesProtocol,
+) -> None:
     """Recurse matching trees; compare marker multisets on string leaves."""
     if not _compatible_types(original, draft):
         return
 
     if isinstance(original, dict):
         for key in sorted(set(original) & set(draft)):
-            _walk_markers(path.append(key), original[key], draft[key], issues)
+            _walk_markers(path.append(key), original[key], draft[key], issues, rules)
         return
 
     if isinstance(original, list):
         for index, (left, right) in enumerate(zip(original, draft)):
-            _walk_markers(path.append(index), left, right, issues)
+            _walk_markers(path.append(index), left, right, issues, rules)
         return
 
     if isinstance(original, str) and isinstance(draft, str):
-        original_markers = _marker_multiset(original)
-        draft_markers = _marker_multiset(draft)
+        original_markers = _marker_multiset(original, rules)
+        draft_markers = _marker_multiset(draft, rules)
         if original_markers != draft_markers:
             missing = original_markers - draft_markers
             extra = draft_markers - original_markers

@@ -253,6 +253,97 @@ def test_complete_tagged_fragments_may_move_with_word_order(make_config):
     assert config.usage_ledger.build_export()['attempts'][0]['outcome'] == 'success'
 
 
+@pytest.mark.parametrize('required, expected_calls', [(r'\p{L}', 1), ('', 4)])
+def test_numeric_opt_in_counts_and_string_outputs(make_config, mocker, required, expected_calls):
+    config = make_config(processing__required_content_pattern=required,
+                         cache__enabled=False, dedup__enabled=False)
+    replies = {'+0042': '42', '-007': '-7', '2026-11-09': '2026-11-09', 'Value: 3': '3'}
+    model = mocker.Mock(side_effect=lambda value, *args, **kwargs: CallOutcome(replies[value], True, None))
+    data = {'positive': ' +0042 ', 'negative': '-007', 'date': '2026-11-09',
+            'mixed': 'Value: 3', 'empty': '', 'blank': '\t\n ', 'number': 42, 'boolean': True}
+    result, processor = _run(config, data, model)
+    assert model.call_count == expected_calls
+    assert result['positive'] == (' +0042 ' if required else ' 42 ')
+    assert result['negative'] == ('-007' if required else '-7')
+    assert result['date'] == '2026-11-09'
+    assert result['mixed'] == '3'
+    assert result['empty'] == '' and result['blank'] == '\t\n '
+    assert result['number'] == 42 and result['boolean'] is True
+    assert all(isinstance(result[key], str) for key in ('positive', 'negative', 'date', 'mixed'))
+    assert processor.get_stats_summary()['skipped_leaves'] == 6 - expected_calls
+    record = config.leaf_outcomes.get_translation_record(KeyPath(('positive',)).report_key())
+    assert record.status == ('skipped' if required else 'ok')
+
+
+@pytest.mark.parametrize('persistent', [False, True])
+def test_opt_in_numeric_cache_dedup_and_whitespace_identity(make_config, mocker, persistent):
+    config = make_config(processing__required_content_pattern='', cache__enabled=persistent)
+    model = mocker.Mock(return_value=CallOutcome('42', True, None))
+    data = [' +0042 ', ' +0042 ', '+0042']
+    result, _ = _run(config, data, model)
+    assert result == [' 42 ', ' 42 ', '42']
+    assert model.call_count == 2
+    if not persistent:
+        assert config.leaf_outcomes.get_translation_record(KeyPath((1,)).report_key()).status == 'dedup'
+    result, _ = _run(config, data, model)
+    assert result == [' 42 ', ' 42 ', '42']
+    assert model.call_count == (2 if persistent else 4)
+
+
+def test_content_policy_change_cannot_reuse_warm_cache(make_config, mocker):
+    model = mocker.Mock(return_value=CallOutcome('Hello {name}', True, None))
+    first = make_config(processing__mask_pattern='')
+    assert _run(first, {'x': 'Hello {name}'}, model)[0] == {'x': 'Hello {name}'}
+    first.cache_manager.save(OPERATION_TRANSLATION)
+    second = make_config(processing__mask_pattern=r'\{([a-z]+)\}')
+    assert second.cache_manager.load(OPERATION_TRANSLATION)
+    model.return_value = CallOutcome('Hi [T0]', True, None)
+    assert _run(second, {'x': 'Hello {name}'}, model)[0] == {'x': 'Hi {name}'}
+    assert model.call_count == 2
+    assert model.call_args.args[0] == 'Hello [T0]'
+    second.cache_manager.save(OPERATION_TRANSLATION)
+    third = make_config(processing__mask_pattern=r'\{([a-z]+)\}',
+                        processing__required_content_pattern=r'\S')
+    assert third.cache_manager.load(OPERATION_TRANSLATION)
+    assert _run(third, {'x': 'Hello {name}'}, model)[0] == {'x': 'Hi {name}'}
+    assert model.call_count == 3
+
+
+@pytest.mark.parametrize('reply, expected', [
+    ('Hi [T1] [T0]', 'Hi {name} {name}'),
+    ('Hi [T0]', 'Hello {name} {name}'),
+    ('Hi [T0] [T0] [T1]', 'Hello {name} {name}'),
+])
+def test_repeated_custom_fragments_have_independent_validation(make_config, mocker, reply, expected):
+    config = make_config(processing__mask_pattern=r'\{([a-z]+)\}')
+    model = mocker.Mock(return_value=CallOutcome(reply, True, None))
+    result, _ = _run(config, {'x': 'Hello {name} {name}'}, model)
+    assert model.call_args.args[0] == 'Hello [T0] [T1]'
+    assert result == {'x': expected}
+    assert config.leaf_outcomes.has_untreated_error() is (expected.startswith('Hello'))
+
+
+def test_custom_mask_applies_independently_to_verification_original(make_config, mocker):
+    config = make_config(processing__mask_pattern=r'\{([a-z]+)\}')
+    model = mocker.Mock(return_value=CallOutcome('Hi [T0]', True, None))
+    result, _ = _run(config, {'x': 'Hey {name}'}, model,
+                     original={'x': 'Hello {name}'}, verification=True)
+    assert result == {'x': 'Hi {name}'}
+    assert model.call_args.args[0] == 'Hey [T0]'
+    assert 'Hello [T0]' in model.call_args.args[2]['prompt']
+    assert '{name}' not in model.call_args.args[2]['prompt']
+
+
+def test_anchored_mask_uses_same_core_in_draft_and_original_reference(make_config, mocker):
+    config = make_config(processing__mask_pattern=r'^ID:\d+')
+    model = mocker.Mock(return_value=CallOutcome('[T0] Hi', True, None))
+    result, _ = _run(config, {'x': ' ID:42 Hey\t'}, model,
+                     original={'x': ' ID:42 Hello\t'}, verification=True)
+    assert result == {'x': ' ID:42 Hi\t'}
+    assert model.call_args.args[0] == '[T0] Hey'
+    assert '[ORIGINAL]:  [T0] Hello\t' in model.call_args.args[2]['prompt']
+
+
 def test_sibling_building_does_not_change_isolated_ticket_request(make_config):
     """Different sibling context cannot split an identical isolated request."""
     ticket = "The shared lobby lamp is dark."

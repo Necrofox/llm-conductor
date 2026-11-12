@@ -37,6 +37,7 @@ from llm_conductor.constants import (
     DEFAULT_LOG_EXTENDED_DIAGNOSTIC,
     DEFAULT_LOG_LEVEL,
     DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_MASK_PATTERN,
     DEFAULT_MAX_CONSECUTIVE_FAILURES,
     DEFAULT_MAX_ERROR_DISPLAY,
     DEFAULT_MAX_FAILURE_RATIO,
@@ -46,6 +47,7 @@ from llm_conductor.constants import (
     DEFAULT_PREFLIGHT_TIMEOUT,
     DEFAULT_PROFILE_DESCRIPTION,
     DEFAULT_PROFILE_NAME,
+    DEFAULT_REQUIRED_CONTENT_PATTERN,
     DEFAULT_STOP_SEQUENCES,
     DEFAULT_TRANSLATION_API_TIMEOUT,
     DEFAULT_TRANSLATION_API_TYPE,
@@ -417,8 +419,14 @@ LLM_SCHEMA = FileSchema(
     LLM_CONFIG_FILENAME,
     "Model profile: endpoints, keys, prompts and sampling.\n"
     "Switch profiles with --llm-config PATH. Prompt rules: doc/prompts.md.\n"
-    "The model sees markers [T0], [T1] instead of {0}, <tags> and newlines.",
+    "Protected fragments become [T0], [T1] markers; rules: [processing].",
     (
+        Section(("processing",), "String eligibility and protected fragments; recipes: doc/content.md.", (
+            Setting("required_content_pattern", ValueKind.STRING, DEFAULT_REQUIRED_CONTENT_PATTERN,
+                    "Regex searched after protected fragments become spaces; empty admits all nonblank strings."),
+            Setting("mask_pattern", ValueKind.STRING, DEFAULT_MASK_PATTERN,
+                    "Full regex of protected fragments (replaces default); empty disables masking."),
+        )),
         Section(("meta",), "Profile identity, printed in the run banner and the log.", (
             Setting("name", ValueKind.STRING, DEFAULT_PROFILE_NAME, "Short profile name."),
             Setting("description", ValueKind.STRING, DEFAULT_PROFILE_DESCRIPTION, "Free-form description."),

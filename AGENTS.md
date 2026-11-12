@@ -17,6 +17,7 @@ Human documentation (English):
 - [doc/cli.md](doc/cli.md) — commands, results, exit codes
 - [doc/prompts.md](doc/prompts.md) — prompt authoring
 - [doc/pipeline.md](doc/pipeline.md) — leaf flow, cache, validation, resilience
+- [doc/content.md](doc/content.md) — content contract and copyable regex recipes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — conventions and checks
 
 ## Local journals (`history/`)

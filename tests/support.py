@@ -28,6 +28,7 @@ from llm_conductor.core.leaf_report import LeafOutcomeRecorder
 from llm_conductor.core.metrics import MetricsCollector
 from llm_conductor.core.usage import UsageLedger
 from llm_conductor.interfaces import Logger
+from llm_conductor.l10n.content import DEFAULT_CONTENT_RULES
 from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA, FileSchema, SectionPath
 
 # Fake endpoints: the .test domain is reserved (RFC 2606) and never resolves,
@@ -246,6 +247,7 @@ class StubConfig:
         )
         self.cache_manager = cache_manager
         self.cache_enabled = cache_enabled
+        self.processing = DEFAULT_CONTENT_RULES
         self.value_deduplication_enabled = value_deduplication_enabled
         self.cache_auto_save_interval = 0
         self.file_ops = None

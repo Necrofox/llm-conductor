@@ -6,8 +6,11 @@ rationale kept locally, see `history/` on a maintainer checkout.
 ## Leaf processing (order)
 
 1. Blank / whitespace-only → return as-is.
-2. Format-only (no letters outside markup / placeholders / residual
-   punctuation) → return as-is; no cache lookup or LLM round-trip.
+2. Content rule: peel boundaries for an eligibility view, replace each
+   protected match with one space, and search `required_content_pattern`.
+   No match → return as-is; no cache lookup or LLM round-trip. Defaults
+   require a Unicode letter outside formatting. See [content.md](content.md)
+   for the contract and regex recipes, including numeric/date processing.
 3. Peel leading/trailing whitespace from the leaf (restore after accept).
 4. Build glossary snippet (on verify: match terms in the **original**).
 5. Linguistic hints from the key path.
@@ -39,7 +42,8 @@ client (not trusted to the model or reply `strip()`); the cache stores the
 Full-request identity (see `CACHE_KEY_VERSION` / `CACHE_SAMPLING_IDENTITY_FIELDS`
 in `llm_conductor/constants.py`) includes the operation type, API URL, model name,
 system prompt, assembled user prompt (hints/glossary/original), mode, leaf value,
-the active profile's allowed writing systems, and generation-affecting sampling
+the active profile's allowed writing systems, both content-rule expressions,
+and generation-affecting sampling
 (`temperature`, `top_p`, `top_k`,
 `repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
 `num_ctx`, `stop`). Changing any of these components
@@ -56,8 +60,9 @@ even after a previous full run exited `0`. Fix prompts/model or use
 
 ## Reply validation
 
-When enabled, checks (first failure wins) include: literal `\n` in the masked
-reply; marker mismatches; fabricated tags; abnormal length; foreign scripts
+When enabled, checks (first failure wins) include: literal protected newlines
+in the masked reply; marker mismatches; fabricated protected fragments;
+abnormal length; foreign scripts
 outside `allowed_scripts` / source / glossary (Latin may warn or reject per
 `latin_text_policy`). Soft Latin warnings do not reject.
 
@@ -142,7 +147,7 @@ Aggregate units in `run_report.json`:
 
 | Field | Counts |
 |---|---|
-| `skipped` | Format/blank stage records (a leaf can contribute once per stage) |
+| `skipped` | Content/blank stage records (a leaf can contribute once per stage) |
 | `verify_skipped` | Verification skipped (`translation_degraded` or `translation_missing`) |
 | `api_calls` | Leaf stage outcomes with status `ok` or `degraded` — **not** HTTP attempts |
 | `usage.json` attempts | Every HTTP try including retries, plus a separate preflight bucket |

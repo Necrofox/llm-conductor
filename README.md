@@ -116,6 +116,7 @@ different grammatical forms in the target language. Full prompt rules:
 | [doc/cli.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/cli.md) | Commands, results, exit codes |
 | [doc/prompts.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/prompts.md) | Authoring prompts |
 | [doc/pipeline.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/pipeline.md) | Cache, validation, resilience |
+| [doc/content.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/content.md) | String content contract and copyable regex recipes |
 | [CONTRIBUTING.md](https://github.com/Necrofox/llm-conductor/blob/main/CONTRIBUTING.md) | Dev setup and conventions |
 | [AGENTS.md](https://github.com/Necrofox/llm-conductor/blob/main/AGENTS.md) | Notes for AI coding agents |
 

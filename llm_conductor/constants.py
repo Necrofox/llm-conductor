@@ -20,6 +20,12 @@ DEFAULT_LOG_LEVEL = 'INFO'
 DEFAULT_LOG_DIR = './logs'
 DEFAULT_LOG_RETENTION_DAYS = 7
 DEFAULT_LOG_EXTENDED_DIAGNOSTIC = False
+
+# [processing]
+DEFAULT_REQUIRED_CONTENT_PATTERN = r'\p{L}'
+DEFAULT_MASK_PATTERN = r'(?:\{\d+\})|(?:\n)|(?:<[^>]+>)'
+DEFAULT_CONTENT_IDENTITY = (DEFAULT_REQUIRED_CONTENT_PATTERN, DEFAULT_MASK_PATTERN)
+CONTENT_MASK_REPLACEMENT = ' '
 # Levels accepted in [logging].level; VERBOSE is an alias that turns on the
 # debug-only diagnostics while the console handler still prints INFO.
 VALID_LOG_LEVELS = ('DEBUG', 'VERBOSE', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
@@ -212,7 +218,7 @@ CONFIG_KEY_SUGGESTION_CUTOFF = 0.6
 # TRANSPORT
 # ============================================================================
 # Regex of the formatting tags masked before a model call.
-TAG_MASK_PATTERN = re.compile(r'(?:\{\d+\})|(?:\n)|(?:<[^>]+>)')
+TAG_MASK_PATTERN = re.compile(DEFAULT_MASK_PATTERN)
 
 # Default letter prefix for mask_tags() markers ("[T0]", "[T1]", ...). Tried
 # first; a different prefix is chosen only if the source text already
@@ -445,7 +451,7 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # discards entries without it or with another value, so a key format change
 # never needs a manual cleanup of cache_dir.
 # v2: generation-affecting sampling parameters join the key identity.
-CACHE_KEY_VERSION = 3
+CACHE_KEY_VERSION = 4
 
 # Generation-affecting sampling fields in the cache key / fingerprints:
 # (canonical name in the identity JSON, runtime_config key). keep_alive and

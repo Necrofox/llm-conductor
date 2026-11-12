@@ -72,6 +72,13 @@ def test_absent_allowed_scripts_resolves_empty_not_example_profile():
     assert tuple(parsed["validation"]["allowed_scripts"]) == EXAMPLE_EN_RU_ALLOWED_SCRIPTS
 
 
+def test_init_places_content_rules_only_in_model_profile():
+    llm = tomllib.loads(TomlTemplateRenderer(LLM_SCHEMA).render())
+    conductor = tomllib.loads(TomlTemplateRenderer(CONDUCTOR_SCHEMA).render())
+    assert llm['processing'] == dict(LLM_SCHEMA.resolve({})['processing'])
+    assert 'processing' not in conductor
+
+
 @pytest.mark.parametrize("schema", SCHEMAS, ids=lambda s: s.file_name)
 def test_template_writes_every_schema_key_explicitly(schema):
     """A key the loader accepts but the template omits is invisible to the user (§10.3 step 10)."""

@@ -22,4 +22,5 @@ hypothesis>=6.100.0        # property-based тесты (tests/unit/test_properti
 # --- Статический анализ -----------------------------------------------------
 mypy>=1.10.0
 types-requests>=2.31.0
+types-regex>=2024.11.6
 ruff>=0.5.0

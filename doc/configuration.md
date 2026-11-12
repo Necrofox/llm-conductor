@@ -4,7 +4,7 @@ Two TOML files, split by what changes when you switch models:
 
 | File | Role |
 |---|---|
-| **`llm.toml`** | Model profile: endpoints, keys, prompts, sampling, `[validation].allowed_scripts` |
+| **`llm.toml`** | Model profile: endpoints, keys, prompts, sampling, content rules (`[processing]`), `[validation].allowed_scripts` |
 | **`conductor.toml`** | Script behaviour: logging, cache, dedup, heartbeat, limits, resilience, reply-validator thresholds |
 
 The full key list, types, defaults, and descriptions live in
@@ -33,6 +33,20 @@ from that schema.
 Loading is strict: unknown sections/keys and wrong types fail with a full
 problem list (and a “did you mean …?” hint). Missing keys take schema
 defaults.
+
+## String content rules
+
+In `llm.toml`, `[processing].required_content_pattern` decides whether a nonblank string is
+eligible; `[processing].mask_pattern` selects protected fragments. Defaults
+retain Unicode-letter eligibility and protection of `{0}`, newlines, and
+XML-like tags. Empty strings disable the corresponding rule, not the separate
+blank-leaf skip. Custom masking replaces the complete default expression.
+Each manifest target uses the rules of its effective `llm_config` profile;
+omitted keys take schema defaults, independent of other targets.
+
+See [content.md](content.md) for the contract and copyable recipes: letters
+only, numeric normalization, HTML/XML, named/positional placeholders,
+double/dollar braces, printf, and combined protection.
 
 ## Secrets
 

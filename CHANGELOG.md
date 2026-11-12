@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Configurable string eligibility and protected-fragment expressions in
+  `llm.toml` `[processing]`. Defaults preserve format-only skipping;
+  opt in to numeric/date processing without wrapping inputs. Includes tested
+  TOML recipes for Unicode letters, HTML/XML, and common placeholders. Each
+  manifest target uses its effective model profile's content rules (#32).
+
 ### Changed
 
 - Target-relative file identities in `run_report.json` and leaves sidecars
   use portable POSIX separators on every host; filesystem result layout
   stays OS-native. Legacy native-separator keys are normalized on read (#33).
+- Cache key version 4 includes both content-rule expressions; previous cache
+  entries are rebuilt as needed.
 
 ### Fixed
 

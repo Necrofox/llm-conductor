@@ -78,7 +78,7 @@ def make_ok(source: str, output: str, *, cache_hit: bool = False,
 
 
 def make_skipped(source: str) -> LeafStageRecord:
-    """Blank or format-only leaf; no API call."""
+    """Blank or ineligible leaf under the active content policy; no API call."""
     digest = hash_text(source)
     return LeafStageRecord(
         status=LEAF_STATUS_SKIPPED,
@@ -306,7 +306,7 @@ class LeafOutcomeRecorder:
         (source kept) plus verification ``source_stale``. ``verify_skipped``
         counts leaves that skipped normal verification
         (``translation_degraded`` or ``translation_missing``).
-        ``skipped`` counts format/blank stage records (a leaf may contribute
+        ``skipped`` counts content/blank stage records (a leaf may contribute
         once per stage). ``api_calls`` counts leaf stage outcomes with status
         ``ok`` or ``degraded`` — not HTTP attempts (see ``usage.json``).
         """
@@ -414,5 +414,5 @@ class LeafOutcomeRecorder:
             f"   - Verify skipped:    {totals['verify_skipped']:,}",
             f"   - Cache hits:        {totals['cache_hit']:,}",
             f"   - Deduplicated:      {totals['dedup']:,}",
-            f"   - Format/blank skip: {totals['skipped']:,}",
+            f"   - Content/blank skip: {totals['skipped']:,}",
         ]
