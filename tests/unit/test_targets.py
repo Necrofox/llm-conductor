@@ -7,7 +7,13 @@ import os
 
 import pytest
 
-from llm_conductor.cli.paths import is_inside, resolve_under_base
+from llm_conductor.cli.paths import (
+    host_relative_path,
+    is_inside,
+    manifest_relative_identity,
+    portable_relative_path,
+    resolve_under_base,
+)
 from llm_conductor.cli.runner import RunOptions
 from llm_conductor.cli.targets import (
     ResultLayout,
@@ -70,6 +76,27 @@ def test_is_inside(base):
     assert not is_inside(os.path.dirname(base), base)
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("menu/main.json", "menu/main.json"),
+    (r"menu\main.json", "menu/main.json"),
+    (r"dialogs\npc/guard.json", "dialogs/npc/guard.json"),
+    ("sample.json", "sample.json"),
+])
+def test_portable_relative_path_normalizes_separators(raw, expected):
+    assert portable_relative_path(raw) == expected
+
+
+def test_host_relative_path_uses_os_separators():
+    assert host_relative_path("menu/main.json") == os.path.join("menu", "main.json")
+    assert host_relative_path(r"dialogs\npc\guard.json") == os.path.join(
+        "dialogs", "npc", "guard.json")
+
+
+def test_manifest_relative_identity_is_portable(base):
+    absolute = os.path.join(base, "input", "route-separate.json")
+    assert manifest_relative_identity(absolute, base) == "input/route-separate.json"
+
+
 def test_run_target_properties(base):
     target = RunTarget(os.path.join(base, "ui.toml"), ())
 
@@ -82,13 +109,15 @@ def test_run_target_properties(base):
 
 def test_shared_layout_is_named_after_the_target(base, tmp_path):
     target = RunTarget(os.path.join(base, "ui.toml"), ())
-    entry = TargetEntry(os.path.join(base, "menu", "main.json"), os.path.join("menu", "main.json"))
+    entry = TargetEntry(os.path.join(base, "menu", "main.json"), "menu/main.json")
 
     layout = ResultLayout.for_target(target, str(tmp_path / "app"), next_to_target=False)
 
     assert layout.shared_by_name is True
     assert layout.stage_path("final", entry) == str(tmp_path / "app" / "result" / "ui.toml" / "final"
                                                     / "menu" / "main.json")
+    assert layout.leaves_path(entry) == str(
+        tmp_path / "app" / "result" / "ui.toml" / "leaves" / "menu" / "main.json")
 
 
 def test_result2target_layout_is_next_to_the_target(base):

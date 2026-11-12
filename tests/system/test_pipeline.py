@@ -340,6 +340,16 @@ def test_manifest_results_mirror_the_nested_directories(project, model, run_main
     assert final("dialogs/npc/guard.json") == {"line": "OK(RU(Halt!))"}
     assert "File 2/2" in project.log_text()
 
+    # Portable file identities in machine reports (#33).
+    report = project.read_json("result/ui.toml/run_report.json")
+    assert set(report["files"]) == {"menu/main.json", "dialogs/npc/guard.json"}
+    assert all("\\" not in key for key in report["files"])
+    for relative in ("menu/main.json", "dialogs/npc/guard.json"):
+        sidecar = project.read_json(
+            project.result("leaves", relative, target="ui.toml"))
+        assert sidecar["relative_path"] == relative
+        assert report["files"][relative] == sidecar["leaves"]
+
 
 def test_manifest_with_result2target_in_toml_mirrors_next_to_the_manifest(project, model, run_main):
     project.write_text("project/ui.toml", """

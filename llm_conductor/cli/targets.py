@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Tuple, cast
 
-from llm_conductor.cli.paths import is_inside
+from llm_conductor.cli.paths import host_relative_path, is_inside
 from llm_conductor.cli.run_manifest import (
     RunManifestParser,
     RunSettings,
@@ -51,7 +51,7 @@ class TargetEntry:
     """One input file of a run, with effective stage settings."""
 
     source_path: str      # absolute path of the input file
-    relative_path: str    # its path under every result/<stage>/ directory
+    relative_path: str    # portable (POSIX) path under every result/<stage>/
     index: int = 1        # 1-based [[targets]] index (1 for a lone JSON)
     draft_path: Optional[str] = None
     stage: str = RUN_STAGE_ALL
@@ -187,7 +187,8 @@ class ResultLayout:
         Returns:
             The path; its directory may not exist yet (see prepare()).
         """
-        return os.path.join(self.root, stage, entry.relative_path)
+        return os.path.join(
+            self.root, stage, host_relative_path(entry.relative_path))
 
     def prepare(self, stage: str, entry: TargetEntry) -> str:
         """
@@ -207,7 +208,8 @@ class ResultLayout:
         Sidecars live under ``leaves/`` next to translated/redacted/final so
         a standalone ``--stage verify`` can load translation_degraded flags.
         """
-        return os.path.join(self.root, LEAVES_DIR_NAME, entry.relative_path)
+        return os.path.join(
+            self.root, LEAVES_DIR_NAME, host_relative_path(entry.relative_path))
 
     def prepare_leaves(self, entry: TargetEntry) -> str:
         """

@@ -2,6 +2,7 @@
 """Unit tests for LeafOutcomeRecorder and helpers."""
 from llm_conductor.constants import (
     LEAF_ERROR_KIND_SOURCE_STALE,
+    LEAF_REPORT_SCHEMA_VERSION,
     LEAF_SKIP_REASON_TRANSLATION_DEGRADED,
     LEAF_SKIP_REASON_TRANSLATION_MISSING,
     LEAF_STATUS_DEGRADED,
@@ -18,6 +19,7 @@ from llm_conductor.core.leaf_report import (
     make_ok,
     make_source_stale,
     make_verify_skipped,
+    portable_file_identity,
 )
 
 
@@ -158,3 +160,63 @@ def test_make_source_stale_is_degraded_with_current_original_hashes():
     assert record.error_kind == LEAF_ERROR_KIND_SOURCE_STALE
     assert record.source_hash == hash_text("Close {1}.")
     assert record.output_hash == hash_text("Close {1}.")
+
+
+def test_portable_file_identity_maps_native_separators():
+    assert portable_file_identity(r"input\route-separate.json") == (
+        "input/route-separate.json"
+    )
+    assert portable_file_identity("input/route-separate.json") == (
+        "input/route-separate.json"
+    )
+
+
+def test_nested_file_identity_agrees_between_report_and_sidecar():
+    """Report keys and sidecar relative_path share the portable identity (#33)."""
+    nested = "input/route-separate.json"
+    recorder = LeafOutcomeRecorder()
+    recorder.set_active_file(nested)
+    recorder.record(
+        '["title"]', OPERATION_TRANSLATION, make_ok("Hello", "Привет"),
+    )
+
+    sidecar = recorder.file_sidecar_dict(nested)
+    report = recorder.build_run_report()
+
+    assert sidecar["schema_version"] == LEAF_REPORT_SCHEMA_VERSION
+    assert sidecar["relative_path"] == nested
+    assert nested in report["files"]
+    assert report["files"][nested] == sidecar["leaves"]
+    assert "\\" not in sidecar["relative_path"]
+    assert all("\\" not in key for key in report["files"])
+
+
+def test_native_separator_active_file_normalizes_for_lookup_and_sidecar():
+    """Legacy Windows identities still merge and look up under the portable key."""
+    native = r"menu\main.json"
+    portable = "menu/main.json"
+    recorder = LeafOutcomeRecorder()
+    recorder.set_active_file(native)
+    recorder.record(
+        '["label"]', OPERATION_TRANSLATION, make_degraded("Hi", "parse"),
+    )
+
+    assert recorder.active_file() == portable
+    sidecar = recorder.file_sidecar_dict(native)
+    assert sidecar["relative_path"] == portable
+
+    loaded = LeafOutcomeRecorder()
+    # Sidecar payload may still advertise the legacy relative_path field.
+    loaded.merge_sidecar(portable, {
+        **sidecar,
+        "relative_path": native,
+    })
+    loaded.set_active_file(portable)
+    assert loaded.sidecar_was_merged() is True
+    assert loaded.is_translation_degraded('["label"]') is True
+
+    report = loaded.build_run_report()
+    assert list(report["files"]) == [portable]
+    assert portable in report["files"]
+    assert native not in report["files"]
+

@@ -166,10 +166,13 @@ Semantics of statuses and usage outcomes:
 
 `{rel}` is the path relative to the manifest directory (or the file name for
 a single target), including its `.json` suffix when present — so a target
-`job.json` writes `leaves/job.json` (not `leaves/job.json.json`). Inputs are
-never modified. An input that already lies under `{result}` is rejected.
-Shared `result/<name>/` is claimed with `.llmc.target` so a same-named
-target from another path cannot silently overwrite.
+`job.json` writes `leaves/job.json` (not `leaves/job.json.json`). In
+machine-readable reports the same `{rel}` is always written with POSIX
+`/` separators (see [pipeline.md](pipeline.md#reports)); the on-disk layout
+still follows the host OS. Inputs are never modified. An input that already
+lies under `{result}` is rejected. Shared `result/<name>/` is claimed with
+`.llmc.target` so a same-named target from another path cannot silently
+overwrite.
 
 ## Exit codes
 

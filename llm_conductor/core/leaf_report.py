@@ -8,6 +8,10 @@ the output string to the source (names and ids may legally stay identical).
 Leaf keys in schema v2 are ``KeyPath.report_key()`` JSON segment arrays.
 Schema v1 dotted keys (``ui.title``) are rejected at load time — re-run
 ``translate`` to regenerate v2 sidecars. New writes always use v2 keys.
+
+File identities (``run_report.json`` ``files`` keys and sidecar
+``relative_path``) use POSIX separators. Legacy native-separator identities
+are accepted on read and rewritten in portable form; schema version stays 2.
 """
 from __future__ import annotations
 
@@ -115,6 +119,17 @@ def make_source_stale(original: str) -> LeafStageRecord:
     return make_degraded(original, LEAF_ERROR_KIND_SOURCE_STALE)
 
 
+def portable_file_identity(relative_path: str) -> str:
+    """
+    Normalize a target-relative file identity to POSIX separators.
+
+    Machine reports and sidecars always emit this form. Older Windows
+    artifacts that used ``\\\\`` are accepted by mapping them here so
+    lookup and merge do not drop records (#33).
+    """
+    return relative_path.replace('\\', '/')
+
+
 def _is_v2_report_key(key: str) -> bool:
     """True when ``key`` is a schema v2 ``KeyPath.report_key()`` JSON array."""
     try:
@@ -184,12 +199,13 @@ class LeafOutcomeRecorder:
 
     def set_active_file(self, relative_path: str) -> None:
         """Select the target-relative file path for subsequent record/lookup calls."""
+        file_key = portable_file_identity(relative_path)
         with self._lock:
-            self._active_file = relative_path
-            self._files.setdefault(relative_path, {})
+            self._active_file = file_key
+            self._files.setdefault(file_key, {})
 
     def active_file(self) -> Optional[str]:
-        """Return the target-relative path selected by ``set_active_file``, or None."""
+        """Return the portable target-relative path selected by ``set_active_file``, or None."""
         with self._lock:
             return self._active_file
 
@@ -244,12 +260,15 @@ class LeafOutcomeRecorder:
         A verification-only sidecar cannot establish translation provenance.
         Callers must reject schema v1 payloads before invoking this method;
         new recordings use v2 ``KeyPath.report_key()`` identities.
+        File identity separators are normalized so a legacy native-path
+        sidecar still merges under the portable key.
         """
+        file_key = portable_file_identity(relative_path)
         leaves_raw = payload.get('leaves')
         if not isinstance(leaves_raw, dict):
             return
         with self._lock:
-            file_leaves = self._files.setdefault(relative_path, {})
+            file_leaves = self._files.setdefault(file_key, {})
             for leaf_path, stages_raw in leaves_raw.items():
                 if not isinstance(leaf_path, str) or not isinstance(stages_raw, dict):
                     continue
@@ -261,12 +280,13 @@ class LeafOutcomeRecorder:
                     if parsed is not None:
                         stages[stage] = parsed
                         if stage == OPERATION_TRANSLATION:
-                            self._sidecar_merged_files.add(relative_path)
+                            self._sidecar_merged_files.add(file_key)
 
     def file_sidecar_dict(self, relative_path: str) -> Dict[str, Any]:
         """Build the JSON document written under ``leaves/<relative>``."""
+        file_key = portable_file_identity(relative_path)
         with self._lock:
-            leaves = self._files.get(relative_path, {})
+            leaves = self._files.get(file_key, {})
             serialized: Dict[str, Dict[str, Any]] = {}
             for leaf_path, stages in leaves.items():
                 serialized[leaf_path] = {
@@ -274,7 +294,7 @@ class LeafOutcomeRecorder:
                 }
         return {
             'schema_version': LEAF_REPORT_SCHEMA_VERSION,
-            'relative_path': relative_path,
+            'relative_path': file_key,
             'leaves': serialized,
         }
 
@@ -362,12 +382,15 @@ class LeafOutcomeRecorder:
         with self._lock:
             files_out: Dict[str, Any] = {}
             for relative_path, leaves in self._files.items():
-                files_out[relative_path] = {
-                    leaf_path: {
-                        stage: record.to_dict() for stage, record in stages.items()
-                    }
-                    for leaf_path, stages in leaves.items()
-                }
+                file_key = portable_file_identity(relative_path)
+                # Fold a legacy native-separator key onto the portable identity
+                # so an older in-memory map does not emit a duplicate or drop
+                # leaf stages when both forms somehow coexist.
+                target = files_out.setdefault(file_key, {})
+                for leaf_path, stages in leaves.items():
+                    leaf_out = target.setdefault(leaf_path, {})
+                    for stage, record in stages.items():
+                        leaf_out.setdefault(stage, record.to_dict())
             aggregates = self._aggregates_unlocked()
         return {
             'schema_version': LEAF_REPORT_SCHEMA_VERSION,

@@ -62,7 +62,7 @@ original = "hud.json"
 """, file_ops, logger)
 
     assert len(settings.targets) == 2
-    assert settings.targets[0].relative_path == os.path.join("menu", "main.json")
+    assert settings.targets[0].relative_path == "menu/main.json"
     assert settings.targets[0].index == 1
     assert settings.targets[1].original == os.path.join(base, "hud.json")
     assert settings.targets[0].stage == "all"
@@ -138,7 +138,7 @@ def test_both_slashes_in_original(base, conductor_dir, parser_deps):
 [[targets]]
 original = 'dialogs\\npc/guard.json'
 """, file_ops, logger)
-    assert settings.targets[0].relative_path == os.path.join("dialogs", "npc", "guard.json")
+    assert settings.targets[0].relative_path == "dialogs/npc/guard.json"
 
 
 def test_implicit_glossary_beside_manifest(base, conductor_dir, parser_deps):

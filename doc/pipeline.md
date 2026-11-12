@@ -127,6 +127,17 @@ compact JSON arrays of `KeyPath` segments (e.g. `["a.b"]` vs `["a","b"]`),
 so a literal dotted key cannot collide with a nested path. Logs still show
 the human dotted form.
 
+**File identities** (the `files` map keys in `run_report.json`, and
+`relative_path` in each leaves sidecar) are target-relative paths with
+**POSIX separators** (`/`), even on Windows. Example: a manifest entry
+`original = "input/route-separate.json"` always serializes as
+`input/route-separate.json`, never `input\\route-separate.json`. Physical
+result paths under `translated/` / `redacted/` / `final/` / `leaves/` still
+use the host OS layout. Schema version stays **2**; older native-separator
+file keys are accepted on read (normalized to `/`) so records are not
+dropped — consumers of archived Windows reports should apply the same
+`\\` → `/` mapping when matching keys.
+
 Aggregate units in `run_report.json`:
 
 | Field | Counts |
