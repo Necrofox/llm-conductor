@@ -63,7 +63,10 @@ outside `allowed_scripts` / source / glossary (Latin may warn or reject per
 
 A `tag_marker_mismatch` rejection logs structured `missing` / `duplicated` /
 `extra` marker lists. Set `[validation].save_rejected_replies = true` to also
-write the full masked reply under `[logging].dir/rejected/<operation>/`.
+write each full masked reply under `[logging].dir/rejected/<operation>/` with
+a unique filename (source file, leaf `report_key` digest, usage attempt id,
+and a nanosecond stamp) plus a matching `.meta.json` attribution sidecar.
+Diagnostic write failures are logged and never interrupt leaf fallback.
 
 ## Resilience
 

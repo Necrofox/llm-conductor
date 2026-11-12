@@ -280,6 +280,13 @@ VALIDATION_REASON_UNEXPECTED_LATIN = 'unexpected_latin'
 # the actual bad text (not just its rejection reason) survives for diagnosis.
 # Full body persistence is opt-in via [validation].save_rejected_replies.
 REJECTED_REPLY_LOG_LENGTH = 200
+# Dump filenames under rejected/<operation>/: human labels are truncated;
+# leaf identity is the digest of KeyPath.report_key(), not str(path).
+REJECTED_REPLY_LABEL_MAX = 64
+REJECTED_REPLY_LEAF_DIGEST_LENGTH = 12
+REJECTED_REPLY_META_SUFFIX = '.meta.json'
+REJECTED_REPLY_NO_FILE_LABEL = '_nofile'
+REJECTED_REPLY_FILENAME_UNSAFE = ('/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']')
 
 # ============================================================================
 # EXIT CODES

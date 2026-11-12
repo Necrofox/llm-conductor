@@ -17,7 +17,12 @@ from llm_conductor.constants import (
     ORIGINAL_TEXT_BLOCK_TEMPLATE,
     ORIGINAL_TEXT_MARKER,
     REJECTED_REPLIES_SUBDIR,
+    REJECTED_REPLY_FILENAME_UNSAFE,
+    REJECTED_REPLY_LABEL_MAX,
+    REJECTED_REPLY_LEAF_DIGEST_LENGTH,
     REJECTED_REPLY_LOG_LENGTH,
+    REJECTED_REPLY_META_SUFFIX,
+    REJECTED_REPLY_NO_FILE_LABEL,
     STATISTICS_LOG_LEVELS,
     TRANSLATION_TEXT_MARKER,
     USAGE_NON_API_CACHE_HIT,
@@ -678,7 +683,12 @@ class RecursiveProcessor:
                     f"Reply: {self._preview_rejected_reply(outcome.text)}"
                 )
                 if self.config.validation.save_rejected_replies:
-                    self._save_rejected_reply(path, operation_type, outcome.text)
+                    self._save_rejected_reply(
+                        path,
+                        operation_type,
+                        outcome.text,
+                        attempt_id=outcome.usage_attempt_id,
+                    )
                 self.config.metrics.record_rejection(operation_type)
 
                 if self.config.circuit_breaker.record_failure(operation_type):
@@ -1071,32 +1081,87 @@ class RecursiveProcessor:
         return preview + '...' if truncated else preview
 
     @staticmethod
-    def _sanitize_rejected_reply_filename(path: str) -> str:
+    def _sanitize_rejected_reply_label(value: str) -> str:
         """
-        Turn a leaf path into a single path-segment filename.
+        Turn an arbitrary path fragment into one Windows/POSIX-safe label.
 
-        Args:
-            path: Human-readable KeyPath string (e.g. ``ui.title``).
-
-        Returns:
-            A ``.txt`` filename safe for Windows and POSIX.
+        Truncates to ``REJECTED_REPLY_LABEL_MAX``. Empty input becomes
+        ``REJECTED_REPLY_NO_FILE_LABEL``.
         """
-        sanitized = path
-        for char in ('/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']'):
+        sanitized = value.strip() or REJECTED_REPLY_NO_FILE_LABEL
+        for char in REJECTED_REPLY_FILENAME_UNSAFE:
             sanitized = sanitized.replace(char, '_')
-        return f"{sanitized}.txt"
+        if len(sanitized) > REJECTED_REPLY_LABEL_MAX:
+            sanitized = sanitized[:REJECTED_REPLY_LABEL_MAX]
+        return sanitized
 
-    def _save_rejected_reply(self, path: KeyPath, operation_type: str, masked_reply: str) -> None:
+    @staticmethod
+    def build_rejected_reply_stem(
+        *,
+        relative_file: str,
+        leaf: KeyPath,
+        attempt_id: Optional[int],
+        unique_suffix: str,
+    ) -> str:
+        """
+        Build a unique dump stem under ``rejected/<operation>/``.
+
+        Human labels (file + ``str(leaf)``) are for skimming only. Uniqueness
+        and leaf identity come from the digest of ``leaf.report_key()``, the
+        attempt id when present, and ``unique_suffix`` (typically ``time_ns``),
+        so sanitize collisions and later runs sharing the log directory cannot
+        overwrite an earlier dump.
+        """
+        file_label = RecursiveProcessor._sanitize_rejected_reply_label(relative_file)
+        leaf_label = RecursiveProcessor._sanitize_rejected_reply_label(str(leaf))
+        leaf_digest = hash_text(leaf.report_key())[:REJECTED_REPLY_LEAF_DIGEST_LENGTH]
+        attempt_part = attempt_id if attempt_id is not None else 0
+        return (
+            f"{file_label}__{leaf_label}__{leaf_digest}"
+            f"__a{attempt_part}__{unique_suffix}"
+        )
+
+    @staticmethod
+    def build_rejected_reply_meta(
+        *,
+        relative_file: str,
+        leaf: KeyPath,
+        operation_type: str,
+        attempt_id: Optional[int],
+        dump_name: str,
+    ) -> Dict[str, Any]:
+        """JSON attribution sidecar for one rejected-reply dump."""
+        return {
+            'file': relative_file,
+            'leaf': leaf.report_key(),
+            'leaf_display': str(leaf),
+            'operation': operation_type,
+            'attempt_id': attempt_id,
+            'dump': dump_name,
+        }
+
+    def _save_rejected_reply(
+        self,
+        path: KeyPath,
+        operation_type: str,
+        masked_reply: str,
+        *,
+        attempt_id: Optional[int] = None,
+    ) -> None:
         """
         Persist the full masked reply under ``[logging].dir/rejected/``.
 
-        Opt-in via ``[validation].save_rejected_replies``. Failures are logged
-        and swallowed so rejection handling never raises from diagnostics I/O.
+        Opt-in via ``[validation].save_rejected_replies``. Each dump gets a
+        unique ``.txt`` name plus a ``.meta.json`` sidecar linking file, leaf
+        ``report_key``, operation, and usage attempt id when available.
+        Failures are logged and swallowed so rejection handling never raises
+        from diagnostics I/O.
 
         Args:
-            path: Leaf KeyPath used for the filename.
+            path: Leaf KeyPath for attribution and the skimmable label.
             operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
             masked_reply: outcome.text of the rejected CallOutcome.
+            attempt_id: UsageLedger attempt id when the HTTP call recorded one.
         """
         file_ops = self.config.file_ops
         log_dir = self.config.log_dir
@@ -1106,16 +1171,32 @@ class RecursiveProcessor:
             )
             return
 
-        target = os.path.join(
-            log_dir,
-            REJECTED_REPLIES_SUBDIR,
-            operation_type,
-            self._sanitize_rejected_reply_filename(str(path)),
+        relative_file = self.config.leaf_outcomes.active_file() or ''
+        stem = self.build_rejected_reply_stem(
+            relative_file=relative_file,
+            leaf=path,
+            attempt_id=attempt_id,
+            unique_suffix=str(time.time_ns()),
+        )
+        dump_name = f"{stem}.txt"
+        rejected_dir = os.path.join(log_dir, REJECTED_REPLIES_SUBDIR, operation_type)
+        target = os.path.join(rejected_dir, dump_name)
+        meta_target = os.path.join(rejected_dir, f"{stem}{REJECTED_REPLY_META_SUFFIX}")
+        meta = self.build_rejected_reply_meta(
+            relative_file=relative_file,
+            leaf=path,
+            operation_type=operation_type,
+            attempt_id=attempt_id,
+            dump_name=dump_name,
         )
         try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.makedirs(rejected_dir, exist_ok=True)
             safe_write_file(
                 target, masked_reply, f"rejected reply for {path}",
+                file_ops, self.config.logger,
+            )
+            safe_write_file(
+                meta_target, meta, f"rejected reply meta for {path}",
                 file_ops, self.config.logger,
             )
         except FileOperationError as exc:

@@ -21,6 +21,15 @@ from llm_conductor.core.leaf_report import (
 )
 
 
+def test_active_file_round_trips_until_cleared_by_next_set():
+    recorder = LeafOutcomeRecorder()
+    assert recorder.active_file() is None
+    recorder.set_active_file("one.json")
+    assert recorder.active_file() == "one.json"
+    recorder.set_active_file("two.json")
+    assert recorder.active_file() == "two.json"
+
+
 def test_translation_degraded_lookup_is_outcome_based_not_string_equality():
     recorder = LeafOutcomeRecorder()
     recorder.set_active_file("a.json")

@@ -55,7 +55,9 @@ allowed; so are punctuation / digits / symbols / separators.
 
 `[validation].save_rejected_replies` (default `false`) writes each
 content-validator rejection’s full masked reply under
-`[logging].dir/rejected/<operation>/` for offline diagnosis.
+`[logging].dir/rejected/<operation>/` for offline diagnosis. Names are unique
+across input files, leaf paths, and repeated attempts; a `.meta.json` sidecar
+records the source file, leaf `report_key`, operation, and usage attempt id.
 
 ## Overrides
 

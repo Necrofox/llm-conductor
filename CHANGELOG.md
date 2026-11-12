@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Keep every opt-in rejected-reply dump under `logs/rejected/` instead of
+  overwriting by sanitized leaf path; attribute each dump via `.meta.json`
+  to source file, leaf identity, and usage attempt (#30).
+
 ## [1.1.1] - 2026-11-11
 
 ### Fixed

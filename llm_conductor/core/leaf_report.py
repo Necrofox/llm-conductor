@@ -188,6 +188,11 @@ class LeafOutcomeRecorder:
             self._active_file = relative_path
             self._files.setdefault(relative_path, {})
 
+    def active_file(self) -> Optional[str]:
+        """Return the target-relative path selected by ``set_active_file``, or None."""
+        with self._lock:
+            return self._active_file
+
     def note_sidecar_missing(self) -> bool:
         """
         Mark that a verify-only run lacked a leaves sidecar.

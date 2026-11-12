@@ -564,7 +564,8 @@ CONDUCTOR_SCHEMA = FileSchema(
                     f"the source and the glossary when latin is not in allowed_scripts."),
             Setting("save_rejected_replies", ValueKind.BOOLEAN, DEFAULT_VALIDATION_SAVE_REJECTED_REPLIES,
                     "Write each content-validator rejection's full masked reply under "
-                    "[logging].dir/rejected/ (opt-in diagnostics)."),
+                    "[logging].dir/rejected/<operation>/ with a unique name and "
+                    ".meta.json attribution (opt-in diagnostics)."),
         )),
     ),
 )
