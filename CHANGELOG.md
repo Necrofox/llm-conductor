@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Use `os.replace` for atomic file replacement on every platform. Keep
+  durable writes enabled by default; heartbeat snapshots skip storage sync.
 - Derive package and executable versions from Git tags with setuptools-scm;
   dev builds include commit identity instead of a fixed release version.
 - Standardize text files on LF and enable Python-aware Git diff context.
@@ -28,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Synchronize parent directories after durable file replacement on Linux.
+  Report post-replacement sync failures without retrying the replacement or
+  allowing older cache snapshots to overwrite the new file.
+- Measure large-file warnings from actual serialized bytes, including
+  nested JSON, indentation and encoding, without serializing the data twice.
+- Reject paths resolving to the manifest base directory even with trailing
+  base separators or case differences on Windows.
+- Reject unsafe result-relative paths before processing, including POSIX
+  single-file names made entirely of backslashes.
 - Keep every opt-in rejected-reply dump under `logs/rejected/` instead of
   overwriting by sanitized leaf path; attribute each dump via `.meta.json`
   to source file, leaf identity, and usage attempt (#30).

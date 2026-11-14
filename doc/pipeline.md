@@ -58,6 +58,28 @@ pays residual misses (new strings or past rejects) can trip exit code `5`
 even after a previous full run exited `0`. Fix prompts/model or use
 `--no-cache` to remeasure.
 
+## File writes
+
+Outputs, cache snapshots, sidecars and emergency fallback copies are written
+to a temporary file in the destination directory, flushed, closed and
+replaced with `os.replace`. Durable writes are the default: the temporary
+file is synchronized before replacement; on Linux the parent directory is
+also synchronized afterward. Windows and other platforms synchronize file
+contents without this additional Linux directory step. These guarantees
+depend on the underlying filesystem and storage.
+
+If Linux directory synchronization fails after replacement, the new file
+already exists but its persistence after a system crash is unconfirmed.
+The error reports that distinction; the write is not retried as an ordinary
+replacement failure and no emergency fallback is attempted. Cache snapshot
+ordering still records the replacement so an older snapshot cannot overwrite it.
+
+Heartbeat `progress_state.json` keeps atomic replacement but skips storage
+synchronization: losing its latest update after a system crash is acceptable.
+Cache and translation/verification outputs retain durable writes. Large-file
+warnings and debug sizes use the flushed temporary file's actual byte count
+after a successful write, without a second JSON serialization.
+
 ## Reply validation
 
 When enabled, checks (first failure wins) include: literal protected newlines

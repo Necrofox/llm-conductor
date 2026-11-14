@@ -20,6 +20,7 @@ from llm_conductor.constants import (
     OPERATION_TRANSLATION,
     PROGRESS_STATE_FILENAME,
 )
+from llm_conductor.core import io as io_module
 from llm_conductor.core.io import FileOperations
 from llm_conductor.l10n.processor import count_string_leaves
 from tests.support import RecordingLogger
@@ -67,6 +68,19 @@ def test_start_writes_running_snapshot_with_null_exit_code(tmp_path):
     assert snap["progress"]["file_index"] == 0
     assert snap["progress"]["percent"] == 0.0
     assert Path(writer.path).name == PROGRESS_STATE_FILENAME
+
+
+def test_heartbeat_uses_atomic_write_without_file_or_directory_sync(tmp_path, monkeypatch):
+    writer = _writer(tmp_path)
+
+    def unexpected_sync(*args):
+        pytest.fail("Heartbeat must not request durable storage")
+
+    monkeypatch.setattr(io_module.os, "fsync", unexpected_sync)
+    monkeypatch.setattr(writer._file_ops, "_sync_parent_directory", unexpected_sync)
+    writer.start()
+    writer.finalize(HEARTBEAT_STATUS_COMPLETED, EXIT_SUCCESS)
+    assert _read(writer)["status"] == HEARTBEAT_STATUS_COMPLETED
 
 
 def test_hybrid_percent_across_two_files(tmp_path):

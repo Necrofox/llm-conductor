@@ -5,6 +5,10 @@ import re
 # A source checkout without generated build metadata has no known version.
 UNKNOWN_VERSION = '0.0.0+unknown'
 
+# Binary size units and formatting shared by file writes and diagnostics.
+BYTES_PER_MIB = 1024 * 1024
+JSON_FILE_INDENT = 4
+
 # ============================================================================
 # CONFIGURATION FILES
 # ============================================================================

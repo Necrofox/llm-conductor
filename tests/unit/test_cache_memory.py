@@ -15,6 +15,7 @@ from llm_conductor.core.cache import (
     _CacheWriteCoordinator,
     _OperationCache,
 )
+from llm_conductor.exceptions import FileDurabilityError
 from tests.support import DeadlockGuardLock
 
 # ============================================================================
@@ -140,6 +141,24 @@ def test_coordinator_failed_write_does_not_advance_version():
         coordinator.attempt_write(version, failing_io)
 
     assert coordinator.attempt_write(version, lambda: None) is True
+
+
+def test_coordinator_durability_failure_prevents_older_snapshot_overwrite():
+    coordinator = _CacheWriteCoordinator()
+    older = coordinator.next_version()
+    replaced = coordinator.next_version()
+    written = []
+
+    def replaced_but_not_synced():
+        written.append("new")
+        raise FileDurabilityError("Replaced cache, directory sync failed")
+
+    with pytest.raises(FileDurabilityError):
+        coordinator.attempt_write(replaced, replaced_but_not_synced)
+    assert coordinator.attempt_write(older, lambda: written.append("old")) is False
+    newer = coordinator.next_version()
+    assert coordinator.attempt_write(newer, lambda: written.append("newer")) is True
+    assert written == ["new", "newer"]
 
 
 # ============================================================================

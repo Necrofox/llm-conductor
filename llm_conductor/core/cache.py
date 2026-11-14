@@ -19,6 +19,7 @@ from llm_conductor.constants import (
     OPERATION_VERIFICATION,
 )
 from llm_conductor.core.io import safe_read_file
+from llm_conductor.exceptions import FileDurabilityError
 from llm_conductor.interfaces import CacheConfigProtocol
 
 
@@ -294,15 +295,20 @@ class _CacheWriteCoordinator:
             (io_func() was not called).
 
         Raises:
-            Any exception from io_func() is re-raised unchanged;
-            _last_written_version is left untouched so a retry with the same
-            or a newer version is not wrongly treated as stale.
+            Any exception from io_func() is re-raised unchanged. Failures before
+            replacement leave _last_written_version untouched. A durability
+            failure records the replacement's version so older snapshots cannot
+            overwrite the new file even though its persistence is unconfirmed.
         """
         with self._write_lock:
             if version <= self._last_written_version:
                 # A newer snapshot is already on disk — this write is stale.
                 return False
-            io_func()
+            try:
+                io_func()
+            except FileDurabilityError:
+                self._last_written_version = version
+                raise
             self._last_written_version = version
             return True
 

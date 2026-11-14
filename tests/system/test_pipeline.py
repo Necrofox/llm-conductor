@@ -4,7 +4,9 @@ System tests: main() of llm-conductor.py end to end, in-process, with the
 fake model (EchoModel) behind responses. They cover the run command
 contract and exit codes (doc/cli.md) without real inference.
 """
+import os
 import signal
+from pathlib import Path
 
 import pytest
 import responses
@@ -22,9 +24,11 @@ from llm_conductor.constants import (
     EXIT_TARGET_LOCKED,
     EXIT_USAGE_ERROR,
     LEAF_REPORT_SCHEMA_VERSION,
+    PROGRESS_STATE_FILENAME,
     RESULT_OWNER_FILENAME,
 )
 from llm_conductor.core import shutdown
+from llm_conductor.core.io import FileOperations
 from llm_conductor.core.locking import FileLock
 from tests.support import write_configs
 from tests.system.harness import (
@@ -39,6 +43,23 @@ from tests.system.harness import (
 TRANSLATED = transform_strings(SAMPLE, lambda s: f"RU({s})")
 FINAL = transform_strings(SAMPLE, lambda s: f"OK(RU({s}))")
 RUN = ("run", "--target", "sample.json")
+
+
+def test_pipeline_keeps_results_and_cache_synced_except_heartbeat(workspace, model, run_main, monkeypatch):
+    writes = []
+    original = FileOperations._write_atomic
+
+    def record_write(self, path, encoding, writer, *, sync=True, on_written=None):
+        writes.append((Path(path), sync))
+        return original(self, path, encoding, writer, sync=sync, on_written=on_written)
+
+    monkeypatch.setattr(FileOperations, "_write_atomic", record_write)
+    assert run_main(*RUN) == EXIT_SUCCESS
+    assert any(path.name == PROGRESS_STATE_FILENAME and not sync for path, sync in writes)
+    assert all(sync for path, sync in writes if path.name != PROGRESS_STATE_FILENAME)
+    assert any(path.name == "translation_cache.json" for path, sync in writes)
+    for directory in ("translated", "redacted", "final", "leaves"):
+        assert any(directory in path.parts for path, sync in writes)
 
 
 # ============================================================================
@@ -445,6 +466,27 @@ def test_json_target_under_shared_result_root_is_rejected(
     ) == EXIT_USAGE_ERROR
     assert model.requests == []
     assert "would be overwritten" in workspace.log_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Backslashes cannot be literal filename characters on Windows")
+@pytest.mark.parametrize("name", ["\\\\", r"menu\..\outside.json"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_unsafe_single_posix_filename_exits_before_processing(
+        workspace, model, run_main, capsys, name, dry_run):
+    source = workspace.root / name
+    source.write_text('{"text": "Keep me"}', encoding="utf-8")
+    args = ["run", "--target", str(source)]
+    if dry_run:
+        args.append("--dry-run")
+
+    assert run_main(*args) == EXIT_USAGE_ERROR
+    captured = capsys.readouterr()
+    assert "Invalid result-relative path" in captured.out + captured.err
+    assert model.requests == []
+    assert not workspace.exists("result")
+    assert not workspace.exists("cache")
+    assert not workspace.exists("logs")
+    assert source.read_text(encoding="utf-8") == '{"text": "Keep me"}'
 
 
 @pytest.mark.parametrize("max_failure_ratio, expected", [(0.5, EXIT_SUCCESS), (0.0, EXIT_FAILURE_RATIO_EXCEEDED)])

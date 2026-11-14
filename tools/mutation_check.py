@@ -39,7 +39,10 @@ from llm_conductor.exceptions import FileOperationError
 
 REPO = Path(__file__).resolve().parents[1]
 COPIED_DIRS = ("llm_conductor", "tests", "doc")
-COPIED_FILES = ("llm-conductor.py", "pytest.ini")
+COPIED_FILES = (
+    "llm-conductor.py", "llm-conductor.spec", "pytest.ini", "pyproject.toml",
+    "README.md", "LICENSE", ".gitignore", ".gitattributes",
+)
 
 # (id, file, old, new, description[, equivalent])
 MUTANTS = [
@@ -96,6 +99,13 @@ MUTANTS = [
     ("strict_style_swap", "llm_conductor/config.py", "if mode == MODE_STRICT:\n            trans_config = self.config_data.translation_strict", "if mode != MODE_STRICT:\n            trans_config = self.config_data.translation_strict", "strict/style modes swapped"),
     ("num_ctx_unchecked", "llm_conductor/cli/validators.py", "if 'num_ctx' in runtime_config and runtime_config['num_ctx'] <= 0:", "if False:", "num_ctx <= 0 is skipped"),
     ("atomic_no_cleanup", "llm_conductor/core/io.py", "                if os.path.exists(temp_path):\n                    try:\n                        os.unlink(temp_path)", "                if False:\n                    try:\n                        os.unlink(temp_path)", "failed write leaves a .tmp behind"),
+    ("atomic_file_sync_skipped", "llm_conductor/core/io.py", "                    if sync:\n                        os.fsync(tmp_file.fileno())", "                    if False:\n                        os.fsync(tmp_file.fileno())", "durable writes skip file synchronization"),
+    ("atomic_directory_sync_skipped", "llm_conductor/core/io.py", "                        self._sync_parent_directory(dir_name)", "                        pass", "durable writes skip parent directory synchronization"),
+    ("atomic_replace_rename", "llm_conductor/core/io.py", "                os.replace(temp_path, file_path)", "                os.rename(temp_path, file_path)", "atomic writes use platform-dependent rename semantics"),
+    ("atomic_size_zero", "llm_conductor/core/io.py", "                    written_size = os.fstat(tmp_file.fileno()).st_size", "                    written_size = 0", "size diagnostics ignore serialized bytes"),
+    ("durability_as_oserror", "llm_conductor/exceptions.py", "class FileDurabilityError(FileOperationError):", "class FileDurabilityError(OSError):", "post-replacement durability failures enter ordinary IO retry"),
+    ("cache_durability_freshness", "llm_conductor/core/cache.py", "            except FileDurabilityError:\n                self._last_written_version = version\n                raise", "            except FileDurabilityError:\n                raise", "older cache snapshots overwrite a replacement after directory sync failure"),
+    ("heartbeat_durable", "llm_conductor/cli/heartbeat.py", "                sync=False,\n", "                sync=True,\n", "heartbeat requests durable storage on every update"),
     ("depth_off", "llm_conductor/l10n/processor.py", "if current_depth > self.max_recursion_depth:", "if current_depth > self.max_recursion_depth + 1:", "depth limit is 1 too high"),
     ("unmask_silent_debug", "llm_conductor/utils.py", "if missing_markers and config.is_debug_mode:", "if False:", "lost markers are not logged"),
     ("glossary_by_translation", "llm_conductor/l10n/processor.py", "glossary_string = build_glossary_string(original_data, glossary, self.config)", "glossary_string = build_glossary_string(value, glossary, self.config)", "verification glossary keyed off the translation"),
@@ -118,7 +128,10 @@ MUTANTS = [
     ("no_cache_ignored", "llm_conductor/cli/main.py", "cache_enabled=False if args.no_cache else None,", "cache_enabled=None,", "--no-cache has no effect"),
     ("disabled_cache_saved", "llm_conductor/core/cache.py", "        if not self.persistent:\n            return True\n\n        cache_filename", "        cache_filename", "a disabled cache is still written"),
     ("glossary_from_cwd", "llm_conductor/cli/glossary.py", "candidate = os.path.join(target.directory, GLOSSARY_FILENAME)", "candidate = GLOSSARY_FILENAME", "the implicit glossary is read from the cwd again"),
-    ("manifest_escape", "llm_conductor/cli/paths.py", "    if source_path == base_dir or not is_inside(source_path, base_dir):", "    if source_path == base_dir:", "manifest paths may leave the manifest directory"),
+    ("manifest_escape", "llm_conductor/cli/paths.py", "    if os.path.normcase(source_path) == os.path.normcase(base_dir) or not is_inside(source_path, base_dir):", "    if os.path.normcase(source_path) == os.path.normcase(base_dir):", "manifest paths may leave the manifest directory"),
+    ("manifest_base_not_normalized", "llm_conductor/cli/paths.py", "    base_dir = os.path.abspath(base_dir)\n", "", "base directory aliases bypass self-path rejection"),
+    ("result_identity_unchecked", "llm_conductor/cli/targets.py", "            host_relative_path(self.relative_path)\n", "            pass\n", "unsafe file identities reach the result layout"),
+    ("host_identity_unchecked", "llm_conductor/cli/paths.py", "        raise ValueError(\n            \"Expected a non-empty relative file path without roots, drive prefixes or dot components\")", "        return portable_relative_path(portable)", "unsafe host-relative paths are accepted"),
     ("manifest_absolute", "llm_conductor/cli/paths.py", "    if drive or MANIFEST_DRIVE_PATTERN.match(portable) or os.path.isabs(portable) or portable.startswith('/'):", "    if False:", "absolute manifest paths are accepted"),
     ("manifest_duplicates", "llm_conductor/cli/run_manifest.py", "            if original_key in first_original:", "            if False:", "duplicate manifest entries are accepted"),
     ("inside_by_prefix", "llm_conductor/cli/paths.py", "        return os.path.commonpath([path_key, dir_key]) == dir_key", "        return path_key.startswith(dir_key)", "a common string prefix counts as containment"),

@@ -181,6 +181,13 @@ lies under `{result}` is rejected. Shared `result/<name>/` is claimed with
 `.llmc.target` so a same-named target from another path cannot silently
 overwrite.
 
+Result-relative paths must be non-empty and contain no root, drive prefix,
+or `.` / `..` components. Backslashes are treated as separators on every
+platform, including in POSIX single-file names. A target name that violates
+these rules exits `2` before processing. Manifest paths may still use inner
+`..` segments when they resolve inside the manifest directory; their result
+paths are derived after normalization.
+
 ## Exit codes
 
 Only `main()` calls `sys.exit`. When a run records multiple exit codes, it

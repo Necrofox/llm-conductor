@@ -37,10 +37,20 @@ def host_relative_path(portable: str) -> str:
 
     Returns:
         Path suitable for ``os.path.join`` on the current platform.
+
+    Raises:
+        ValueError: If the path is empty, rooted, contains a drive prefix,
+            or contains ``.`` or ``..`` components.
     """
-    parts = [part for part in portable_relative_path(portable).split('/') if part]
-    if not parts:
-        return portable_relative_path(portable)
+    normalized = portable_relative_path(portable)
+    parts = [part for part in normalized.split('/') if part]
+    if (not parts or normalized.startswith('/') or any(
+            part in (os.curdir, os.pardir)
+            or os.path.splitdrive(part)[0]
+            or MANIFEST_DRIVE_PATTERN.match(part)
+            for part in parts)):
+        raise ValueError(
+            "Expected a non-empty relative file path without roots, drive prefixes or dot components")
     return os.path.join(*parts)
 
 
@@ -80,14 +90,16 @@ def resolve_under_base(base_dir: str, relative: str) -> str:
         Absolute normalized path under ``base_dir``.
 
     Raises:
-        ValueError: When the path is absolute, a drive path, or leaves ``base_dir``.
+        ValueError: When the path is absolute, a drive path, leaves ``base_dir``,
+            or resolves to ``base_dir`` itself.
     """
     portable = portable_relative_path(relative)
     drive, _ = os.path.splitdrive(portable)
     if drive or MANIFEST_DRIVE_PATTERN.match(portable) or os.path.isabs(portable) or portable.startswith('/'):
         raise ValueError("absolute path; manifest paths must be relative to the manifest directory")
 
+    base_dir = os.path.abspath(base_dir)
     source_path = os.path.normpath(os.path.join(base_dir, portable))
-    if source_path == base_dir or not is_inside(source_path, base_dir):
+    if os.path.normcase(source_path) == os.path.normcase(base_dir) or not is_inside(source_path, base_dir):
         raise ValueError(f"outside the manifest directory {base_dir}")
     return source_path

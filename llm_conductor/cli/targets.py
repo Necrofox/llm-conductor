@@ -48,7 +48,11 @@ def is_manifest_path(path: str) -> bool:
 
 @dataclass(frozen=True)
 class TargetEntry:
-    """One input file of a run, with effective stage settings."""
+    """One input file of a run, with effective stage settings.
+
+    Raises:
+        TargetError: If the relative file identity cannot stay under a result directory.
+    """
 
     source_path: str      # absolute path of the input file
     relative_path: str    # portable (POSIX) path under every result/<stage>/
@@ -58,6 +62,13 @@ class TargetEntry:
     strict: bool = False
     llm_config_path: Optional[str] = None  # absolute llm.toml; None → bootstrap Config
     glossary_path: Optional[str] = None    # absolute glossary; None → empty terms
+
+    def __post_init__(self) -> None:
+        """Reject unsafe result paths before configuration, inference or writes."""
+        try:
+            host_relative_path(self.relative_path)
+        except ValueError as exc:
+            raise TargetError(f"Invalid result-relative path {self.relative_path!r}: {exc}") from exc
 
 
 @dataclass(frozen=True)
