@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -38,7 +40,7 @@ jobs:
           expected="${tag#v}"
           actual="$(python -c 'from llm_conductor import __version__; print(__version__)')"
           if [[ "${actual}" != "${expected}" ]]; then
-            echo "::error::Tag ${tag} does not match llm_conductor.__version__=${actual} (expected ${expected}). Bump __version__ before tagging."
+            echo "::error::Tag ${tag} does not match generated version ${actual} (expected ${expected}). Check tag format and checkout state."
             exit 1
           fi
           echo "Version OK: ${actual}"

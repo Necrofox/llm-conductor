@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Derive package and executable versions from Git tags with setuptools-scm;
+  dev builds include commit identity instead of a fixed release version.
+- Standardize text files on LF and enable Python-aware Git diff context.
 - Target-relative file identities in `run_report.json` and leaves sidecars
   use portable POSIX separators on every host; filesystem result layout
   stays OS-native. Legacy native-separator keys are normalized on read (#33).

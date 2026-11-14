@@ -6,7 +6,7 @@ Runs the built exe away from the repo tree so config resolution uses the
 directory of the executable (frozen ``resolve_app_dir``), not the source
 checkout. Checks:
 
-1. ``--version`` exits 0 and prints the expected SemVer;
+1. ``--version`` exits 0 and prints the exact expected version;
 2. ``init`` writes ``conductor.toml`` and ``llm.toml`` next to the exe;
 3. ``check`` succeeds when invoked with a *different* cwd (configs still
    found next to the executable).
@@ -53,7 +53,7 @@ def smoke(exe: Path, expected_version: str) -> int:
 
     Args:
         exe: Path to the frozen binary to test.
-        expected_version: SemVer string that must appear in ``--version`` output
+        expected_version: PEP 440 version to match exactly in ``--version`` output
             (same as ``llm_conductor.__version__`` / the release tag without ``v``).
 
     Returns:
@@ -73,9 +73,9 @@ def smoke(exe: Path, expected_version: str) -> int:
         print(f"--version exit={version_proc.returncode} output={version_out!r}")
         if version_proc.returncode != 0:
             return _fail(f"--version exited {version_proc.returncode}")
-        if expected_version not in version_out:
+        if version_out.strip() != f"llm-conductor {expected_version}":
             return _fail(
-                f"--version output did not contain {expected_version!r}: {version_out!r}"
+                f"--version output did not match {expected_version!r}: {version_out!r}"
             )
 
         # 2) init → templates next to the exe
@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--expected-version",
         required=True,
-        help="SemVer that must appear in --version output",
+        help="Exact PEP 440 version expected in --version output",
     )
     args = parser.parse_args(argv)
     return smoke(args.exe.resolve(), args.expected_version)

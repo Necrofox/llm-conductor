@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=80", "setuptools-scm>=9.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -45,6 +45,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pyinstaller>=6.0.0",
+    "setuptools>=80",
+    "setuptools-scm>=9.2",
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
@@ -66,8 +68,8 @@ Changelog = "https://github.com/Necrofox/llm-conductor/blob/main/CHANGELOG.md"
 [project.scripts]
 llm-conductor = "llm_conductor.cli.main:main"
 
-[tool.setuptools.dynamic]
-version = { attr = "llm_conductor.__version__" }
+[tool.setuptools_scm]
+version_file = "llm_conductor/_version.py"
 
 [tool.setuptools.packages.find]
 include = ["llm_conductor*"]

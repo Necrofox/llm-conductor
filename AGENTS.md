@@ -63,6 +63,8 @@ Mutation shield: `python tools/mutation_check.py` when touching critical paths.
 
 ## Packaging note
 
-Version is `llm_conductor.__version__`. Release exe is built by GitHub
-Actions on tag `v*` (see `.github/workflows/`). Do not treat a local
-`dist/` as the release source.
+Version is derived from Git tags by setuptools-scm at build time and exposed
+as `llm_conductor.__version__` via generated, gitignored `_version.py`.
+Do not bump a version literal. See CONTRIBUTING.md for dev builds and tag
+ancestry. Release exe is built by GitHub Actions on tag `v*` (see
+`.github/workflows/`). Do not treat a local `dist/` as the release source.

@@ -2,6 +2,9 @@
 import errno
 import re
 
+# A source checkout without generated build metadata has no known version.
+UNKNOWN_VERSION = '0.0.0+unknown'
+
 # ============================================================================
 # CONFIGURATION FILES
 # ============================================================================

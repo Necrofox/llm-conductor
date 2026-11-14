@@ -76,6 +76,7 @@ __pycache__/
 .Python
 
 # Сборка / дистрибуция
+/llm_conductor/_version.py
 build/
 dist/
 develop-eggs/

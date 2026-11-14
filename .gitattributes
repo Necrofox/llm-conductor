@@ -1,0 +1,5 @@
+# Normalize text files and keep LF in working trees on every platform.
+* text=auto eol=lf
+
+# Use Python definitions as diff hunk context.
+*.py diff=python

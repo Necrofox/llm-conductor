@@ -13,6 +13,10 @@ llm-conductor --version
 From a checkout without install: `python llm-conductor.py …` (same configs
 layout as the frozen exe). After `pip install`: `llm-conductor …`.
 
+`--version` reports the version generated at build/install time. A fresh
+checkout without generated version metadata reports `0.0.0+unknown`.
+See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
+
 ### `run` options
 
 | Flag | Meaning |
