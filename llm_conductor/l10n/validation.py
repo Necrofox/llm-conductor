@@ -6,12 +6,11 @@ validate_model_reply() is a pure function (no state, no I/O) - the same
 style as mask_tags()/build_glossary_string() rather than a class, since
 there is nothing to encapsulate between calls.
 """
+import re
 import unicodedata
-from collections import Counter
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from llm_conductor.constants import (
-    TAG_MASK_PATTERN,
     VALIDATION_REASON_FABRICATED_TAG,
     VALIDATION_REASON_FOREIGN_SCRIPT,
     VALIDATION_REASON_NEWLINE_IN_REPLY,
@@ -21,7 +20,7 @@ from llm_conductor.constants import (
 )
 
 if TYPE_CHECKING:
-    from llm_conductor.interfaces import ProcessorConfigProtocol
+    from llm_conductor.interfaces import ContentRulesProtocol, ProcessorConfigProtocol
 
 # Unicode general-category prefixes always allowed regardless of script:
 # punctuation, symbol (incl. emoji), number, separator (whitespace), control.
@@ -149,6 +148,44 @@ def _marker_mismatch_detail(
     return '; '.join(parts) if parts else None
 
 
+def _restored_fragment_spans(masked_reply: str, tag_map: Dict[str, str]) -> List[Tuple[int, int]]:
+    """Locate and merge marker-restored regions in the unmasked reply."""
+    if not tag_map:
+        return []
+    spans: List[Tuple[int, int]] = []
+    offset = 0
+    for match in re.finditer('|'.join(re.escape(marker) for marker in tag_map), masked_reply):
+        fragment = tag_map[match.group()]
+        start = match.start() + offset
+        end = start + len(fragment)
+        if spans and spans[-1][1] == start:
+            spans[-1] = (spans[-1][0], end)
+        else:
+            spans.append((start, end))
+        offset += len(fragment) - len(match.group())
+    return spans
+
+
+def _has_fabricated_fragments(
+        masked_reply: str, unmasked_reply: str, tag_map: Dict[str, str],
+        rules: 'ContentRulesProtocol',
+) -> bool:
+    """Reject protected matches containing text written outside real markers.
+
+    Marker multiplicity is checked first by the caller. A restored fragment
+    stays trusted even when translation changes its regex context. Conversely,
+    a literal model insertion cannot stand in for a relocated marker.
+    """
+    restored = _restored_fragment_spans(masked_reply, tag_map)
+    index = 0
+    for start, end in rules.protected_spans(unmasked_reply):
+        while index < len(restored) and restored[index][1] <= start:
+            index += 1
+        if index == len(restored) or restored[index][0] > start or restored[index][1] < end:
+            return True
+    return False
+
+
 def validate_model_reply(
     original_value: str,
     masked_reply: str,
@@ -160,6 +197,7 @@ def validate_model_reply(
     config: 'ProcessorConfigProtocol',
     *,
     allowed_scripts: Optional[Tuple[str, ...]] = None,
+    content_rules: Optional['ContentRulesProtocol'] = None,
 ) -> ReplyValidationResult:
     """
     Run the sanity checks of [validation] on one accepted model reply.
@@ -171,9 +209,9 @@ def validate_model_reply(
 
     Args:
         original_value: Unmasked source of the leaf.
-        masked_reply: Model's raw reply, still carrying [Tn] markers - a
-            literal newline in it is always chatter, since the source's
-            real newlines were masked before the call.
+        masked_reply: Model's raw reply, still carrying [Tn] markers.
+            Literal newlines are rejected when selected by the active
+            protected-fragment rule (as they are by default).
         unmasked_reply: masked_reply after unmask_tags().
         tag_map: Marker -> original tag, as returned by mask_tags().
         missing_markers: Markers unmask_tags() could not find in the reply.
@@ -183,11 +221,13 @@ def validate_model_reply(
         config: Supplies [validation] thresholds, policy, and
             the default allowed_scripts.
         allowed_scripts: Writing systems allowed by the active profile.
+        content_rules: Active profile rules; defaults to config.processing.
 
     Returns:
         A ReplyValidationResult.
     """
-    if '\n' in masked_reply:
+    rules = content_rules if content_rules is not None else config.processing
+    if '\n' in masked_reply and any('\n' in fragment for fragment in rules.protected_fragments(masked_reply)):
         return ReplyValidationResult(False, VALIDATION_REASON_NEWLINE_IN_REPLY, None)
 
     marker_detail = _marker_mismatch_detail(
@@ -198,7 +238,7 @@ def validate_model_reply(
             False, VALIDATION_REASON_TAG_MARKER_MISMATCH, None, marker_detail,
         )
 
-    if Counter(TAG_MASK_PATTERN.findall(unmasked_reply)) != Counter(tag_map.values()):
+    if _has_fabricated_fragments(masked_reply, unmasked_reply, tag_map, rules):
         return ReplyValidationResult(False, VALIDATION_REASON_FABRICATED_TAG, None)
 
     max_allowed_length = config.validation.max_length_ratio * len(original_value) + config.validation.max_length_slack

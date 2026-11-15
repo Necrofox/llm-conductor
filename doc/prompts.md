@@ -24,14 +24,16 @@ Without that boundary the instruction and the payload blur together.
 
 ## Formatting markers
 
-Before the call, placeholders `{0}`, newlines, and HTML/XML-like tags become
-`[T0]`, `[T1]`, … and are restored afterward.
+By default, before the call, placeholders `{0}`, newlines, and HTML/XML-like
+tags become `[T0]`, `[T1]`, … and are restored afterward. The complete rule
+can be replaced or disabled with `[processing].mask_pattern` in
+`llm.toml`; see [content.md](content.md) for copyable recipes.
 
 - **Do not list sample markers** (`[T0]`, `{0}`, `%s`, …) in the system
   prompt — samples encourage fabricated or mismatched markers. Say only that
   every formatting marker already in the text must be preserved in place.
-  The model never sees raw `{0}` / tags — only `[Tn]` (or another prefix if
-  the source already contains literal `[T…]`).
+  The model sees `[Tn]` in place of protected fragments (or another prefix if
+  the source already contains literal `[T…]`). Unprotected text stays visible.
 - Markers may move with word order; lost or invented markers fail validation
   when the reply validator is enabled ([pipeline.md](pipeline.md)).
 
@@ -67,8 +69,10 @@ Common failure mode: chatter, alternatives, or apologies. Useful rules:
 - Do not mix source-language words into the target when that would be wrong
   for your pair (spell that out for your languages).
 
-`stop` sequences: real newlines in the source are already masked, so `\n\n`
-in the reply is almost always chatter. Note that request `stop` **replaces**
+`stop` sequences: with the default protection, real newlines in the source
+are already masked, so `\n\n` in the reply is almost always chatter. If your
+custom mask leaves newlines editable, adjust `stop` to permit the intended
+multiline output. Note that request `stop` **replaces**
 the model’s defaults — include your model’s end tokens as well. OpenAI-style
 APIs allow at most four stop strings.
 
@@ -100,7 +104,7 @@ changes. Large files mean a full re-run after a prompt edit.
 - [ ] No-chatter rule; short-string rule if needed
 - [ ] `{LINGUISTIC_CONTEXT}{GLOSSARY}` before the text label
 - [ ] Mode prompt ends with a text label + newline
-- [ ] `stop` includes `\n\n` and your model’s end tokens
+- [ ] `stop` fits the newline protection policy and includes the model’s end tokens
 - [ ] Verification forbids reverse translation; includes `{ORIGINAL_TEXT}`
 - [ ] `[validation].allowed_scripts` matches the target writing system
 - [ ] Spot-check with `examples/sample.json` on real inference

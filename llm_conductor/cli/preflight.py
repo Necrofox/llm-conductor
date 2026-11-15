@@ -7,7 +7,7 @@ checks draft structure/markers, and for verify-only entries without a
 draft requires a readable ``translated/`` tree that matches the original
 shape. Collects all faults before raising.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from llm_conductor.cli.draft_validate import (
     compare_draft_markers,
@@ -19,7 +19,12 @@ from llm_conductor.cli.targets import ResultLayout, RunTarget
 from llm_conductor.constants import RUN_STAGE_VERIFY, STAGE_TRANSLATED
 from llm_conductor.core.io import safe_read_file
 from llm_conductor.exceptions import FileOperationError, TargetError
-from llm_conductor.interfaces import FileOperationsProtocol, Logger
+from llm_conductor.interfaces import (
+    ContentRulesProtocol,
+    FileOperationsProtocol,
+    Logger,
+)
+from llm_conductor.l10n.content import DEFAULT_CONTENT_RULES
 
 
 def _reject_null_root(index: int, path: str, data: Any, label: str) -> Optional[str]:
@@ -36,6 +41,7 @@ def validate_target_inputs(
         *,
         layout: ResultLayout,
         default_stage: str,
+        content_rules_by_target: Optional[Mapping[int, ContentRulesProtocol]] = None,
 ) -> None:
     """
     Ensure every input file is usable for the selected stage(s).
@@ -52,6 +58,8 @@ def validate_target_inputs(
         logger: Logger of the run.
         layout: Result paths (needed for verify-only ``translated/``).
         default_stage: Stage for a lone JSON target (CLI).
+        content_rules_by_target: Effective profile rules by 1-based target index.
+            Omitted entries use the default content rules.
 
     Raises:
         TargetError: Collecting all IO / JSON / null / draft / translated
@@ -100,7 +108,8 @@ def validate_target_inputs(
         if structure_issues:
             blocks.append(format_draft_structure_errors(entry.index, structure_issues))
             continue
-        marker_issues = compare_draft_markers(originals[entry.source_path], draft)
+        rules = (content_rules_by_target or {}).get(entry.index, DEFAULT_CONTENT_RULES)
+        marker_issues = compare_draft_markers(originals[entry.source_path], draft, rules)
         if marker_issues:
             blocks.append(format_draft_marker_errors(entry.index, marker_issues))
 

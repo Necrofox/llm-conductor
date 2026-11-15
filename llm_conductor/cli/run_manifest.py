@@ -12,7 +12,12 @@ import tomllib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
-from llm_conductor.cli.paths import is_inside, resolve_under_base
+from llm_conductor.cli.paths import (
+    is_inside,
+    manifest_relative_identity,
+    portable_relative_path,
+    resolve_under_base,
+)
 from llm_conductor.constants import (
     GLOSSARY_FILENAME,
     LEGACY_LIST_EXTENSION,
@@ -38,7 +43,7 @@ class ResolvedTarget:
 
     index: int
     original: str
-    relative_path: str
+    relative_path: str  # portable (POSIX) identity under result/<stage>/
     draft: Optional[str]
     stage: str
     strict: bool
@@ -291,7 +296,8 @@ class RunManifestParser:
             else:
                 first_original[original_key] = target.index
 
-            result_key = os.path.normcase(target.relative_path)
+            result_key = os.path.normcase(
+                portable_relative_path(target.relative_path))
             if result_key in result_keys:
                 self._violations.append(ManifestViolation(
                     f"result path collides with target {result_keys[result_key]} "
@@ -409,7 +415,7 @@ class RunManifestParser:
         return ResolvedTarget(
             index=index,
             original=original,
-            relative_path=os.path.relpath(original, self.base_dir),
+            relative_path=manifest_relative_identity(original, self.base_dir),
             draft=draft,
             stage=stage,
             strict=strict,

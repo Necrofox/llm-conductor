@@ -283,6 +283,7 @@ class HeartbeatWriter:
             wrote = safe_write_file(
                 self._path, payload, 'heartbeat progress state',
                 self._file_ops, self._logger,
+                sync=False,
             )
             if not wrote:
                 self._logger.warning(

@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.1.2] - 2026-11-15
+
+### Added
+
+- Configurable string eligibility and protected-fragment expressions in
+  `llm.toml` `[processing]`. Defaults preserve format-only skipping;
+  opt in to numeric/date processing without wrapping inputs. Includes tested
+  TOML recipes for Unicode letters, HTML/XML, and common placeholders. Each
+  manifest target uses its effective model profile's content rules (#32).
+
+### Changed
+
+- Use `os.replace` for atomic file replacement on every platform. Keep
+  durable writes enabled by default; heartbeat snapshots skip storage sync.
+- Derive package and executable versions from Git tags with setuptools-scm;
+  dev builds include commit identity instead of a fixed release version.
+- Standardize text files on LF and enable Python-aware Git diff context.
+- Target-relative file identities in `run_report.json` and leaves sidecars
+  use portable POSIX separators on every host; filesystem result layout
+  stays OS-native. Legacy native-separator keys are normalized on read (#33).
+- Cache key version 5 includes both content-rule expressions and invalidates
+  replies accepted before marker-origin fragment validation; previous cache
+  entries are rebuilt as needed.
+
+### Fixed
+
+- Track marker-restored text when validating custom protected fragments so
+  anchors and lookarounds allow relocation without hiding literal inventions.
+- Limit rejected-reply filename labels by UTF-8 bytes so Unicode file and leaf
+  names do not prevent saving diagnostic bodies and attribution metadata.
+- Synchronize parent directories after durable file replacement on Linux.
+  Report post-replacement sync failures without retrying the replacement or
+  allowing older cache snapshots to overwrite the new file.
+- Measure large-file warnings from actual serialized bytes, including
+  nested JSON, indentation and encoding, without serializing the data twice.
+- Reject paths resolving to the manifest base directory even with trailing
+  base separators or case differences on Windows.
+- Reject unsafe result-relative paths before processing, including POSIX
+  single-file names made entirely of backslashes.
+- Keep every opt-in rejected-reply dump under `logs/rejected/` instead of
+  overwriting by sanitized leaf path; attribute each dump via `.meta.json`
+  to source file, leaf identity, and usage attempt (#30).
+
 ## [1.1.1] - 2026-11-11
 
 ### Fixed

@@ -38,14 +38,17 @@ from llm_conductor.core.io import FileOperations, safe_read_file
 from llm_conductor.exceptions import FileOperationError
 
 REPO = Path(__file__).resolve().parents[1]
-COPIED_DIRS = ("llm_conductor", "tests")
-COPIED_FILES = ("llm-conductor.py", "pytest.ini")
+COPIED_DIRS = ("llm_conductor", "tests", "doc")
+COPIED_FILES = (
+    "llm-conductor.py", "llm-conductor.spec", "pytest.ini", "pyproject.toml",
+    "README.md", "LICENSE", ".gitignore", ".gitattributes",
+)
 
 # (id, file, old, new, description[, equivalent])
 MUTANTS = [
     # (id, file, old, new, description)
     ("unmask_order", "llm_conductor/utils.py", "key=len, reverse=True", "key=len, reverse=False", "unmask: [T1]/[T10] replacement order", True),
-    ("mask_counter", "llm_conductor/utils.py", 'marker = f"[{prefix}{next(counter)}]"', 'marker = f"[{prefix}0]"', "mask: marker counter does not increment"),
+    ("mask_counter", "llm_conductor/utils.py", 'marker = f"[{prefix}{counter}]"', 'marker = f"[{prefix}0]"', "mask: marker counter does not increment"),
     ("mask_prefix_ignores_collision", "llm_conductor/utils.py",
      "if not re.search(r'\\[' + re.escape(prefix) + r'\\d+\\]', text):",
      "if True:",
@@ -55,6 +58,14 @@ MUTANTS = [
      "return prompt + original_text_block",
      "verify: [ORIGINAL] block is inserted after the text label, not before it"),
     ("mask_no_newline", "llm_conductor/constants.py", r"|(?:\n)|", "|", "regex does not mask \\n"),
+    ("content_joins_fragments", "llm_conductor/l10n/content.py", "parts.extend((core[previous:start], CONTENT_MASK_REPLACEMENT))", "parts.extend((core[previous:start], ''))", "content eligibility joins text across protection"),
+    ("content_gate_disabled", "llm_conductor/l10n/content.py", "return self._required.search(self.eligibility_text(text)) is not None", "return True", "content eligibility ignores the required pattern"),
+    ("custom_mask_ignored", "llm_conductor/l10n/processor.py", "masked_text, tag_map = mask_tags(core, rules)", "masked_text, tag_map = mask_tags(core)", "model masking ignores the custom content policy"),
+    ("profile_content_ignored", "llm_conductor/l10n/processor.py", "rules = runtime_config.get('processing', self.config.processing)", "rules = self.config.processing", "manifest processing uses the bootstrap profile"),
+    ("key_no_content", "llm_conductor/core/cache.py", "api_url, sorted(set(allowed_scripts)), content_identity,", "api_url, sorted(set(allowed_scripts)),", "cache key ignores content policy"),
+    ("fragment_origin_unchecked", "llm_conductor/l10n/validation.py", "    if _has_fabricated_fragments(masked_reply, unmasked_reply, tag_map, rules):", "    if False:", "literal inventions bypass fragment-origin validation"),
+    ("restored_regions_ignored", "llm_conductor/l10n/validation.py", "    restored = _restored_fragment_spans(masked_reply, tag_map)", "    restored: List[Tuple[int, int]] = []", "relocated protected fragments lose their marker origin"),
+    ("dump_char_limit", "llm_conductor/l10n/processor.py", "        return sanitized.encode('utf-8')[:REJECTED_REPLY_LABEL_MAX_BYTES].decode('utf-8', errors='ignore')", "        return sanitized[:REJECTED_REPLY_LABEL_MAX_BYTES]", "dump labels truncate characters instead of UTF-8 bytes"),
     ("key_no_model", "llm_conductor/core/cache.py", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "CACHE_KEY_VERSION, operation_type, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "cache key without model"),
     ("key_no_prompt", "llm_conductor/core/cache.py", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            mode, value, sampling_identity,", "cache key without assembled prompt"),
     ("key_no_sampling", "llm_conductor/core/cache.py", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value, sampling_identity,", "CACHE_KEY_VERSION, operation_type, model, system_prompt,\n            enhanced_prompt, mode, value,", "cache key without sampling identity"),
@@ -91,6 +102,13 @@ MUTANTS = [
     ("strict_style_swap", "llm_conductor/config.py", "if mode == MODE_STRICT:\n            trans_config = self.config_data.translation_strict", "if mode != MODE_STRICT:\n            trans_config = self.config_data.translation_strict", "strict/style modes swapped"),
     ("num_ctx_unchecked", "llm_conductor/cli/validators.py", "if 'num_ctx' in runtime_config and runtime_config['num_ctx'] <= 0:", "if False:", "num_ctx <= 0 is skipped"),
     ("atomic_no_cleanup", "llm_conductor/core/io.py", "                if os.path.exists(temp_path):\n                    try:\n                        os.unlink(temp_path)", "                if False:\n                    try:\n                        os.unlink(temp_path)", "failed write leaves a .tmp behind"),
+    ("atomic_file_sync_skipped", "llm_conductor/core/io.py", "                    if sync:\n                        os.fsync(tmp_file.fileno())", "                    if False:\n                        os.fsync(tmp_file.fileno())", "durable writes skip file synchronization"),
+    ("atomic_directory_sync_skipped", "llm_conductor/core/io.py", "                        self._sync_parent_directory(dir_name)", "                        pass", "durable writes skip parent directory synchronization"),
+    ("atomic_replace_rename", "llm_conductor/core/io.py", "                os.replace(temp_path, file_path)", "                os.rename(temp_path, file_path)", "atomic writes use platform-dependent rename semantics"),
+    ("atomic_size_zero", "llm_conductor/core/io.py", "                    written_size = os.fstat(tmp_file.fileno()).st_size", "                    written_size = 0", "size diagnostics ignore serialized bytes"),
+    ("durability_as_oserror", "llm_conductor/exceptions.py", "class FileDurabilityError(FileOperationError):", "class FileDurabilityError(OSError):", "post-replacement durability failures enter ordinary IO retry"),
+    ("cache_durability_freshness", "llm_conductor/core/cache.py", "            except FileDurabilityError:\n                self._last_written_version = version\n                raise", "            except FileDurabilityError:\n                raise", "older cache snapshots overwrite a replacement after directory sync failure"),
+    ("heartbeat_durable", "llm_conductor/cli/heartbeat.py", "                sync=False,\n", "                sync=True,\n", "heartbeat requests durable storage on every update"),
     ("depth_off", "llm_conductor/l10n/processor.py", "if current_depth > self.max_recursion_depth:", "if current_depth > self.max_recursion_depth + 1:", "depth limit is 1 too high"),
     ("unmask_silent_debug", "llm_conductor/utils.py", "if missing_markers and config.is_debug_mode:", "if False:", "lost markers are not logged"),
     ("glossary_by_translation", "llm_conductor/l10n/processor.py", "glossary_string = build_glossary_string(original_data, glossary, self.config)", "glossary_string = build_glossary_string(value, glossary, self.config)", "verification glossary keyed off the translation"),
@@ -113,7 +131,10 @@ MUTANTS = [
     ("no_cache_ignored", "llm_conductor/cli/main.py", "cache_enabled=False if args.no_cache else None,", "cache_enabled=None,", "--no-cache has no effect"),
     ("disabled_cache_saved", "llm_conductor/core/cache.py", "        if not self.persistent:\n            return True\n\n        cache_filename", "        cache_filename", "a disabled cache is still written"),
     ("glossary_from_cwd", "llm_conductor/cli/glossary.py", "candidate = os.path.join(target.directory, GLOSSARY_FILENAME)", "candidate = GLOSSARY_FILENAME", "the implicit glossary is read from the cwd again"),
-    ("manifest_escape", "llm_conductor/cli/paths.py", "    if source_path == base_dir or not is_inside(source_path, base_dir):", "    if source_path == base_dir:", "manifest paths may leave the manifest directory"),
+    ("manifest_escape", "llm_conductor/cli/paths.py", "    if os.path.normcase(source_path) == os.path.normcase(base_dir) or not is_inside(source_path, base_dir):", "    if os.path.normcase(source_path) == os.path.normcase(base_dir):", "manifest paths may leave the manifest directory"),
+    ("manifest_base_not_normalized", "llm_conductor/cli/paths.py", "    base_dir = os.path.abspath(base_dir)\n", "", "base directory aliases bypass self-path rejection"),
+    ("result_identity_unchecked", "llm_conductor/cli/targets.py", "            host_relative_path(self.relative_path)\n", "            pass\n", "unsafe file identities reach the result layout"),
+    ("host_identity_unchecked", "llm_conductor/cli/paths.py", "        raise ValueError(\n            \"Expected a non-empty relative file path without roots, drive prefixes or dot components\")", "        return portable_relative_path(portable)", "unsafe host-relative paths are accepted"),
     ("manifest_absolute", "llm_conductor/cli/paths.py", "    if drive or MANIFEST_DRIVE_PATTERN.match(portable) or os.path.isabs(portable) or portable.startswith('/'):", "    if False:", "absolute manifest paths are accepted"),
     ("manifest_duplicates", "llm_conductor/cli/run_manifest.py", "            if original_key in first_original:", "            if False:", "duplicate manifest entries are accepted"),
     ("inside_by_prefix", "llm_conductor/cli/paths.py", "        return os.path.commonpath([path_key, dir_key]) == dir_key", "        return path_key.startswith(dir_key)", "a common string prefix counts as containment"),

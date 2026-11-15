@@ -77,6 +77,7 @@ original = "menu/main.json"
     assert [e.source_path for e in target.entries] == [
         str(tmp_path / "project" / "menu" / "main.json")
     ]
+    assert [e.relative_path for e in target.entries] == ["menu/main.json"]
     assert target.is_manifest
 
 
@@ -158,12 +159,15 @@ def test_broken_implicit_glossary_is_a_target_error_not_a_silent_fallback(glossa
 
 def test_prepare_creates_the_nested_result_directory(tmp_path):
     layout = ResultLayout(str(tmp_path / "result"))
-    entry = TargetEntry(str(tmp_path / "menu" / "main.json"), os.path.join("menu", "main.json"))
+    entry = TargetEntry(str(tmp_path / "menu" / "main.json"), "menu/main.json")
 
     path = layout.prepare("final", entry)
+    leaves = layout.prepare_leaves(entry)
 
     assert path == str(tmp_path / "result" / "final" / "menu" / "main.json")
+    assert leaves == str(tmp_path / "result" / "leaves" / "menu" / "main.json")
     assert os.path.isdir(os.path.dirname(path)) and not os.path.exists(path)
+    assert os.path.isdir(os.path.dirname(leaves)) and not os.path.exists(leaves)
 
 
 def test_claim_owner_on_real_files_refuses_a_second_target(tmp_path, logger):

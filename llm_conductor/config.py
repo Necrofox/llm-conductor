@@ -60,6 +60,7 @@ from llm_conductor.interfaces import (
     MetricsProtocol,
     UsageLedgerProtocol,
 )
+from llm_conductor.l10n.content import ContentRules
 from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA
 
 SectionValues = Mapping[str, Any]
@@ -587,6 +588,7 @@ class ConfigData:
     heartbeat: HeartbeatConfig
     resilience: ResilienceConfig
     validation: ValidationConfig
+    processing: ContentRules
     profile_name: str
     profile_description: str
     log_level: str
@@ -661,6 +663,7 @@ class ConfigData:
             limits=LimitsConfig(**conductor["limits"]),
             heartbeat=HeartbeatConfig(**conductor["heartbeat"]),
             resilience=ResilienceConfig(**conductor["resilience"]),
+            processing=ContentRules(**llm["processing"]),
             validation=ValidationConfig(
                 **conductor["validation"],
                 allowed_scripts=tuple(llm["validation"]["allowed_scripts"]),
@@ -816,6 +819,11 @@ class RuntimeConfigFactory:
     def __init__(self, config_data: ConfigData):
         self.config_data = config_data
 
+    @property
+    def processing(self) -> ContentRules:
+        """Content rules of this model profile, shared by both stages."""
+        return self.config_data.processing
+
     def _build(self, api: APIConfig, sampling: TranslationConfig) -> dict:
         """Flatten one endpoint and one mode into the runtime_config contract of call_model_api()."""
         return {
@@ -827,6 +835,7 @@ class RuntimeConfigFactory:
             'retry_backoff_factor': api.retry_backoff_factor,
             'model': api.model,
             'allowed_scripts': self.config_data.validation.allowed_scripts,
+            'processing': self.processing,
             'system_prompt': api.system_prompt,
             'keep_alive': api.keep_alive,
             'max_tokens_param': api.max_tokens_param,
@@ -1219,6 +1228,11 @@ class Config:
     def validation(self) -> ValidationConfig:
         """Delegates to ConfigData."""
         return self.data.validation
+
+    @property
+    def processing(self) -> ContentRules:
+        """Return the bootstrap model profile's immutable string content rules."""
+        return self.data.processing
 
     @property
     def translation_api(self) -> APIConfig:

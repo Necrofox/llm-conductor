@@ -266,6 +266,10 @@ def _execute_run(config: Config, args: argparse.Namespace,
         layout.check_owner(target.path, config.file_ops, config.logger)
         validate_target_inputs(
             target, config.file_ops, config.logger, layout=layout, default_stage=stage,
+            content_rules_by_target={
+                entry.index: profiles[entry.llm_config_path or locations.llm_path].processing
+                for entry in target.entries
+            },
         )
         return run_dry_run(
             config, target, layout, profiles, glossaries,

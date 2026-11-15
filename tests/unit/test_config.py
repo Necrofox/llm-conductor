@@ -263,7 +263,7 @@ _RUNTIME_KEYS = {
     'api_url', 'api_type', 'api_key', 'api_timeout', 'max_retries', 'retry_backoff_factor',
     'model', 'system_prompt', 'keep_alive', 'max_tokens_param', 'prompt', 'temp',
     'num_predict', 'num_ctx', 'top_p', 'top_k', 'repeat_penalty', 'frequency_penalty',
-    'presence_penalty', 'stop', 'allowed_scripts',
+    'presence_penalty', 'stop', 'allowed_scripts', 'processing',
 }
 
 
@@ -279,6 +279,8 @@ def factory():
         verification__prompts__edit="VERIFY",
         verification__api__url="http://verify/api/chat",
         validation__allowed_scripts=["cjk"],
+        processing__required_content_pattern='',
+        processing__mask_pattern='',
     ))
 
 
@@ -289,6 +291,8 @@ def test_runtime_config_contains_full_stage_contract(factory):
     ):
         assert set(runtime) == _RUNTIME_KEYS
         assert runtime['allowed_scripts'] == ("cjk",)
+        assert runtime['processing'] is factory.processing
+        assert runtime['processing'].identity == ('', '')
 
 
 @pytest.mark.parametrize("mode, prompt, temp", [

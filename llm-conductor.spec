@@ -1,5 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+from setuptools_scm import get_version
+
+# Refresh the version even when an editable install predates the current commit.
+get_version(
+    root=SPECPATH,
+    relative_to=Path(SPECPATH) / 'pyproject.toml',
+    version_file='llm_conductor/_version.py',
+    dist_name='llm-conductor',
+)
 
 a = Analysis(
     ['llm-conductor.py'],

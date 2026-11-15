@@ -8,6 +8,7 @@ how many times.
 import copy
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -22,11 +23,14 @@ from llm_conductor.constants import (
     ORIGINAL_TEXT_BLOCK_NOTE,
     ORIGINAL_TEXT_BLOCK_TEMPLATE,
     REJECTED_REPLY_LOG_LENGTH,
+    REJECTED_REPLY_META_SUFFIX,
 )
+from llm_conductor.core import cache as cache_module
 from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.leaf_report import make_degraded, make_ok
+from llm_conductor.exceptions import FileOperationError
 from llm_conductor.l10n.context import KeyPath, LinguisticContext
 from llm_conductor.l10n.processor import RecursiveProcessor, process_stage_recursive
 
@@ -209,6 +213,191 @@ def test_mixed_text_with_placeholder_still_calls_model(make_config):
 
     assert model.values == ["Hello [T0]"]
     assert result["msg"] == "RU(Hello {0})"
+
+
+@pytest.mark.parametrize("source,reply,expected,expected_request", [
+    (" +0042 ", "unused", " +0042 ", None),
+    ("-007", "unused", "-007", None),
+    ("2026-11-09", "unused", "2026-11-09", None),
+    ("Value: +0042", "42", "42", "Value: +0042"),
+    ("Value: -007", "-7", "-7", "Value: -007"),
+    ("Value: 2026-11-09", "2026-11-09", "2026-11-09", "Value: 2026-11-09"),
+    (" Value: +0042 ", "42", " 42 ", "Value: +0042"),
+])
+def test_numeric_normalization_keeps_string_contract(
+        make_config, mocker, source, reply, expected, expected_request):
+    """Numeric/date leaves skip inference unless their text includes letters."""
+    config = make_config(cache__enabled=False, dedup__enabled=False)
+    model = mocker.Mock(return_value=CallOutcome(reply, True, None))
+
+    result, processor = _run(config, {"value": source}, model)
+
+    assert result == {"value": expected}
+    assert isinstance(result["value"], str)
+    assert processor.get_stats_summary()['skipped_leaves'] == int(expected_request is None)
+    if expected_request is None:
+        model.assert_not_called()
+    else:
+        assert model.call_count == 1
+        assert model.call_args.args[0] == expected_request
+
+
+def test_complete_tagged_fragments_may_move_with_word_order(make_config):
+    """Reordering well-formed spans preserves each tag and its placeholder."""
+    source = "<i>Open {0}</i> <b>Close {1}</b>"
+    reply = "[T3]Закрой [T4][T5] [T0]Открой [T1][T2]"
+    config = make_config(validation__allowed_scripts=["cyrillic"])
+
+    result, processor = _run(config, {"line": source}, BadReplyModel(reply))
+
+    assert result == {"line": "<b>Закрой {1}</b> <i>Открой {0}</i>"}
+    assert processor.get_stats_summary()['failed_leaves'] == 0
+    assert config.usage_ledger.build_export()['attempts'][0]['outcome'] == 'success'
+
+
+@pytest.mark.parametrize('required, expected_calls', [(r'\p{L}', 1), ('', 4)])
+def test_numeric_opt_in_counts_and_string_outputs(make_config, mocker, required, expected_calls):
+    config = make_config(processing__required_content_pattern=required,
+                         cache__enabled=False, dedup__enabled=False)
+    replies = {'+0042': '42', '-007': '-7', '2026-11-09': '2026-11-09', 'Value: 3': '3'}
+    model = mocker.Mock(side_effect=lambda value, *args, **kwargs: CallOutcome(replies[value], True, None))
+    data = {'positive': ' +0042 ', 'negative': '-007', 'date': '2026-11-09',
+            'mixed': 'Value: 3', 'empty': '', 'blank': '\t\n ', 'number': 42, 'boolean': True}
+    result, processor = _run(config, data, model)
+    assert model.call_count == expected_calls
+    assert result['positive'] == (' +0042 ' if required else ' 42 ')
+    assert result['negative'] == ('-007' if required else '-7')
+    assert result['date'] == '2026-11-09'
+    assert result['mixed'] == '3'
+    assert result['empty'] == '' and result['blank'] == '\t\n '
+    assert result['number'] == 42 and result['boolean'] is True
+    assert all(isinstance(result[key], str) for key in ('positive', 'negative', 'date', 'mixed'))
+    assert processor.get_stats_summary()['skipped_leaves'] == 6 - expected_calls
+    record = config.leaf_outcomes.get_translation_record(KeyPath(('positive',)).report_key())
+    assert record.status == ('skipped' if required else 'ok')
+
+
+@pytest.mark.parametrize('persistent', [False, True])
+def test_opt_in_numeric_cache_dedup_and_whitespace_identity(make_config, mocker, persistent):
+    config = make_config(processing__required_content_pattern='', cache__enabled=persistent)
+    model = mocker.Mock(return_value=CallOutcome('42', True, None))
+    data = [' +0042 ', ' +0042 ', '+0042']
+    result, _ = _run(config, data, model)
+    assert result == [' 42 ', ' 42 ', '42']
+    assert model.call_count == 2
+    if not persistent:
+        assert config.leaf_outcomes.get_translation_record(KeyPath((1,)).report_key()).status == 'dedup'
+    result, _ = _run(config, data, model)
+    assert result == [' 42 ', ' 42 ', '42']
+    assert model.call_count == (2 if persistent else 4)
+
+
+def test_content_policy_change_cannot_reuse_warm_cache(make_config, mocker):
+    model = mocker.Mock(return_value=CallOutcome('Hello {name}', True, None))
+    first = make_config(processing__mask_pattern='')
+    assert _run(first, {'x': 'Hello {name}'}, model)[0] == {'x': 'Hello {name}'}
+    first.cache_manager.save(OPERATION_TRANSLATION)
+    second = make_config(processing__mask_pattern=r'\{([a-z]+)\}')
+    assert second.cache_manager.load(OPERATION_TRANSLATION)
+    model.return_value = CallOutcome('Hi [T0]', True, None)
+    assert _run(second, {'x': 'Hello {name}'}, model)[0] == {'x': 'Hi {name}'}
+    assert model.call_count == 2
+    assert model.call_args.args[0] == 'Hello [T0]'
+    second.cache_manager.save(OPERATION_TRANSLATION)
+    third = make_config(processing__mask_pattern=r'\{([a-z]+)\}',
+                        processing__required_content_pattern=r'\S')
+    assert third.cache_manager.load(OPERATION_TRANSLATION)
+    assert _run(third, {'x': 'Hello {name}'}, model)[0] == {'x': 'Hi {name}'}
+    assert model.call_count == 3
+
+
+@pytest.mark.parametrize('reply, expected', [
+    ('Hi [T1] [T0]', 'Hi {name} {name}'),
+    ('Hi [T0]', 'Hello {name} {name}'),
+    ('Hi [T0] [T0] [T1]', 'Hello {name} {name}'),
+])
+def test_repeated_custom_fragments_have_independent_validation(make_config, mocker, reply, expected):
+    config = make_config(processing__mask_pattern=r'\{([a-z]+)\}')
+    model = mocker.Mock(return_value=CallOutcome(reply, True, None))
+    result, _ = _run(config, {'x': 'Hello {name} {name}'}, model)
+    assert model.call_args.args[0] == 'Hello [T0] [T1]'
+    assert result == {'x': expected}
+    assert config.leaf_outcomes.has_untreated_error() is (expected.startswith('Hello'))
+
+
+def test_custom_mask_applies_independently_to_verification_original(make_config, mocker):
+    config = make_config(processing__mask_pattern=r'\{([a-z]+)\}')
+    model = mocker.Mock(return_value=CallOutcome('Hi [T0]', True, None))
+    result, _ = _run(config, {'x': 'Hey {name}'}, model,
+                     original={'x': 'Hello {name}'}, verification=True)
+    assert result == {'x': 'Hi {name}'}
+    assert model.call_args.args[0] == 'Hey [T0]'
+    assert 'Hello [T0]' in model.call_args.args[2]['prompt']
+    assert '{name}' not in model.call_args.args[2]['prompt']
+
+
+def test_anchored_mask_uses_same_core_in_draft_and_original_reference(make_config, mocker):
+    config = make_config(processing__mask_pattern=r'^ID:\d+')
+    model = mocker.Mock(return_value=CallOutcome('[T0] Hi', True, None))
+    result, _ = _run(config, {'x': ' ID:42 Hey\t'}, model,
+                     original={'x': ' ID:42 Hello\t'}, verification=True)
+    assert result == {'x': ' ID:42 Hi\t'}
+    assert model.call_args.args[0] == '[T0] Hey'
+    assert '[ORIGINAL]:  [T0] Hello\t' in model.call_args.args[2]['prompt']
+
+
+@pytest.mark.parametrize('verification', [False, True])
+@pytest.mark.parametrize('reply, accepted', [
+    ('Hi [T0]', True), ('ID:42 Hi [T0]', False),
+])
+def test_contextual_mask_preservation_controls_cache_and_usage(make_config, verification, reply, accepted):
+    config = make_config(processing__mask_pattern=r'^ID:\d+')
+    config.leaf_outcomes.set_active_file('sample.json')
+    source = {'text': 'ID:42 Hello'}
+    model = BadReplyModel(reply)
+    result, _ = _run(config, source, model, original=source, verification=verification)
+    operation = OPERATION_VERIFICATION if verification else OPERATION_TRANSLATION
+    record = config.leaf_outcomes.file_sidecar_dict('sample.json')['leaves']['["text"]'][operation]
+
+    assert result == ({'text': 'Hi ID:42'} if accepted else source)
+    assert record['status'] == ('ok' if accepted else 'degraded')
+    assert config.cache_manager.get_stats(operation)['cache_size'] == int(accepted)
+    assert config.usage_ledger.build_export()['attempts'][0]['outcome'] == (
+        'success' if accepted else 'rejected')
+
+
+def test_contextual_mask_rebuilds_cache_from_before_origin_validation(make_config, monkeypatch):
+    source = {'text': 'ID:42 Hello'}
+    with monkeypatch.context() as old_version:
+        old_version.setattr(cache_module, 'CACHE_KEY_VERSION', 4)
+        old = make_config(processing__mask_pattern=r'^ID:\d+', validation__enabled=False)
+        assert _run(old, source, BadReplyModel('ID:42 Hi [T0]'))[0] == {
+            'text': 'ID:42 Hi ID:42',
+        }
+        assert old.cache_manager.save(OPERATION_TRANSLATION)
+
+    current = make_config(processing__mask_pattern=r'^ID:\d+')
+    assert current.cache_manager.load(OPERATION_TRANSLATION)
+    assert _run(current, source, BadReplyModel('Hi [T0]'))[0] == {'text': 'Hi ID:42'}
+    assert len(current.usage_ledger.build_export()['attempts']) == 1
+
+
+def test_sibling_building_does_not_change_isolated_ticket_request(make_config):
+    """Different sibling context cannot split an identical isolated request."""
+    ticket = "The shared lobby lamp is dark."
+    source = [
+        {"building": "ANNEX", "ticket": ticket},
+        {"building": "MAIN", "ticket": ticket},
+    ]
+    model = FakeModel()
+
+    result, processor = _run(make_config(cache__enabled=False), source, model)
+
+    assert model.values == ["ANNEX", ticket, "MAIN"]
+    assert result[0]['ticket'] == result[1]['ticket'] == f"RU({ticket})"
+    assert processor.get_stats_summary()['deduplicated_leaves'] == 1
+    assert all('ANNEX' not in call['prompt'] and 'MAIN' not in call['prompt']
+               for call in model.calls if call['value'] == ticket)
 
 
 def test_statistics(make_config):
@@ -632,13 +821,123 @@ def test_tag_marker_mismatch_log_includes_missing_detail(make_config):
 
 def test_save_rejected_replies_writes_full_body_under_log_dir(make_config, tmp_path):
     config = make_config(validation__save_rejected_replies=True)
+    config.leaf_outcomes.set_active_file("sample.json")
     bad_reply = "full rejected body that must be persisted\n"
+    model = BadReplyModel(bad_reply)
 
-    _run(config, {"t": "Hello"}, BadReplyModel(bad_reply))
+    _run(config, {"t": "Hello"}, model)
 
-    saved = tmp_path / "logs" / "rejected" / OPERATION_TRANSLATION / "t.txt"
-    assert saved.is_file()
-    assert saved.read_text(encoding='utf-8') == bad_reply
+    rejected_dir = tmp_path / "logs" / "rejected" / OPERATION_TRANSLATION
+    dumps = list(rejected_dir.glob("*.txt"))
+    assert len(dumps) == 1
+    assert dumps[0].read_text(encoding='utf-8') == bad_reply
+    meta_path = dumps[0].with_name(dumps[0].stem + REJECTED_REPLY_META_SUFFIX)
+    meta = json.loads(meta_path.read_text(encoding='utf-8'))
+    leaf = KeyPath(("t",))
+    assert meta == {
+        "file": "sample.json",
+        "leaf": leaf.report_key(),
+        "leaf_display": "t",
+        "operation": OPERATION_TRANSLATION,
+        "attempt_id": model.last_usage_attempt_id,
+        "dump": dumps[0].name,
+    }
+
+
+@pytest.mark.parametrize('character', ['Ж', '界', '\U0001f600'])
+def test_rejected_reply_unicode_names_keep_body_and_full_attribution(make_config, tmp_path, character):
+    # Isolate component limits from MAX_PATH in deeply nested Windows test directories.
+    log_dir = str(tmp_path / 'logs')
+    if os.name == 'nt':
+        log_dir = '\\\\?\\' + log_dir
+    config = make_config(validation__save_rejected_replies=True, logging__dir=log_dir)
+    label = character * 64
+    relative_file = f'{label}.json'
+    config.leaf_outcomes.set_active_file(relative_file)
+    reply = 'Rejected body\n'
+
+    result, _ = _run(config, {label: 'Hello'}, BadReplyModel(reply))
+
+    assert result == {label: 'Hello'}
+    rejected_dir = Path(log_dir) / 'rejected' / OPERATION_TRANSLATION
+    dump, = rejected_dir.glob('*.txt')
+    meta_path, = rejected_dir.glob(f'*{REJECTED_REPLY_META_SUFFIX}')
+    assert dump.read_text(encoding='utf-8') == reply
+    meta = json.loads(meta_path.read_text(encoding='utf-8'))
+    assert meta['file'] == relative_file
+    assert meta['leaf'] == KeyPath((label,)).report_key()
+    assert meta['dump'] == dump.name
+    for path in (dump, meta_path):
+        assert len(path.name.encode('utf-8')) <= 255
+        assert len(path.name.encode('utf-16-le')) // 2 <= 255
+
+
+def test_save_rejected_replies_keeps_distinct_dumps_for_colliding_labels(
+        make_config, tmp_path):
+    """Literal dotted keys, nested paths, and sanitize twins must not overwrite."""
+    config = make_config(validation__save_rejected_replies=True)
+    config.leaf_outcomes.set_active_file("one.json")
+    source = {"a.b": "Open {0}.", "a": {"b": "Close {1}."}, "a/b": "X {0}", "a_b": "Y {1}"}
+    leaves = (
+        KeyPath(("a.b",)),
+        KeyPath(("a", "b")),
+        KeyPath(("a/b",)),
+        KeyPath(("a_b",)),
+    )
+    scripted = iter(("Открой.", "Закрой.", "Икс.", "Игрек."))
+
+    class _Scripted(BadReplyModel):
+        def __call__(self, value, config, runtime_config, glossary_string="", mode=None):
+            self.reply = next(scripted)
+            return super().__call__(value, config, runtime_config, glossary_string, mode)
+
+    _run(config, source, _Scripted(""))
+
+    rejected_dir = tmp_path / "logs" / "rejected" / OPERATION_TRANSLATION
+    dumps = sorted(rejected_dir.glob("*.txt"))
+    assert len(dumps) == 4
+    bodies = sorted(path.read_text(encoding='utf-8') for path in dumps)
+    assert bodies == ["Закрой.", "Игрек.", "Икс.", "Открой."]
+    metas = [
+        json.loads((path.with_name(path.stem + REJECTED_REPLY_META_SUFFIX)).read_text(
+            encoding='utf-8'))
+        for path in dumps
+    ]
+    assert {meta["leaf"] for meta in metas} == {leaf.report_key() for leaf in leaves}
+    assert all(meta["file"] == "one.json" for meta in metas)
+    assert all(meta["attempt_id"] is not None for meta in metas)
+
+
+def test_save_rejected_replies_retains_prior_dump_on_rerun(make_config, tmp_path):
+    """Later runs that share the log directory must not replace earlier dumps."""
+    config = make_config(validation__save_rejected_replies=True)
+    config.leaf_outcomes.set_active_file("same.json")
+    first = "first rejected body\n"
+    second = "second rejected body\n"
+
+    _run(config, {"t": "Hello"}, BadReplyModel(first))
+    _run(config, {"t": "Hello"}, BadReplyModel(second))
+
+    dumps = list((tmp_path / "logs" / "rejected" / OPERATION_TRANSLATION).glob("*.txt"))
+    assert sorted(path.read_text(encoding='utf-8') for path in dumps) == [first, second]
+
+
+def test_save_rejected_replies_write_failure_does_not_break_fallback(
+        make_config, tmp_path, mocker):
+    config = make_config(validation__save_rejected_replies=True)
+    config.leaf_outcomes.set_active_file("sample.json")
+    mocker.patch(
+        "llm_conductor.l10n.processor.safe_write_file",
+        side_effect=FileOperationError("disk full"),
+    )
+
+    result, _processor = _run(config, {"t": "Hello"}, BadReplyModel("bad\n"))
+
+    assert result == {"t": "Hello"}
+    assert config.logger.contains("Failed to save rejected reply for t:", level='WARNING')
+    # makedirs may create the operation dir before the write fails.
+    assert not list((tmp_path / "logs" / "rejected").rglob("*.txt"))
+    assert not list((tmp_path / "logs" / "rejected").rglob(f"*{REJECTED_REPLY_META_SUFFIX}"))
 
 
 def test_save_rejected_replies_off_writes_no_file(make_config, tmp_path):

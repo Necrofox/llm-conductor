@@ -7,11 +7,13 @@ import time
 from typing import Callable, Optional, TextIO, Union
 
 from llm_conductor.constants import (
+    BYTES_PER_MIB,
     DEFAULT_FILE_OPERATION_TIMEOUT,
     DEFAULT_LARGE_FILE_THRESHOLD_MB,
+    JSON_FILE_INDENT,
     RETRYABLE_IO_ERRNOS,
 )
-from llm_conductor.exceptions import FileOperationError
+from llm_conductor.exceptions import FileDurabilityError, FileOperationError
 from llm_conductor.interfaces import FileOperationsProtocol, Logger
 from llm_conductor.utils import run_with_timeout
 
@@ -122,23 +124,41 @@ class FileOperations:
 
         raise last_error
 
-    def _write_atomic(self, file_path: str, encoding: str, writer: Callable[[TextIO], object]) -> None:
+    @staticmethod
+    def _sync_parent_directory(directory: str) -> None:
+        """Persist the replacement's directory entry on Linux."""
+        if sys.platform != 'linux':
+            return
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _write_atomic(self, file_path: str, encoding: str, writer: Callable[[TextIO], object], *,
+                      sync: bool = True, on_written: Optional[Callable[[int], None]] = None) -> None:
         """
         Shared atomic write via a temporary file.
 
         Creates a temp file in the target directory, lets ``writer`` fill it,
-        fsyncs, then atomically replaces the destination. Used by both
-        write_json_atomic and write_text_atomic — only the serialization
-        differs.
+        flushes and closes it, then replaces the destination. With sync=True,
+        fsyncs the temporary file first and its parent directory after the
+        replacement on Linux. Other platforms only synchronize file contents.
 
         Args:
             file_path: Destination path.
             encoding: File encoding.
             writer: Callback that writes into an open text file.
+            sync: Synchronize file contents and, on Linux, the directory entry.
+            on_written: Optional callback receiving the actual serialized byte
+                size after a successful write. May run in the IO worker thread.
+                Diagnostic callback failures are logged without failing the write.
 
         Raises:
             TimeoutError: If the write exceeds the timeout.
             OSError: On filesystem failures.
+            FileDurabilityError: The destination was replaced, but directory
+                synchronization failed; its durability is not confirmed.
         """
         def _do_write() -> None:
             # Same directory as the target so rename stays atomic on the volume.
@@ -156,12 +176,24 @@ class FileOperations:
                 with os.fdopen(temp_fd, 'w', encoding=encoding) as tmp_file:
                     writer(tmp_file)
                     tmp_file.flush()
-                    os.fsync(tmp_file.fileno())
+                    written_size = os.fstat(tmp_file.fileno()).st_size
+                    if sync:
+                        os.fsync(tmp_file.fileno())
 
-                if sys.platform == 'win32' and os.path.exists(file_path):
-                    os.replace(temp_path, file_path)
-                else:
-                    os.rename(temp_path, file_path)
+                os.replace(temp_path, file_path)
+                if sync:
+                    try:
+                        self._sync_parent_directory(dir_name)
+                    except OSError as exc:
+                        raise FileDurabilityError(
+                            f"Replaced {file_path}, but parent directory synchronization failed; "
+                            "durability is not confirmed"
+                        ) from exc
+                if on_written is not None:
+                    try:
+                        on_written(written_size)
+                    except Exception as exc:  # noqa: BLE001 - diagnostics must not retry a committed write
+                        self._log_warning(f"Size diagnostics failed for {file_path}: {exc}")
 
             except Exception:
                 if os.path.exists(temp_path):
@@ -173,7 +205,8 @@ class FileOperations:
 
         run_with_timeout(_do_write, self.timeout, f"write({file_path})")
 
-    def write_json_atomic(self, file_path: str, data: dict, encoding: str = 'utf-8') -> None:
+    def write_json_atomic(self, file_path: str, data: dict, encoding: str = 'utf-8', *,
+                          sync: bool = True, on_written: Optional[Callable[[int], None]] = None) -> None:
         """
         Atomically write a JSON file via a temporary file.
 
@@ -181,14 +214,21 @@ class FileOperations:
             file_path: Destination path.
             data: JSON-serializable data.
             encoding: File encoding.
+            sync: Synchronize contents and the Linux parent directory entry.
+            on_written: Optional byte-size callback after success (IO thread).
 
         Raises:
             TimeoutError: If the write exceeds the timeout.
             OSError: On filesystem failures.
+            FileDurabilityError: Replacement succeeded but directory sync failed.
         """
-        self._write_atomic(file_path, encoding, lambda f: json.dump(data, f, ensure_ascii=False, indent=4))
+        self._write_atomic(
+            file_path, encoding, lambda f: json.dump(data, f, ensure_ascii=False, indent=JSON_FILE_INDENT),
+            sync=sync, on_written=on_written,
+        )
 
-    def write_text_atomic(self, file_path: str, data: str, encoding: str = 'utf-8') -> None:
+    def write_text_atomic(self, file_path: str, data: str, encoding: str = 'utf-8', *,
+                          sync: bool = True, on_written: Optional[Callable[[int], None]] = None) -> None:
         """
         Atomically write a text file (e.g. TOML) via a temporary file.
 
@@ -196,12 +236,15 @@ class FileOperations:
             file_path: Destination path.
             data: File contents.
             encoding: File encoding.
+            sync: Synchronize contents and the Linux parent directory entry.
+            on_written: Optional byte-size callback after success (IO thread).
 
         Raises:
             TimeoutError: If the write exceeds the timeout.
             OSError: On filesystem failures.
+            FileDurabilityError: Replacement succeeded but directory sync failed.
         """
-        self._write_atomic(file_path, encoding, lambda f: f.write(data))
+        self._write_atomic(file_path, encoding, lambda f: f.write(data), sync=sync, on_written=on_written)
 
     def _write_with_retry(self, file_path: str, encodings: list[str], max_retries: int, retry_delay: float,
                            atomic_write: Callable[[str, str], None]) -> bool:
@@ -244,7 +287,8 @@ class FileOperations:
         return False
 
     def write_json_with_retry(self, file_path: str, data: dict,
-                               max_retries: int = 3, retry_delay: float = 1.0) -> bool:
+                               max_retries: int = 3, retry_delay: float = 1.0, *,
+                               sync: bool = True, on_written: Optional[Callable[[int], None]] = None) -> bool:
         """
         Write JSON with retry and fallback encodings.
 
@@ -253,18 +297,26 @@ class FileOperations:
             data: JSON-serializable data.
             max_retries: Max attempts per encoding.
             retry_delay: Base delay between attempts.
+            sync: Synchronize contents and the Linux parent directory entry.
+            on_written: Optional byte-size callback after success (IO thread).
 
         Returns:
             True on success; False on total failure.
+
+        Raises:
+            FileDurabilityError: Replacement succeeded but directory sync failed.
+                This is not retried as a failed replacement.
         """
         encodings = ['utf-8', 'utf-8-sig', 'cp1251', 'latin-1']
         return self._write_with_retry(
             file_path, encodings, max_retries, retry_delay,
-            lambda path, encoding: self.write_json_atomic(path, data, encoding)
+            lambda path, encoding: self.write_json_atomic(
+                path, data, encoding, sync=sync, on_written=on_written)
         )
 
     def write_text_with_retry(self, file_path: str, data: str,
-                               max_retries: int = 3, retry_delay: float = 1.0) -> bool:
+                               max_retries: int = 3, retry_delay: float = 1.0, *,
+                               sync: bool = True, on_written: Optional[Callable[[int], None]] = None) -> bool:
         """
         Write a text file (e.g. TOML) with retry.
 
@@ -276,13 +328,20 @@ class FileOperations:
             data: File contents.
             max_retries: Max attempts.
             retry_delay: Base delay between attempts.
+            sync: Synchronize contents and the Linux parent directory entry.
+            on_written: Optional byte-size callback after success (IO thread).
 
         Returns:
             True on success; False on total failure.
+
+        Raises:
+            FileDurabilityError: Replacement succeeded but directory sync failed.
+                This is not retried as a failed replacement.
         """
         return self._write_with_retry(
             file_path, ['utf-8'], max_retries, retry_delay,
-            lambda path, encoding: self.write_text_atomic(path, data, encoding)
+            lambda path, encoding: self.write_text_atomic(
+                path, data, encoding, sync=sync, on_written=on_written)
         )
 
     def _log_debug(self, message: str):
@@ -386,7 +445,7 @@ def safe_read_file(file_path: str, description: str, file_ops: FileOperationsPro
 
 def safe_write_file(file_path: str, data: Union[dict, str], description: str,
                     file_ops: FileOperationsProtocol, logger: Optional[Logger] = None,
-                    max_retries: int = 3, retry_delay: float = 1.0) -> bool:
+                    max_retries: int = 3, retry_delay: float = 1.0, *, sync: bool = True) -> bool:
     """
     Write a file atomically with retries and an emergency fallback copy.
 
@@ -401,6 +460,8 @@ def safe_write_file(file_path: str, data: Union[dict, str], description: str,
         logger: Logger for messages.
         max_retries: Attempts before falling back.
         retry_delay: Base delay between attempts, seconds.
+        sync: Synchronize contents and the Linux parent directory entry. False
+            keeps atomic replacement without requesting durable storage.
 
     Returns:
         True on success, False on a write error that was only logged.
@@ -408,34 +469,31 @@ def safe_write_file(file_path: str, data: Union[dict, str], description: str,
     Raises:
         FileOperationError: When the regular write failed, whether or not the
             fallback copy {file_path}.fallback_<ts>.{json|txt} was saved.
+        FileDurabilityError: A file was replaced but directory sync failed.
+            No replacement retry or emergency fallback is attempted in this case.
     """
     is_debug = hasattr(logger, 'is_debug_mode') and logger.is_debug_mode if logger else False
     as_text = isinstance(data, str)
     threshold_mb = file_ops.large_file_threshold_mb
 
-    try:
-        if isinstance(data, str):
-            data_size_mb = len(data.encode('utf-8')) / (1024 * 1024)
-        else:
-            # A cheap estimate; the exact size is computed only near the threshold.
-            approx_size_mb = sys.getsizeof(data) / (1024 * 1024)
-            if approx_size_mb > threshold_mb * 0.8:
-                data_size_mb = len(json.dumps(data, ensure_ascii=False).encode('utf-8')) / (1024 * 1024)
-            else:
-                data_size_mb = approx_size_mb
-
+    def report_size(written_bytes: int) -> None:
+        """Log the flushed file size without serializing the payload again."""
+        data_size_mb = written_bytes / BYTES_PER_MIB
         if data_size_mb > threshold_mb and logger:
             logger.warning(
                 f"Large file warning: {description} is {data_size_mb:.2f} MB. "
                 f"This may cause performance issues.")
 
         if is_debug and logger:
-            unit = "chars" if as_text else "entries"
-            logger.debug(f"Writing {description}: ~{data_size_mb:.2f} MB, {len(data)} {unit}")
+            logger.debug(f"Wrote {description}: {data_size_mb:.2f} MB")
 
+    try:
         success = (
-            file_ops.write_text_with_retry(file_path, data, max_retries, retry_delay) if isinstance(data, str)
-            else file_ops.write_json_with_retry(file_path, data, max_retries, retry_delay)
+            file_ops.write_text_with_retry(
+                file_path, data, max_retries, retry_delay, sync=sync, on_written=report_size)
+            if isinstance(data, str)
+            else file_ops.write_json_with_retry(
+                file_path, data, max_retries, retry_delay, sync=sync, on_written=report_size)
         )
 
         if success:
@@ -452,11 +510,12 @@ def safe_write_file(file_path: str, data: Union[dict, str], description: str,
             suffix = 'txt' if as_text else 'json'
             fallback_path = f"{file_path}.fallback_{int(time.time())}.{suffix}"
             try:
-                with open(fallback_path, 'w', encoding='utf-8') as f:
-                    if isinstance(data, str):
-                        f.write(data)
-                    else:
-                        json.dump(data, f, ensure_ascii=False, indent=4)
+                if isinstance(data, str):
+                    file_ops.write_text_atomic(fallback_path, data, sync=sync)
+                else:
+                    file_ops.write_json_atomic(fallback_path, data, sync=sync)
+            except FileDurabilityError:
+                raise
             except Exception as fallback_error:
                 if logger:
                     logger.error(f"Fallback save failed: {fallback_error}. DATA MAY BE LOST!")
@@ -466,6 +525,10 @@ def safe_write_file(file_path: str, data: Union[dict, str], description: str,
                 logger.warning(f"Data saved to fallback file: {fallback_path}")
             raise FileOperationError(f"Failed to write {description}, saved to {fallback_path}")
 
+    except FileDurabilityError as exc:
+        if logger:
+            logger.error(str(exc))
+        raise
     except FileOperationError:
         raise  # Re-raise FileOperationError unchanged.
     except PermissionError:

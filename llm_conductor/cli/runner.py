@@ -519,6 +519,10 @@ class TargetRunner:
         validate_target_inputs(
             self._target, config.file_ops, config.logger,
             layout=self._layout, default_stage=self._default_options.stage,
+            content_rules_by_target={
+                entry.index: self._factories[self._profile_path_for(entry)].processing
+                for entry in self._target.entries
+            },
         )
         if not has_owner:
             self._layout.claim_owner(self._target.path, config.file_ops, config.logger)

@@ -35,6 +35,14 @@ class FileOperationError(ConductorError):
     """A file could not be read or written."""
 
 
+class FileDurabilityError(FileOperationError):
+    """A file was replaced, but its directory synchronization failed.
+
+    The destination already contains the new file. Callers must not treat
+    this as a failed replacement or assume that the old file was restored.
+    """
+
+
 class TimeoutError(ConductorError, builtins.TimeoutError):
     """
     An operation exceeded its time limit.

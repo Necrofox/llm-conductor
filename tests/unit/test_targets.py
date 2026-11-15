@@ -3,16 +3,28 @@
 Unit tests of path helpers, result layout (llm_conductor/cli/targets.py)
 and of RunOptions (llm_conductor/cli/runner.py).
 """
+import ntpath
 import os
+import posixpath
+from types import SimpleNamespace
 
 import pytest
 
-from llm_conductor.cli.paths import is_inside, resolve_under_base
+from llm_conductor.cli import paths as path_helpers
+from llm_conductor.cli import targets as target_helpers
+from llm_conductor.cli.paths import (
+    host_relative_path,
+    is_inside,
+    manifest_relative_identity,
+    portable_relative_path,
+    resolve_under_base,
+)
 from llm_conductor.cli.runner import RunOptions
 from llm_conductor.cli.targets import (
     ResultLayout,
     RunTarget,
     TargetEntry,
+    TargetResolver,
     is_manifest_path,
 )
 from llm_conductor.constants import (
@@ -23,6 +35,12 @@ from llm_conductor.constants import (
 from llm_conductor.core.io import FileOperations
 from llm_conductor.exceptions import FileOperationError, TargetError
 from tests.support import RecordingLogger
+
+INVALID_FILE_IDENTITIES = (
+    "", "///", "\\\\", ".", "..", "../outside.json", r"..\outside.json",
+    "menu/../main.json", "menu/./main.json", "/main.json", r"\main.json",
+    "C:main.json", "C:/main.json", "menu/C:/main.json", "//server/share/main.json",
+)
 
 
 @pytest.fixture
@@ -51,6 +69,25 @@ def test_resolve_under_base_rejects_escape(base, relative):
         resolve_under_base(base, relative)
 
 
+@pytest.mark.parametrize("base_suffix", ["/", "//", "/nested/.."])
+@pytest.mark.parametrize("relative", ["", ".", "menu/.."])
+def test_resolve_under_base_rejects_base_with_noncanonical_spelling(base, base_suffix, relative):
+    with pytest.raises(ValueError, match="outside the manifest directory"):
+        resolve_under_base(base + base_suffix, relative)
+
+
+@pytest.mark.parametrize("base_suffix", ["/", "//", "/nested/.."])
+def test_resolve_under_base_normalizes_base_for_child(base, base_suffix):
+    assert resolve_under_base(base + base_suffix, "menu/main.json") == os.path.join(
+        base, "menu", "main.json")
+
+
+def test_resolve_under_base_rejects_case_variant_of_base(base):
+    relative = os.path.join("..", os.path.basename(base).upper())
+    with pytest.raises(ValueError, match="outside the manifest directory"):
+        resolve_under_base(base, relative)
+
+
 @pytest.mark.parametrize("relative", ["/etc/x.json", "\\x.json", "D:\\Other\\x.json", "D:x.json"])
 def test_resolve_under_base_rejects_absolute(base, relative):
     with pytest.raises(ValueError, match="absolute path"):
@@ -70,6 +107,65 @@ def test_is_inside(base):
     assert not is_inside(os.path.dirname(base), base)
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("menu/main.json", "menu/main.json"),
+    (r"menu\main.json", "menu/main.json"),
+    (r"dialogs\npc/guard.json", "dialogs/npc/guard.json"),
+    ("sample.json", "sample.json"),
+])
+def test_portable_relative_path_normalizes_separators(raw, expected):
+    assert portable_relative_path(raw) == expected
+
+
+def test_host_relative_path_uses_os_separators():
+    assert host_relative_path("menu/main.json") == os.path.join("menu", "main.json")
+    assert host_relative_path(r"dialogs\npc\guard.json") == os.path.join(
+        "dialogs", "npc", "guard.json")
+
+
+@pytest.mark.parametrize("path_module", [posixpath, ntpath], ids=["posix", "windows"])
+@pytest.mark.parametrize("relative", INVALID_FILE_IDENTITIES)
+def test_host_relative_path_rejects_unsafe_identities(monkeypatch, path_module, relative):
+    monkeypatch.setattr(path_helpers, "os", SimpleNamespace(
+        path=path_module, curdir=os.curdir, pardir=os.pardir,
+    ))
+    with pytest.raises(ValueError, match="relative file path"):
+        host_relative_path(relative)
+
+
+@pytest.mark.parametrize("path_module", [posixpath, ntpath], ids=["posix", "windows"])
+@pytest.mark.parametrize("relative", ["menu/main.json", "menu//main.json", r"menu\main.json"])
+def test_host_relative_path_keeps_valid_nested_paths(monkeypatch, path_module, relative):
+    monkeypatch.setattr(path_helpers, "os", SimpleNamespace(
+        path=path_module, curdir=os.curdir, pardir=os.pardir,
+    ))
+    assert host_relative_path(relative) == path_module.join("menu", "main.json")
+
+
+@pytest.mark.parametrize("relative", INVALID_FILE_IDENTITIES)
+def test_target_entry_rejects_unsafe_result_identity(base, relative):
+    with pytest.raises(TargetError, match="Invalid result-relative path"):
+        TargetEntry(os.path.join(base, "input.json"), relative)
+
+
+def test_single_posix_file_with_separator_only_name_is_rejected(monkeypatch):
+    """Model POSIX path semantics without creating a Windows-invalid filename."""
+    monkeypatch.setattr(path_helpers, "os", SimpleNamespace(
+        path=posixpath, curdir=os.curdir, pardir=os.pardir,
+    ))
+    monkeypatch.setattr(target_helpers, "os", SimpleNamespace(path=SimpleNamespace(
+        abspath=posixpath.abspath, basename=posixpath.basename, isfile=lambda path: True,
+    )))
+    resolver = TargetResolver(FileOperations(), RecordingLogger())
+    with pytest.raises(TargetError, match="Invalid result-relative path"):
+        resolver.resolve("/inputs/" + "\\" * 2)
+
+
+def test_manifest_relative_identity_is_portable(base):
+    absolute = os.path.join(base, "input", "route-separate.json")
+    assert manifest_relative_identity(absolute, base) == "input/route-separate.json"
+
+
 def test_run_target_properties(base):
     target = RunTarget(os.path.join(base, "ui.toml"), ())
 
@@ -82,13 +178,15 @@ def test_run_target_properties(base):
 
 def test_shared_layout_is_named_after_the_target(base, tmp_path):
     target = RunTarget(os.path.join(base, "ui.toml"), ())
-    entry = TargetEntry(os.path.join(base, "menu", "main.json"), os.path.join("menu", "main.json"))
+    entry = TargetEntry(os.path.join(base, "menu", "main.json"), "menu/main.json")
 
     layout = ResultLayout.for_target(target, str(tmp_path / "app"), next_to_target=False)
 
     assert layout.shared_by_name is True
     assert layout.stage_path("final", entry) == str(tmp_path / "app" / "result" / "ui.toml" / "final"
                                                     / "menu" / "main.json")
+    assert layout.leaves_path(entry) == str(
+        tmp_path / "app" / "result" / "ui.toml" / "leaves" / "menu" / "main.json")
 
 
 def test_result2target_layout_is_next_to_the_target(base):

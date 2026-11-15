@@ -3,7 +3,6 @@ import itertools
 import re
 import signal as signal_module
 import string
-import unicodedata
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -15,15 +14,17 @@ from typing import (
     Iterator,
     List,
     NamedTuple,
+    Optional,
     Tuple,
     TypeVar,
 )
 
-from llm_conductor.constants import DEFAULT_MARKER_PREFIX, TAG_MASK_PATTERN
+from llm_conductor.constants import DEFAULT_MARKER_PREFIX
 from llm_conductor.exceptions import TimeoutError as ConductorTimeoutError
+from llm_conductor.l10n.content import DEFAULT_CONTENT_RULES
 
 if TYPE_CHECKING:
-    from llm_conductor.interfaces import ProcessorConfigProtocol
+    from llm_conductor.interfaces import ContentRulesProtocol, ProcessorConfigProtocol
 
 # ============================================================================
 # TIMEOUT UTILITIES
@@ -197,11 +198,9 @@ def is_format_only_leaf(text: str) -> bool:
     """
     True when a leaf has no letters outside markup / placeholders / whitespace.
 
-    After stripping outer whitespace and removing ``TAG_MASK_PATTERN``
-    matches, residual characters are inspected: if none has a Unicode
-    general category starting with ``L``, the leaf is format-only and
-    should skip the LLM round-trip. Pure whitespace is false here so the
-    existing blank-skip branch can own that case.
+    Uses the default content policy (Unicode letters outside protected
+    fragments). The processor uses its configured content policy instead.
+    Pure whitespace is false here so the blank-skip branch owns that case.
 
     Args:
         text: Full leaf string.
@@ -212,8 +211,7 @@ def is_format_only_leaf(text: str) -> bool:
     core = text.strip()
     if not core:
         return False
-    residual = TAG_MASK_PATTERN.sub('', core)
-    return not any(unicodedata.category(char).startswith('L') for char in residual)
+    return not DEFAULT_CONTENT_RULES.accepts(core)
 
 
 def _marker_prefix_candidates() -> Iterator[str]:
@@ -258,11 +256,11 @@ def _select_marker_prefix(text: str) -> str:
     )
 
 
-def mask_tags(text: str) -> Tuple[str, Dict[str, str]]:
+def mask_tags(text: str, rules: Optional['ContentRulesProtocol'] = None) -> Tuple[str, Dict[str, str]]:
     """
     Mask formatting tags so a model call cannot alter them.
 
-    Replaces the following with temporary "[<prefix><n>]" markers:
+    By default replaces the following with temporary "[<prefix><n>]" markers:
     - {0}, {1}, ... (placeholders)
     - <tag>, </tag> (HTML/XML tags)
     - \\n (newlines)
@@ -275,25 +273,28 @@ def mask_tags(text: str) -> Tuple[str, Dict[str, str]]:
 
     Args:
         text: Source text.
+        rules: Active content policy; omitted uses the standard tag rule.
 
     Returns:
         Tuple (masked_text, tag_map), tag_map mapping each marker to the
         original tag it replaced.
     """
-    if not TAG_MASK_PATTERN.search(text):
+    spans = (rules or DEFAULT_CONTENT_RULES).protected_spans(text)
+    if not spans:
         return text, {}
 
     prefix = _select_marker_prefix(text)
     tag_map: Dict[str, str] = {}
-    counter = itertools.count()
-
-    def replace_func(match: 're.Match') -> str:
-        original = match.group(0)
-        marker = f"[{prefix}{next(counter)}]"
+    parts: List[str] = []
+    previous = 0
+    for counter, (start, end) in enumerate(spans):
+        original = text[start:end]
+        marker = f"[{prefix}{counter}]"
         tag_map[marker] = original
-        return marker
-
-    masked_text = TAG_MASK_PATTERN.sub(replace_func, text)
+        parts.extend((text[previous:start], marker))
+        previous = end
+    parts.append(text[previous:])
+    masked_text = ''.join(parts)
     return masked_text, tag_map
 
 class UnmaskResult(NamedTuple):
@@ -311,7 +312,10 @@ class UnmaskResult(NamedTuple):
     orphaned_markers: List[str]
 
 
-def unmask_tags(masked_text: str, tag_map: Dict[str, str], config: 'ProcessorConfigProtocol') -> UnmaskResult:
+def unmask_tags(
+        masked_text: str, tag_map: Dict[str, str], config: 'ProcessorConfigProtocol',
+        *, rules: Optional['ContentRulesProtocol'] = None,
+) -> UnmaskResult:
     """
     Restore the original tags in a model reply.
 
@@ -326,6 +330,7 @@ def unmask_tags(masked_text: str, tag_map: Dict[str, str], config: 'ProcessorCon
             marker prefix (default "T") is read back from an existing key;
             an empty tag_map falls back to DEFAULT_MARKER_PREFIX.
         config: Supplies the logger, the debug flag and max_error_display.
+        rules: Active profile rules; defaults to config.processing.
 
     Returns:
         An UnmaskResult with the original tags restored.
@@ -352,7 +357,10 @@ def unmask_tags(masked_text: str, tag_map: Dict[str, str], config: 'ProcessorCon
     else:
         prefix = DEFAULT_MARKER_PREFIX
 
-    orphaned_markers = re.findall(r'\[' + re.escape(prefix) + r'\d+\]', result)
+    orphaned_markers = (
+        re.findall(r'\[' + re.escape(prefix) + r'\d+\]', result)
+        if tag_map or (rules if rules is not None else config.processing).mask_pattern else []
+    )
     if orphaned_markers and config.is_debug_mode:
         config.logger.warning(
             f"Unmasking: found {len(orphaned_markers)} orphaned marker(s) not in tag_map: "

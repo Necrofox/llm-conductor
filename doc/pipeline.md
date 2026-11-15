@@ -6,8 +6,11 @@ rationale kept locally, see `history/` on a maintainer checkout.
 ## Leaf processing (order)
 
 1. Blank / whitespace-only → return as-is.
-2. Format-only (no letters outside markup / placeholders / residual
-   punctuation) → return as-is; no cache lookup or LLM round-trip.
+2. Content rule: peel boundaries for an eligibility view, replace each
+   protected match with one space, and search `required_content_pattern`.
+   No match → return as-is; no cache lookup or LLM round-trip. Defaults
+   require a Unicode letter outside formatting. See [content.md](content.md)
+   for the contract and regex recipes, including numeric/date processing.
 3. Peel leading/trailing whitespace from the leaf (restore after accept).
 4. Build glossary snippet (on verify: match terms in the **original**).
 5. Linguistic hints from the key path.
@@ -39,7 +42,8 @@ client (not trusted to the model or reply `strip()`); the cache stores the
 Full-request identity (see `CACHE_KEY_VERSION` / `CACHE_SAMPLING_IDENTITY_FIELDS`
 in `llm_conductor/constants.py`) includes the operation type, API URL, model name,
 system prompt, assembled user prompt (hints/glossary/original), mode, leaf value,
-the active profile's allowed writing systems, and generation-affecting sampling
+the active profile's allowed writing systems, both content-rule expressions,
+and generation-affecting sampling
 (`temperature`, `top_p`, `top_k`,
 `repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
 `num_ctx`, `stop`). Changing any of these components
@@ -54,16 +58,44 @@ pays residual misses (new strings or past rejects) can trip exit code `5`
 even after a previous full run exited `0`. Fix prompts/model or use
 `--no-cache` to remeasure.
 
+## File writes
+
+Outputs, cache snapshots, sidecars and emergency fallback copies are written
+to a temporary file in the destination directory, flushed, closed and
+replaced with `os.replace`. Durable writes are the default: the temporary
+file is synchronized before replacement; on Linux the parent directory is
+also synchronized afterward. Windows and other platforms synchronize file
+contents without this additional Linux directory step. These guarantees
+depend on the underlying filesystem and storage.
+
+If Linux directory synchronization fails after replacement, the new file
+already exists but its persistence after a system crash is unconfirmed.
+The error reports that distinction; the write is not retried as an ordinary
+replacement failure and no emergency fallback is attempted. Cache snapshot
+ordering still records the replacement so an older snapshot cannot overwrite it.
+
+Heartbeat `progress_state.json` keeps atomic replacement but skips storage
+synchronization: losing its latest update after a system crash is acceptable.
+Cache and translation/verification outputs retain durable writes. Large-file
+warnings and debug sizes use the flushed temporary file's actual byte count
+after a successful write, without a second JSON serialization.
+
 ## Reply validation
 
-When enabled, checks (first failure wins) include: literal `\n` in the masked
-reply; marker mismatches; fabricated tags; abnormal length; foreign scripts
+When enabled, checks (first failure wins) include: literal protected newlines
+in the masked reply; marker mismatches; fabricated protected fragments;
+abnormal length; foreign scripts
 outside `allowed_scripts` / source / glossary (Latin may warn or reject per
 `latin_text_policy`). Soft Latin warnings do not reject.
 
 A `tag_marker_mismatch` rejection logs structured `missing` / `duplicated` /
 `extra` marker lists. Set `[validation].save_rejected_replies = true` to also
-write the full masked reply under `[logging].dir/rejected/<operation>/`.
+write each full masked reply under `[logging].dir/rejected/<operation>/` with
+a unique filename (source file, leaf `report_key` digest, usage attempt id,
+and a nanosecond stamp) plus a matching `.meta.json` attribution sidecar.
+Human-readable filename labels are shortened by UTF-8 byte length to fit
+filesystem limits; the metadata retains the complete file and leaf identities.
+Diagnostic write failures are logged and never interrupt leaf fallback.
 
 ## Resilience
 
@@ -124,11 +156,22 @@ compact JSON arrays of `KeyPath` segments (e.g. `["a.b"]` vs `["a","b"]`),
 so a literal dotted key cannot collide with a nested path. Logs still show
 the human dotted form.
 
+**File identities** (the `files` map keys in `run_report.json`, and
+`relative_path` in each leaves sidecar) are target-relative paths with
+**POSIX separators** (`/`), even on Windows. Example: a manifest entry
+`original = "input/route-separate.json"` always serializes as
+`input/route-separate.json`, never `input\\route-separate.json`. Physical
+result paths under `translated/` / `redacted/` / `final/` / `leaves/` still
+use the host OS layout. Schema version stays **2**; older native-separator
+file keys are accepted on read (normalized to `/`) so records are not
+dropped — consumers of archived Windows reports should apply the same
+`\\` → `/` mapping when matching keys.
+
 Aggregate units in `run_report.json`:
 
 | Field | Counts |
 |---|---|
-| `skipped` | Format/blank stage records (a leaf can contribute once per stage) |
+| `skipped` | Content/blank stage records (a leaf can contribute once per stage) |
 | `verify_skipped` | Verification skipped (`translation_degraded` or `translation_missing`) |
 | `api_calls` | Leaf stage outcomes with status `ok` or `degraded` — **not** HTTP attempts |
 | `usage.json` attempts | Every HTTP try including retries, plus a separate preflight bucket |
