@@ -8,6 +8,7 @@ how many times.
 import copy
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ from llm_conductor.constants import (
     REJECTED_REPLY_LOG_LENGTH,
     REJECTED_REPLY_META_SUFFIX,
 )
+from llm_conductor.core import cache as cache_module
 from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
 from llm_conductor.core.cache import build_sampling_identity
@@ -342,6 +344,42 @@ def test_anchored_mask_uses_same_core_in_draft_and_original_reference(make_confi
     assert result == {'x': ' ID:42 Hi\t'}
     assert model.call_args.args[0] == '[T0] Hey'
     assert '[ORIGINAL]:  [T0] Hello\t' in model.call_args.args[2]['prompt']
+
+
+@pytest.mark.parametrize('verification', [False, True])
+@pytest.mark.parametrize('reply, accepted', [
+    ('Hi [T0]', True), ('ID:42 Hi [T0]', False),
+])
+def test_contextual_mask_preservation_controls_cache_and_usage(make_config, verification, reply, accepted):
+    config = make_config(processing__mask_pattern=r'^ID:\d+')
+    config.leaf_outcomes.set_active_file('sample.json')
+    source = {'text': 'ID:42 Hello'}
+    model = BadReplyModel(reply)
+    result, _ = _run(config, source, model, original=source, verification=verification)
+    operation = OPERATION_VERIFICATION if verification else OPERATION_TRANSLATION
+    record = config.leaf_outcomes.file_sidecar_dict('sample.json')['leaves']['["text"]'][operation]
+
+    assert result == ({'text': 'Hi ID:42'} if accepted else source)
+    assert record['status'] == ('ok' if accepted else 'degraded')
+    assert config.cache_manager.get_stats(operation)['cache_size'] == int(accepted)
+    assert config.usage_ledger.build_export()['attempts'][0]['outcome'] == (
+        'success' if accepted else 'rejected')
+
+
+def test_contextual_mask_rebuilds_cache_from_before_origin_validation(make_config, monkeypatch):
+    source = {'text': 'ID:42 Hello'}
+    with monkeypatch.context() as old_version:
+        old_version.setattr(cache_module, 'CACHE_KEY_VERSION', 4)
+        old = make_config(processing__mask_pattern=r'^ID:\d+', validation__enabled=False)
+        assert _run(old, source, BadReplyModel('ID:42 Hi [T0]'))[0] == {
+            'text': 'ID:42 Hi ID:42',
+        }
+        assert old.cache_manager.save(OPERATION_TRANSLATION)
+
+    current = make_config(processing__mask_pattern=r'^ID:\d+')
+    assert current.cache_manager.load(OPERATION_TRANSLATION)
+    assert _run(current, source, BadReplyModel('Hi [T0]'))[0] == {'text': 'Hi ID:42'}
+    assert len(current.usage_ledger.build_export()['attempts']) == 1
 
 
 def test_sibling_building_does_not_change_isolated_ticket_request(make_config):
@@ -804,6 +842,34 @@ def test_save_rejected_replies_writes_full_body_under_log_dir(make_config, tmp_p
         "attempt_id": model.last_usage_attempt_id,
         "dump": dumps[0].name,
     }
+
+
+@pytest.mark.parametrize('character', ['Ж', '界', '\U0001f600'])
+def test_rejected_reply_unicode_names_keep_body_and_full_attribution(make_config, tmp_path, character):
+    # Isolate component limits from MAX_PATH in deeply nested Windows test directories.
+    log_dir = str(tmp_path / 'logs')
+    if os.name == 'nt':
+        log_dir = '\\\\?\\' + log_dir
+    config = make_config(validation__save_rejected_replies=True, logging__dir=log_dir)
+    label = character * 64
+    relative_file = f'{label}.json'
+    config.leaf_outcomes.set_active_file(relative_file)
+    reply = 'Rejected body\n'
+
+    result, _ = _run(config, {label: 'Hello'}, BadReplyModel(reply))
+
+    assert result == {label: 'Hello'}
+    rejected_dir = Path(log_dir) / 'rejected' / OPERATION_TRANSLATION
+    dump, = rejected_dir.glob('*.txt')
+    meta_path, = rejected_dir.glob(f'*{REJECTED_REPLY_META_SUFFIX}')
+    assert dump.read_text(encoding='utf-8') == reply
+    meta = json.loads(meta_path.read_text(encoding='utf-8'))
+    assert meta['file'] == relative_file
+    assert meta['leaf'] == KeyPath((label,)).report_key()
+    assert meta['dump'] == dump.name
+    for path in (dump, meta_path):
+        assert len(path.name.encode('utf-8')) <= 255
+        assert len(path.name.encode('utf-16-le')) // 2 <= 255
 
 
 def test_save_rejected_replies_keeps_distinct_dumps_for_colliding_labels(

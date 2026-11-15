@@ -117,6 +117,36 @@ def test_custom_protection_applies_to_drafts_and_reply_inventions():
     assert result.reason == 'fabricated_tag'
 
 
+@pytest.mark.parametrize('pattern, source, reply, accepted', [
+    (r'^ID:\d+', 'ID:42 Hello', 'Hi [T0]', True),
+    (r'^ID:\d+', 'ID:42 Hello', 'ID:42 Hi [T0]', False),
+    (r'\d+$', 'Hello 42', '[T0] Hi', True),
+    (r'\d+$', 'Hello 42', '[T0] Hi 42', False),
+    (r'(?<=Hello )\{\w+\}', 'Hello {name}', 'Hi [T0]', True),
+    (r'(?<=Hello )\{\w+\}', 'Hello {name}', 'Hello {name} [T0]', False),
+    (r'\{\w+\}(?= door)', 'Open {name} door', 'Hi [T0]', True),
+    (r'\{\w+\}(?= door)', 'Open {name} door', '[T0] {name} door', False),
+    # The pattern can match marker syntax before restoration.
+    (r'\w+', 'Hello', '[T0]', True),
+    # Reordering adjacent restored fragments can create a longer match.
+    (r'ab|a|b', 'b a Hello', '[T1][T0] Hi', True),
+    # A match spanning restored and model-written text is still fabricated.
+    (r'ab|a|b', 'a Hello', '[T0]b Hi', False),
+])
+def test_fragment_validation_tracks_marker_origin(pattern, source, reply, accepted):
+    config = StubConfig()
+    config.processing = ContentRules('', pattern)
+    _, mapping = mask_tags(source, config.processing)
+    restored = unmask_tags(reply, mapping, config)
+    result = validate_model_reply(
+        source, reply, restored.text, mapping,
+        restored.missing_markers, restored.orphaned_markers, {}, config,
+    )
+    assert result.accepted is accepted
+    if not accepted:
+        assert result.reason == 'fabricated_tag'
+
+
 def test_draft_anchor_rules_see_peeled_core_boundaries():
     rules = ContentRules(mask_pattern=r'^ID:\d+')
     source = {'x': ' ID:42 Hello\t'}

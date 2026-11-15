@@ -28,9 +28,12 @@ including numeric-looking replies such as `"42"`.
   Input matching uses the peeled core, including in the verification reference
   and external-draft comparison: `^` and `$` see the core's boundaries.
 - With reply validation enabled, every generated marker must occur exactly
-  once. Protected fragments must have the same values and counts after
-  restoration; their order may change. Literal protected syntax invented by
-  the model is rejected. This is fragment preservation, not XML validation.
+  once. Restoring those markers preserves the selected fragments' exact values
+  and counts; their order may change. Anchors and lookarounds select fragments
+  on input and do not require their translated surroundings or positions to
+  stay unchanged. Protected matches in the restored reply must lie entirely
+  within marker-restored text; matches containing literal model-written text
+  are rejected. This is fragment preservation, not XML validation.
 - Newlines inside the string follow the mask rule too. The default protects
   LF (`\n`); a literal protected newline in the raw reply is rejected. If a
   custom mask leaves newlines unprotected, they can be changed or introduced.

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """Unit tests for rejected-reply dump naming and attribution helpers."""
+import pytest
+
 from llm_conductor.constants import (
     OPERATION_TRANSLATION,
+    REJECTED_REPLY_LABEL_MAX_BYTES,
     REJECTED_REPLY_LEAF_DIGEST_LENGTH,
     REJECTED_REPLY_NO_FILE_LABEL,
 )
@@ -34,6 +37,14 @@ def test_build_rejected_reply_stem_separates_sanitize_collisions():
     for leaf in (slash, underscore, dotted, nested):
         digest = hash_text(leaf.report_key())[:REJECTED_REPLY_LEAF_DIGEST_LENGTH]
         assert any(digest in stem for stem in stems)
+
+
+@pytest.mark.parametrize('character', ['x', 'Ж', '界', '\U0001f600'])
+def test_dump_labels_fit_byte_budget_without_splitting_characters(character):
+    label = RecursiveProcessor._sanitize_rejected_reply_label(character * 100)
+    assert label
+    assert set(label) == {character}
+    assert len(label.encode('utf-8')) <= REJECTED_REPLY_LABEL_MAX_BYTES
 
 
 def test_build_rejected_reply_stem_separates_files_and_attempts():

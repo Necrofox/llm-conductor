@@ -93,6 +93,8 @@ A `tag_marker_mismatch` rejection logs structured `missing` / `duplicated` /
 write each full masked reply under `[logging].dir/rejected/<operation>/` with
 a unique filename (source file, leaf `report_key` digest, usage attempt id,
 and a nanosecond stamp) plus a matching `.meta.json` attribution sidecar.
+Human-readable filename labels are shortened by UTF-8 byte length to fit
+filesystem limits; the metadata retains the complete file and leaf identities.
 Diagnostic write failures are logged and never interrupt leaf fallback.
 
 ## Resilience

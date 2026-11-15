@@ -18,7 +18,7 @@ from llm_conductor.constants import (
     ORIGINAL_TEXT_MARKER,
     REJECTED_REPLIES_SUBDIR,
     REJECTED_REPLY_FILENAME_UNSAFE,
-    REJECTED_REPLY_LABEL_MAX,
+    REJECTED_REPLY_LABEL_MAX_BYTES,
     REJECTED_REPLY_LEAF_DIGEST_LENGTH,
     REJECTED_REPLY_LOG_LENGTH,
     REJECTED_REPLY_META_SUFFIX,
@@ -1089,15 +1089,14 @@ class RecursiveProcessor:
         """
         Turn an arbitrary path fragment into one Windows/POSIX-safe label.
 
-        Truncates to ``REJECTED_REPLY_LABEL_MAX``. Empty input becomes
+        Truncates to ``REJECTED_REPLY_LABEL_MAX_BYTES`` UTF-8 bytes without
+        splitting a character. Empty input becomes
         ``REJECTED_REPLY_NO_FILE_LABEL``.
         """
         sanitized = value.strip() or REJECTED_REPLY_NO_FILE_LABEL
         for char in REJECTED_REPLY_FILENAME_UNSAFE:
             sanitized = sanitized.replace(char, '_')
-        if len(sanitized) > REJECTED_REPLY_LABEL_MAX:
-            sanitized = sanitized[:REJECTED_REPLY_LABEL_MAX]
-        return sanitized
+        return sanitized.encode('utf-8')[:REJECTED_REPLY_LABEL_MAX_BYTES].decode('utf-8', errors='ignore')
 
     @staticmethod
     def build_rejected_reply_stem(

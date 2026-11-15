@@ -25,11 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Target-relative file identities in `run_report.json` and leaves sidecars
   use portable POSIX separators on every host; filesystem result layout
   stays OS-native. Legacy native-separator keys are normalized on read (#33).
-- Cache key version 4 includes both content-rule expressions; previous cache
+- Cache key version 5 includes both content-rule expressions and invalidates
+  replies accepted before marker-origin fragment validation; previous cache
   entries are rebuilt as needed.
 
 ### Fixed
 
+- Track marker-restored text when validating custom protected fragments so
+  anchors and lookarounds allow relocation without hiding literal inventions.
+- Limit rejected-reply filename labels by UTF-8 bytes so Unicode file and leaf
+  names do not prevent saving diagnostic bodies and attribution metadata.
 - Synchronize parent directories after durable file replacement on Linux.
   Report post-replacement sync failures without retrying the replacement or
   allowing older cache snapshots to overwrite the new file.

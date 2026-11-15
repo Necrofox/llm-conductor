@@ -293,9 +293,11 @@ VALIDATION_REASON_UNEXPECTED_LATIN = 'unexpected_latin'
 # the actual bad text (not just its rejection reason) survives for diagnosis.
 # Full body persistence is opt-in via [validation].save_rejected_replies.
 REJECTED_REPLY_LOG_LENGTH = 200
-# Dump filenames under rejected/<operation>/: human labels are truncated;
+# Dump filenames under rejected/<operation>/: each label has a UTF-8 byte budget
+# so two labels, attribution suffixes and atomic temporary names fit filesystem
+# component limits, including UTF-16 filenames on Windows.
 # leaf identity is the digest of KeyPath.report_key(), not str(path).
-REJECTED_REPLY_LABEL_MAX = 64
+REJECTED_REPLY_LABEL_MAX_BYTES = 64
 REJECTED_REPLY_LEAF_DIGEST_LENGTH = 12
 REJECTED_REPLY_META_SUFFIX = '.meta.json'
 REJECTED_REPLY_NO_FILE_LABEL = '_nofile'
@@ -458,7 +460,8 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # discards entries without it or with another value, so a key format change
 # never needs a manual cleanup of cache_dir.
 # v2: generation-affecting sampling parameters join the key identity.
-CACHE_KEY_VERSION = 4
+# v5: invalidate replies accepted before marker-origin fragment validation.
+CACHE_KEY_VERSION = 5
 
 # Generation-affecting sampling fields in the cache key / fingerprints:
 # (canonical name in the identity JSON, runtime_config key). keep_alive and
