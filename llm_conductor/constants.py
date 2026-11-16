@@ -60,11 +60,15 @@ DEFAULT_DEDUP_ENABLED = True
 
 # [heartbeat]
 DEFAULT_HEARTBEAT_INTERVAL = 100
+DEFAULT_HEARTBEAT_INTERVAL_SEC = 30
+HEARTBEAT_THREAD_JOIN_TIMEOUT_SEC = 5
 PROGRESS_STATE_FILENAME = 'progress_state.json'
 HEARTBEAT_SCHEMA_VERSION = 1
 HEARTBEAT_STATUS_RUNNING = 'running'
 HEARTBEAT_STATUS_COMPLETED = 'completed'
 HEARTBEAT_STATUS_INTERRUPTED = 'interrupted'
+HEARTBEAT_ACTIVITY_PROCESSING = 'processing'
+HEARTBEAT_ACTIVITY_WAITING_API = 'waiting_api'
 
 # [limits]
 DEFAULT_MAX_RECURSION_DEPTH = 30
@@ -216,6 +220,23 @@ MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 MIN_TOP_P = 0.0
 MAX_TOP_P = 1.0
+
+# Logical sampling names a profile may list in omit_parameters. These are the
+# config names, not the provider JSON keys: num_predict drops whichever
+# reply-length field the transport selected. Request identity fields (model,
+# messages, credentials, URL, keep_alive, max_tokens_param) are not here.
+SAMPLING_OMITTABLE_PARAMETERS = (
+    "temperature",
+    "top_p",
+    "num_predict",
+    "stop",
+    "top_k",
+    "repeat_penalty",
+    "num_ctx",
+    "frequency_penalty",
+    "presence_penalty",
+)
+SAMPLING_OMITTABLE_NAMES = frozenset(SAMPLING_OMITTABLE_PARAMETERS)
 
 # Unknown keys in a TOML file are reported with the closest known name when
 # difflib similarity reaches this ratio.

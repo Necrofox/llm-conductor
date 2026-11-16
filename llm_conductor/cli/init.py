@@ -12,7 +12,7 @@ from typing import Any, List, Optional, Tuple
 
 from llm_conductor.constants import CONTEXT_FILENAME
 from llm_conductor.core.io import FileOperations, safe_write_file
-from llm_conductor.exceptions import ConfigValidationError, FileOperationError
+from llm_conductor.exceptions import FileOperationError
 from llm_conductor.interfaces import FileOperationsProtocol
 from llm_conductor.schema import (
     CONDUCTOR_SCHEMA,
@@ -158,10 +158,11 @@ def create_config_files(conductor_path: str, llm_path: str,
                         context_path: Optional[str] = None,
                         file_ops: Optional[FileOperationsProtocol] = None) -> None:
     """
-    Write fresh conductor.toml, llm.toml and context.toml templates.
+    Write conductor.toml, llm.toml and context.toml templates that are missing.
 
-    Existing files are never overwritten: a configured profile may hold
-    hand-tuned prompts and keys.
+    A file that already exists is left byte for byte and reported as skipped.
+    The command succeeds when every file is already present. It does not
+    refresh or repair the contents of an existing file.
 
     Args:
         conductor_path: Destination of conductor.toml.
@@ -170,8 +171,7 @@ def create_config_files(conductor_path: str, llm_path: str,
         file_ops: File operations for writing; default FileOperations.
 
     Raises:
-        ConfigValidationError: If any of the files already exists.
-        FileOperationError: If a file cannot be written.
+        FileOperationError: If a missing file cannot be written.
     """
     if context_path is None:
         context_path = os.path.join(os.path.dirname(os.path.abspath(conductor_path)), CONTEXT_FILENAME)
@@ -180,19 +180,21 @@ def create_config_files(conductor_path: str, llm_path: str,
         (llm_path, LLM_SCHEMA),
         (context_path, CONTEXT_SCHEMA),
     )
-    existing = [path for path, _ in targets if os.path.exists(path)]
-    if existing:
-        raise ConfigValidationError(
-            f"Refusing to overwrite existing configuration: {', '.join(existing)}. "
-            f"Remove or rename the file(s) to generate fresh templates.")
 
     writer = file_ops or FileOperations()
+    created_llm = False
     for path, schema in targets:
+        if os.path.exists(path):
+            print(f"Skipped {path} (already exists)")
+            continue
         text = TomlTemplateRenderer(schema).render()
         if not safe_write_file(path, text, f"{schema.file_name} template", writer):
             raise FileOperationError(f"Failed to write {path}")
         print(f"Created {path}")
+        if os.path.abspath(path) == os.path.abspath(llm_path):
+            created_llm = True
 
-    print("For OpenAI-compatible APIs (OpenAI, DeepSeek, OpenRouter), edit llm.toml:")
-    print("  - set type = \"openai\" and url in [translation.api] / [verification.api]")
-    print("  - set key_env to the environment variable holding the key (or key to the key itself)")
+    if created_llm:
+        print("For OpenAI-compatible APIs (OpenAI, DeepSeek, OpenRouter), edit llm.toml:")
+        print("  - set type = \"openai\" and url in [translation.api] / [verification.api]")
+        print("  - set key_env to the environment variable holding the key (or key to the key itself)")

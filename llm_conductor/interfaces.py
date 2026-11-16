@@ -407,12 +407,13 @@ class HeartbeatProgressProtocol(Protocol):
     """
     Leaf/stage progress ticks for the run heartbeat.
 
-    Owned by the CLI writer; RecursiveProcessor only calls these two methods
+    Owned by the CLI writer; RecursiveProcessor only calls these methods
     and never learns about the target or the exit code.
     """
 
     def begin_stage(self, stage: str, leaves_total: int) -> None: ...
     def note_leaf(self) -> None: ...
+    def set_activity(self, activity: str) -> None: ...
 
 # ============================================================================
 # ROOT CONFIGURATION PROTOCOL
@@ -430,6 +431,8 @@ class ConfigProtocol(ProcessorConfigProtocol, CacheConfigProtocol, Protocol):
     def profile_name(self) -> str: ...
     @property
     def heartbeat_interval(self) -> int: ...
+    @property
+    def heartbeat_interval_sec(self) -> int: ...
     @property
     def translation_api(self) -> APIConfigProtocol: ...
     @property

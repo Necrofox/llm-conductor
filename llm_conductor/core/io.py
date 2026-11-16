@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from typing import Callable, Optional, TextIO, Union
 
@@ -144,6 +145,9 @@ class FileOperations:
         flushes and closes it, then replaces the destination. With sync=True,
         fsyncs the temporary file first and its parent directory after the
         replacement on Linux. Other platforms only synchronize file contents.
+        A timed-out worker may finish preparing its temporary file, but cannot
+        replace the destination afterward. Once replacement starts, the caller
+        waits for that commit boundary before returning or raising a timeout.
 
         Args:
             file_path: Destination path.
@@ -160,6 +164,9 @@ class FileOperations:
             FileDurabilityError: The destination was replaced, but directory
                 synchronization failed; its durability is not confirmed.
         """
+        commit_lock = threading.Lock()
+        cancelled = False
+
         def _do_write() -> None:
             # Same directory as the target so rename stays atomic on the volume.
             dir_name = os.path.dirname(file_path) or '.'
@@ -180,30 +187,36 @@ class FileOperations:
                     if sync:
                         os.fsync(tmp_file.fileno())
 
-                os.replace(temp_path, file_path)
-                if sync:
-                    try:
-                        self._sync_parent_directory(dir_name)
-                    except OSError as exc:
-                        raise FileDurabilityError(
-                            f"Replaced {file_path}, but parent directory synchronization failed; "
-                            "durability is not confirmed"
-                        ) from exc
+                with commit_lock:
+                    if cancelled:
+                        return
+                    os.replace(temp_path, file_path)
+                    if sync:
+                        try:
+                            self._sync_parent_directory(dir_name)
+                        except OSError as exc:
+                            raise FileDurabilityError(
+                                f"Replaced {file_path}, but parent directory synchronization failed; "
+                                "durability is not confirmed"
+                            ) from exc
                 if on_written is not None:
                     try:
                         on_written(written_size)
                     except Exception as exc:  # noqa: BLE001 - diagnostics must not retry a committed write
                         self._log_warning(f"Size diagnostics failed for {file_path}: {exc}")
 
-            except Exception:
+            finally:
                 if os.path.exists(temp_path):
                     try:
                         os.unlink(temp_path)
                     except OSError:
                         pass
-                raise
 
-        run_with_timeout(_do_write, self.timeout, f"write({file_path})")
+        try:
+            run_with_timeout(_do_write, self.timeout, f"write({file_path})")
+        finally:
+            with commit_lock:
+                cancelled = True
 
     def write_json_atomic(self, file_path: str, data: dict, encoding: str = 'utf-8', *,
                           sync: bool = True, on_written: Optional[Callable[[int], None]] = None) -> None:

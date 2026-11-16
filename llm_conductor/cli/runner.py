@@ -34,6 +34,8 @@ from llm_conductor.constants import (
     EXIT_INTERRUPTED,
     EXIT_SUCCESS,
     EXIT_TARGET_LOCKED,
+    HEARTBEAT_ACTIVITY_PROCESSING,
+    HEARTBEAT_ACTIVITY_WAITING_API,
     HEARTBEAT_STATUS_COMPLETED,
     HEARTBEAT_STATUS_INTERRUPTED,
     MODE_STRICT,
@@ -51,6 +53,7 @@ from llm_conductor.constants import (
     USAGE_REPORT_FILENAME,
 )
 from llm_conductor.core.api_client import translate_key, verify_key
+from llm_conductor.core.cache import format_sampling_omission
 from llm_conductor.core.io import safe_read_file, safe_write_file
 from llm_conductor.core.leaf_report import legacy_sidecar_v1_reason
 from llm_conductor.core.locking import FileLock
@@ -425,6 +428,7 @@ class TargetRunner:
         self._preview_prompts = preview_prompts
         self._preview_only = preview_only
         self._preview = preview
+        self._sampling_omission_logged: set[Tuple[str, str]] = set()
 
     def _write_preview(self) -> bool:
         """Write the preview JSONL when one was requested."""
@@ -474,6 +478,7 @@ class TargetRunner:
         heartbeat = HeartbeatWriter(
             cache_dir=self._config.cache_dir,
             interval=self._config.heartbeat_interval,
+            interval_sec=self._config.heartbeat_interval_sec,
             file_ops=self._config.file_ops,
             logger=self._config.logger,
             target=self._target,
@@ -481,28 +486,40 @@ class TargetRunner:
             stages=union_ops,
             glossary=first_glossary,
         )
+        terminal_status = HEARTBEAT_STATUS_COMPLETED
         try:
-            with ExitStack() as locks:
-                self._acquire_locks(locks)
-                self._execute(status, heartbeat)
-        except RunInterrupted:
-            self._write_preview()
-            heartbeat.set_problems(status.records)
-            heartbeat.finalize(HEARTBEAT_STATUS_INTERRUPTED, EXIT_INTERRUPTED)
-            raise
-        except LockUnavailableError as e:
-            self._config.logger.error(f"{e}; exiting - a later run will pick the work up.")
-            status.record(EXIT_TARGET_LOCKED, str(e))
-        except ConfigValidationError as e:
-            self._config.logger.error(f"Runtime configuration is invalid: {e}")
-            status.record(EXIT_CONFIG_ERROR, str(e))
+            try:
+                with ExitStack() as locks:
+                    self._acquire_locks(locks)
+                    self._execute(status, heartbeat)
+            except LockUnavailableError as e:
+                self._config.logger.error(f"{e}; exiting - a later run will pick the work up.")
+                status.record(EXIT_TARGET_LOCKED, str(e))
+            except ConfigValidationError as e:
+                self._config.logger.error(f"Runtime configuration is invalid: {e}")
+                status.record(EXIT_CONFIG_ERROR, str(e))
 
-        if not self._write_preview():
-            status.record(EXIT_INTERNAL_ERROR, "failed to write the preview JSONL")
+            if not self._write_preview():
+                status.record(EXIT_INTERNAL_ERROR, "failed to write the preview JSONL")
+        except RunInterrupted:
+            terminal_status = HEARTBEAT_STATUS_INTERRUPTED
+            status.record(EXIT_INTERRUPTED, "run interrupted")
+            try:
+                self._write_preview()
+            except Exception as exc:  # noqa: BLE001 - preserve the interruption
+                self._config.logger.warning(f"Could not save interrupted preview: {exc}")
+            raise
+        except Exception:
+            status.record(EXIT_INTERNAL_ERROR, "unexpected run failure")
+            raise
+        finally:
+            if heartbeat.started and not heartbeat.finalized:
+                heartbeat.set_problems(status.records)
+                heartbeat.finalize(
+                    terminal_status,
+                    EXIT_INTERRUPTED if terminal_status == HEARTBEAT_STATUS_INTERRUPTED else status.code,
+                )
         code = status.code
-        if heartbeat.started and not heartbeat.finalized:
-            heartbeat.set_problems(status.records)
-            heartbeat.finalize(HEARTBEAT_STATUS_COMPLETED, code)
         log = self._config.logger.info if code == EXIT_SUCCESS else self._config.logger.error
         log(f"Run finished with exit code {code}")
         return code
@@ -609,7 +626,15 @@ class TargetRunner:
             self._layout.claim_owner(self._target.path, config.file_ops, config.logger)
         heartbeat.start()
 
-        if not self._endpoints_available():
+        checking = config.preflight.check_availability
+        if checking:
+            heartbeat.set_activity(HEARTBEAT_ACTIVITY_WAITING_API)
+        try:
+            available = self._endpoints_available()
+        finally:
+            if checking:
+                heartbeat.set_activity(HEARTBEAT_ACTIVITY_PROCESSING)
+        if not available:
             status.record(EXIT_API_UNAVAILABLE, "an API endpoint is not available")
             return
 
@@ -644,6 +669,13 @@ class TargetRunner:
             verification['mode'] = MODE_VERIFICATION
             configs[OPERATION_VERIFICATION] = validate_runtime_config(
                 verification, self._config, OPERATION_VERIFICATION)
+        profile = self._profile_path_for(entry)
+        for operation_type, runtime in configs.items():
+            notice = format_sampling_omission(runtime)
+            logged = (profile, operation_type)
+            if notice is not None and logged not in self._sampling_omission_logged:
+                self._sampling_omission_logged.add(logged)
+                self._config.logger.info(f"{operation_type}: {notice}")
         return configs
 
     def _endpoints_available(self) -> bool:
@@ -660,9 +692,10 @@ class TargetRunner:
             config.logger.info("API availability check disabled ([preflight].check_availability = false)")
             return True
 
-        checked: List[Tuple[str, str]] = []
+        checked: set[Tuple[str, str, str, str, bool]] = set()
         for entry in self._target.entries:
             options = self._options_for(entry)
+            runtime_configs = self._runtime_configs_for(entry, options)
             ends = self._endpoints[self._profile_path_for(entry)]
             pairs = []
             if options.translates:
@@ -670,17 +703,23 @@ class TargetRunner:
             if options.verifies:
                 pairs.append((OPERATION_VERIFICATION, ends.verification))
             for operation_type, api in pairs:
-                if (api.url, api.model) in checked:
+                omitted = runtime_configs[operation_type]['omit_parameters']
+                probe_identity = (
+                    api.url, api.model, api.api_type, api.max_tokens_param,
+                    'num_predict' in omitted,
+                )
+                if probe_identity in checked:
                     continue
                 config.logger.info(f"Checking {operation_type} API availability "
                                    f"({os.path.basename(self._profile_path_for(entry))})...")
                 if not check_api_availability(api.url, api.model, api.api_type, config,
                                               api_key=api.api_key, timeout=config.preflight.timeout,
-                                              max_tokens_param=api.max_tokens_param):
+                                              max_tokens_param=api.max_tokens_param,
+                                              omit_parameters=omitted):
                     config.logger.error(f"{operation_type.capitalize()} API is not available. "
                                         f"Check the profile and the API server.")
                     return False
-                checked.append((api.url, api.model))
+                checked.add(probe_identity)
         return True
 
     def _process_files(self, status: ExitStatus,

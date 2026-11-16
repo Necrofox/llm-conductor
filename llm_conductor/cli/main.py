@@ -214,7 +214,10 @@ def _build_parser() -> argparse.ArgumentParser:
              f'(JSON targets only; forbidden with a {MANIFEST_EXTENSION} manifest)',
     )
 
-    subcommands.add_parser('init', help='Create conductor.toml and llm.toml templates and exit')
+    subcommands.add_parser(
+        'init',
+        help='Create any missing conductor.toml, llm.toml and context.toml templates and exit',
+    )
 
     check = subcommands.add_parser('check', help='Validate conductor.toml and the model profile and exit')
     check.add_argument('--llm-config', metavar='PATH', help=llm_config_help)

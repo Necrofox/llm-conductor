@@ -4,7 +4,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Sequence, Tuple
 
 import requests
 
@@ -28,6 +28,7 @@ from llm_conductor.constants import (
     USAGE_OUTCOME_FAILED,
     USAGE_OUTCOME_SUCCESS,
 )
+from llm_conductor.core.cache import omitted_sampling_names
 from llm_conductor.exceptions import APIRequestError
 
 if TYPE_CHECKING:
@@ -102,7 +103,8 @@ class APIClient(ABC):
 
     @abstractmethod
     def build_test_payload(self, model: str, *,
-                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM) -> dict:
+                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+                           omit_parameters: Sequence[str] = ()) -> dict:
         """
         Build a minimal payload for a preflight availability check.
 
@@ -110,6 +112,7 @@ class APIClient(ABC):
             model: Model name.
             max_tokens_param: OpenAI-compatible reply-length field name;
                 ignored by Ollama.
+            omit_parameters: Logical sampling names excluded by this stage.
 
         Returns:
             A minimal request payload.
@@ -237,7 +240,8 @@ class OllamaAPIClient(APIClient):
         return None
 
     def build_test_payload(self, model: str, *,
-                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM) -> dict:
+                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+                           omit_parameters: Sequence[str] = ()) -> dict:
         """Build a minimal test request for the Ollama /api/chat endpoint."""
         return {
             "model": model,
@@ -248,9 +252,7 @@ class OllamaAPIClient(APIClient):
                 }
             ],
             "stream": False,
-            "options": {
-                "num_predict": 1
-            }
+            "options": {} if 'num_predict' in omit_parameters else {"num_predict": 1},
         }
 
 class OpenAIAPIClient(APIClient):
@@ -374,14 +376,17 @@ class OpenAIAPIClient(APIClient):
         return None
 
     def build_test_payload(self, model: str, *,
-                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM) -> dict:
+                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+                           omit_parameters: Sequence[str] = ()) -> dict:
         """Build a minimal test request for an OpenAI-compatible API."""
         return {
             "model": model,
             "messages": [
                 {"role": "user", "content": "test"}
             ],
-            max_tokens_param: DEFAULT_OPENAI_PREFLIGHT_MAX_TOKENS,
+            **({} if 'num_predict' in omit_parameters else {
+                max_tokens_param: DEFAULT_OPENAI_PREFLIGHT_MAX_TOKENS,
+            }),
             "stream": False
         }
 
@@ -658,6 +663,9 @@ def build_model_payload(value: str, runtime_config: dict, glossary_string: str =
         'max_tokens_param': runtime_config.get(
             'max_tokens_param', DEFAULT_MAX_TOKENS_PARAM),
     }
+    for name in omitted_sampling_names(runtime_config):
+        if name in sampling_params:
+            sampling_params[name] = None
 
     return api_client.build_request_payload(model_name, user_prompt, system_prompt, sampling_params)
 
@@ -710,12 +718,6 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
     user_prompt = json_data['messages'][-1]['content']
     system_prompt = runtime_config.get('system_prompt', '')
     model_name = runtime_config.get('model', '')
-    sampling_params = {
-        'temperature': runtime_config.get('temp'),
-        **{key: runtime_config.get(key) for key in (
-            'top_p', 'top_k', 'num_predict', 'num_ctx', 'repeat_penalty',
-            'frequency_penalty', 'presence_penalty', 'stop')},
-    }
 
     headers = {"Content-Type": "application/json"}
 
@@ -747,11 +749,22 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
             f"User Prompt:\n{prompt_preview}"
         )
 
+        omitted = omitted_sampling_names(runtime_config)
+        configured = {
+            'temperature': runtime_config.get('temp'),
+            'top_p': runtime_config.get('top_p'),
+            'top_k': runtime_config.get('top_k'),
+            'num_predict': runtime_config.get('num_predict'),
+        }
+
+        def _shown(name: str) -> str:
+            value = configured[name]
+            if name in omitted:
+                return f"{name}=omitted (configured {value!r})"
+            return f"{name}={value}"
+
         config.logger.debug(
-            f"Sampling params: temp={sampling_params['temperature']}, "
-            f"top_p={sampling_params['top_p']}, "
-            f"top_k={sampling_params['top_k']}, "
-            f"num_predict={sampling_params['num_predict']}"
+            "Sampling params: " + ", ".join(_shown(name) for name in configured)
         )
 
     provider = str(api_type)

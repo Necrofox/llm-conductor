@@ -7,12 +7,14 @@ contract and exit codes (doc/cli.md) without real inference.
 import json
 import os
 import signal
+import threading
+import time
 from pathlib import Path
 
 import pytest
 import responses
 
-from llm_conductor.cli.runner import FilePipeline
+from llm_conductor.cli.runner import FilePipeline, TargetRunner
 from llm_conductor.constants import (
     CACHE_LOCK_FILENAME,
     EXIT_API_UNAVAILABLE,
@@ -1543,3 +1545,162 @@ text = "Speaker: masculine"
     assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
     assert len(model.calls_with("Referent: third-person feminine")) == 1
     assert len(model.calls_with("Speaker: masculine")) == 1
+
+
+def _progress(workspace) -> Path:
+    return workspace.root / "cache" / PROGRESS_STATE_FILENAME
+
+
+def test_heartbeat_updates_while_the_api_call_is_outstanding(workspace, model, run_main):
+    workspace.write_configs(
+        preflight__check_availability=False,
+        heartbeat__interval_sec=1,
+        heartbeat__interval=0,
+    )
+    workspace.write_json("one.json", {"title": "Hello"})
+    path = _progress(workspace)
+    observed = []
+
+    def during(_count):
+        first = json.loads(path.read_text(encoding="utf-8"))
+        time.sleep(2.4)
+        second = json.loads(path.read_text(encoding="utf-8"))
+        observed.append((first, second))
+
+    model.on_model_call = during
+    assert run_main("run", "--target", "one.json", "--stage", "translate") == EXIT_SUCCESS
+
+    first, second = observed[0]
+    assert second["activity"] == "waiting_api"
+    assert second["status"] == "running"
+    assert first["progress"]["leaves_done"] == second["progress"]["leaves_done"]
+    assert first["last_progress_at"] == second["last_progress_at"]
+    assert first["updated_at"] != second["updated_at"]
+    assert second["elapsed_sec"] >= first["elapsed_sec"]
+    final_text = path.read_text(encoding="utf-8")
+    final = json.loads(final_text)
+    assert final["status"] == "completed"
+    assert final["exit_code"] == EXIT_SUCCESS
+    time.sleep(1.5)
+    assert path.read_text(encoding="utf-8") == final_text
+
+
+def test_heartbeat_updates_during_retry_backoff(workspace, model, run_main):
+    workspace.write_configs(
+        preflight__check_availability=False,
+        heartbeat__interval_sec=1,
+        heartbeat__interval=0,
+        translation__api__max_retries=3,
+        translation__api__retry_backoff_factor=3,
+    )
+    workspace.write_json("one.json", {"title": "Hello"})
+    path = _progress(workspace)
+
+    def release(count):
+        # The current call is already counted. Two 500s, then a normal reply.
+        if count >= 3:
+            model.fail_model_calls = False
+
+    model.fail_model_calls = True
+    model.on_model_call = release
+    samples = []
+    stop = threading.Event()
+
+    def poll():
+        while not stop.wait(0.25):
+            if path.exists():
+                samples.append(json.loads(path.read_text(encoding="utf-8")))
+
+    watcher = threading.Thread(target=poll, daemon=True)
+    watcher.start()
+    try:
+        assert run_main("run", "--target", "one.json", "--stage", "translate") == EXIT_SUCCESS
+    finally:
+        stop.set()
+        watcher.join(timeout=2)
+
+    waiting = [
+        snap for snap in samples
+        if snap["status"] == "running" and snap["activity"] == "waiting_api"
+    ]
+    assert len({snap["updated_at"] for snap in waiting}) >= 2
+    assert {snap["progress"]["leaves_done"] for snap in waiting} == {0}
+    assert {snap["last_progress_at"] for snap in waiting} == {None}
+    final_text = path.read_text(encoding="utf-8")
+    assert json.loads(final_text)["status"] == "completed"
+    time.sleep(1.5)
+    assert path.read_text(encoding="utf-8") == final_text
+
+
+@pytest.mark.parametrize('failure_point', ['_report', '_write_preview'])
+def test_unexpected_failure_finalizes_and_stops_heartbeat(
+        workspace, model, run_main, monkeypatch, failure_point):
+    workspace.write_configs(heartbeat__interval_sec=1, preflight__check_availability=False)
+
+    def fail(*args):
+        time.sleep(1.2)
+        raise RuntimeError('controlled unexpected failure')
+
+    monkeypatch.setattr(TargetRunner, failure_point, fail)
+    assert run_main(*RUN, '--stage', 'translate') == EXIT_INTERNAL_ERROR
+    path = _progress(workspace)
+    final = path.read_bytes()
+    snapshot = json.loads(final)
+    assert snapshot['status'] == 'completed'
+    assert snapshot['exit_code'] == EXIT_INTERNAL_ERROR
+    assert {'code': EXIT_INTERNAL_ERROR, 'reason': 'unexpected run failure'} in snapshot['problems']
+    time.sleep(1.2)
+    assert path.read_bytes() == final
+
+
+def test_interruption_with_preview_exception_stops_heartbeat(workspace, model, run_main, monkeypatch):
+    workspace.write_configs(heartbeat__interval_sec=1, preflight__check_availability=False)
+
+    def interrupt(count):
+        time.sleep(1.2)
+        shutdown.signal_handler(signal.SIGINT, None)
+
+    def fail_preview(*args):
+        raise RuntimeError('controlled preview failure')
+
+    model.on_model_call = interrupt
+    monkeypatch.setattr(TargetRunner, '_write_preview', fail_preview)
+    assert run_main(*RUN, '--stage', 'translate') == EXIT_INTERRUPTED
+    path = _progress(workspace)
+    final = path.read_bytes()
+    snapshot = json.loads(final)
+    assert snapshot['status'] == 'interrupted'
+    assert snapshot['exit_code'] == EXIT_INTERRUPTED
+    time.sleep(1.2)
+    assert path.read_bytes() == final
+
+
+@pytest.mark.parametrize('omitted_stage', ['translation', 'verification'])
+def test_preflight_preserves_independent_omissions_for_the_same_endpoint(
+        workspace, model, run_main, omitted_stage):
+    workspace.write_configs(**{f'{omitted_stage}__sampling__omit_parameters': ['num_predict']})
+    assert run_main(*RUN) == EXIT_SUCCESS
+    probes = [body for body in model.requests if body['messages'][-1]['content'] == 'test']
+    assert len(probes) == 2
+    for body, stage in zip(probes, ('translation', 'verification')):
+        assert ('num_predict' not in body['options']) == (stage == omitted_stage)
+
+
+def test_heartbeat_keeps_the_terminal_snapshot_after_a_failed_run(workspace, model, run_main):
+    workspace.write_configs(
+        preflight__check_availability=False,
+        heartbeat__interval_sec=1,
+    )
+    workspace.write_json("one.json", {"title": "Hello"})
+    model.fail_model_calls = True
+
+    code = run_main("run", "--target", "one.json", "--stage", "translate")
+
+    assert code == EXIT_FAILURE_RATIO_EXCEEDED
+    path = _progress(workspace)
+    text = path.read_text(encoding="utf-8")
+    snap = json.loads(text)
+    assert snap["status"] == "completed"
+    assert snap["exit_code"] == code
+    time.sleep(1.5)
+    assert path.read_text(encoding="utf-8") == text

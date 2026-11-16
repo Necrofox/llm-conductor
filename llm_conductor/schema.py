@@ -35,6 +35,7 @@ from llm_conductor.constants import (
     DEFAULT_FILE_OPERATION_TIMEOUT,
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
     DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_HEARTBEAT_INTERVAL_SEC,
     DEFAULT_LARGE_FILE_THRESHOLD_MB,
     DEFAULT_LOG_DIR,
     DEFAULT_LOG_EXTENDED_DIAGNOSTIC,
@@ -104,6 +105,7 @@ from llm_conductor.constants import (
     MAX_TOP_P,
     MIN_TEMPERATURE,
     MIN_TOP_P,
+    SAMPLING_OMITTABLE_PARAMETERS,
     VALID_ALLOWED_SCRIPTS,
     VALID_API_TYPES,
     VALID_LATIN_POLICIES,
@@ -592,6 +594,10 @@ def _shared_sampling_settings(frequency_penalty: float, presence_penalty: float)
         Setting("stop", ValueKind.STRING_LIST, DEFAULT_STOP_SEQUENCES,
                 f"Stop sequences; at most {MAX_OPENAI_STOP_SEQUENCES} for 'openai'. "
                 f"Ollama replaces the model's own stop tokens with this list."),
+        Setting("omit_parameters", ValueKind.STRING_LIST, (),
+                "Sampling names left out of the request, the preview and the cache identity. "
+                "Allowed: " + ", ".join(SAMPLING_OMITTABLE_PARAMETERS) + ". "
+                "Empty sends every configured value; an omission wins over that value and the default."),
     )
 
 
@@ -611,7 +617,7 @@ LLM_SCHEMA = FileSchema(
             Setting("name", ValueKind.STRING, DEFAULT_PROFILE_NAME, "Short profile name."),
             Setting("description", ValueKind.STRING, DEFAULT_PROFILE_DESCRIPTION, "Free-form description."),
         )),
-        Section(("preflight",), "Endpoint check before the run (sends a 1-token request).", (
+        Section(("preflight",), "Endpoint check before the run (minimal probe; honors sampling exclusions).", (
             Setting("check_availability", ValueKind.BOOLEAN, DEFAULT_PREFLIGHT_CHECK_AVAILABILITY,
                     "Check the endpoints before processing; false skips the check."),
             Setting("timeout", ValueKind.INTEGER, DEFAULT_PREFLIGHT_TIMEOUT, "Check timeout, seconds (> 0)."),
@@ -717,6 +723,11 @@ CONDUCTOR_SCHEMA = FileSchema(
             Setting("interval", ValueKind.INTEGER, DEFAULT_HEARTBEAT_INTERVAL,
                     "Rewrite progress_state.json every N string leaves "
                     "(>= 0; 0 = only on file/stage/run boundaries)."),
+            Setting("interval_sec", ValueKind.INTEGER, DEFAULT_HEARTBEAT_INTERVAL_SEC,
+                    "Also rewrite progress_state.json at least this often, in seconds, "
+                    "while a run is in progress, including while a request is waiting "
+                    "(>= 0; 0 = no time-based updates). Refreshes the snapshot time "
+                    "and elapsed time only; completed-leaf counts stay unchanged."),
         )),
         Section(("limits",), "Safety limits.", (
             Setting("max_recursion_depth", ValueKind.INTEGER, DEFAULT_MAX_RECURSION_DEPTH,

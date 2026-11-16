@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Set, Tuple
 
 from llm_conductor.constants import (
     CACHE_FINGERPRINT_LENGTH,
@@ -24,23 +24,65 @@ from llm_conductor.exceptions import FileDurabilityError
 from llm_conductor.interfaces import CacheConfigProtocol
 
 
+def omitted_sampling_names(runtime_config: Mapping[str, Any]) -> FrozenSet[str]:
+    """
+    Logical sampling names the effective request must not send.
+
+    Args:
+        runtime_config: Flattened mode config. A missing ``omit_parameters``
+            key means nothing is excluded.
+
+    Returns:
+        The configured names. Unknown names are rejected earlier, at load.
+    """
+    raw = runtime_config.get('omit_parameters') or ()
+    return frozenset(name for name in raw if isinstance(name, str))
+
+
+def format_sampling_omission(runtime_config: Mapping[str, Any]) -> Optional[str]:
+    """
+    One diagnostic line naming each excluded parameter and its configured value.
+
+    Args:
+        runtime_config: Flattened mode config.
+
+    Returns:
+        The line, or None when the omission list is empty.
+    """
+    omitted = omitted_sampling_names(runtime_config)
+    if not omitted:
+        return None
+    parts = [
+        f"{name} (configured {runtime_config.get(runtime_key)!r})"
+        for name, runtime_key in CACHE_SAMPLING_IDENTITY_FIELDS
+        if name in omitted
+    ]
+    return "Not sending sampling parameters: " + ", ".join(parts)
+
+
 def build_sampling_identity(runtime_config: Mapping[str, Any]) -> str:
     """
-    Canonical JSON of generation-affecting sampling parameters.
+    Canonical JSON of generation-affecting sampling parameters that are sent.
 
     Used as one component of the cache key and as the ``sampling`` fingerprint.
     Field list: ``CACHE_SAMPLING_IDENTITY_FIELDS`` in constants (see also
-    ``doc/pipeline.md``). ``stop`` order is preserved; outer keys are sorted.
+    ``doc/pipeline.md``). Names in ``omit_parameters`` are left out, so a
+    change to a value that is not sent does not change the identity. ``stop``
+    order is preserved; outer keys are sorted. An empty omission list keeps
+    the previous nine-field document.
 
     Args:
         runtime_config: Flattened mode config from ConfigBuilder (``temp``,
-            ``top_p``, …, ``stop``).
+            ``top_p``, …, ``stop``, ``omit_parameters``).
 
     Returns:
         Stable JSON string suitable for hashing.
     """
+    omitted = omitted_sampling_names(runtime_config)
     payload: Dict[str, Any] = {}
     for name, runtime_key in CACHE_SAMPLING_IDENTITY_FIELDS:
+        if name in omitted:
+            continue
         value = runtime_config[runtime_key]
         if name == 'stop':
             value = list(value) if value is not None else []

@@ -154,15 +154,36 @@ def test_init_writes_both_templates_that_load_into_a_valid_config(tmp_path, caps
     assert f"Created {conductor}" in capsys.readouterr().out
 
 
-def test_init_never_overwrites_an_existing_profile(tmp_path):
+def test_init_leaves_existing_files_byte_for_byte(tmp_path, capsys):
     conductor, llm = tmp_path / "conductor.toml", tmp_path / "llm.toml"
-    llm.write_text("# hand-tuned profile\n", encoding="utf-8")
+    context = tmp_path / "context.toml"
+    original = b"# hand-tuned profile\n"
+    llm.write_bytes(original)
 
-    with pytest.raises(ConfigValidationError, match="Refusing to overwrite"):
-        create_config_files(str(conductor), str(llm))
+    create_config_files(str(conductor), str(llm))
 
-    assert llm.read_text(encoding="utf-8") == "# hand-tuned profile\n"
-    assert not conductor.exists()
+    assert llm.read_bytes() == original
+    assert conductor.is_file() and context.is_file()
+    out = capsys.readouterr().out
+    assert f"Skipped {llm} (already exists)" in out
+    assert f"Created {conductor}" in out
+    assert f"Created {context}" in out
+    assert "For OpenAI-compatible" not in out
+
+
+def test_init_succeeds_when_every_file_already_exists(tmp_path, capsys):
+    conductor, llm = tmp_path / "conductor.toml", tmp_path / "llm.toml"
+    context = tmp_path / "context.toml"
+    create_config_files(str(conductor), str(llm))
+    before = {path: path.read_bytes() for path in (conductor, llm, context)}
+    capsys.readouterr()
+
+    create_config_files(str(conductor), str(llm))
+
+    assert {path: path.read_bytes() for path in before} == before
+    out = capsys.readouterr().out
+    assert "Created " not in out
+    assert all(f"Skipped {path} (already exists)" in out for path in before)
 
 
 # ============================================================================
@@ -362,6 +383,7 @@ def test_misspelled_key_is_rejected_with_a_suggestion(tmp_path):
     ({"resilience__max_consecutive_failures": -1}, "max_consecutive_failures"),
     ({"resilience__max_failure_ratio": 1.5}, "max_failure_ratio"),
     ({"heartbeat__interval": -1}, "heartbeat.interval"),
+    ({"heartbeat__interval_sec": -1}, "heartbeat.interval_sec"),
     ({"validation__max_length_ratio": -1.0}, "max_length_ratio"),
     ({"validation__max_length_slack": -1}, "max_length_slack"),
     ({"validation__latin_text_policy": "ignore"}, "latin_text_policy"),

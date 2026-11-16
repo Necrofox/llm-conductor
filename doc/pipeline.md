@@ -48,12 +48,19 @@ in `llm_conductor/constants.py`) includes the operation type, API URL, model nam
 system prompt, assembled user prompt (hints/glossary/original, and
 `{RESOURCE_KEY}` when that marker is used), mode, leaf value,
 the active profile's allowed writing systems, both content-rule expressions,
-and generation-affecting sampling
+and generation-affecting sampling that is actually sent
 (`temperature`, `top_p`, `top_k`,
 `repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
-`num_ctx`, `stop`). Changing any of these components
+`num_ctx`, `stop`). A name listed in `omit_parameters` is absent from this
+identity even when the file still stores a value, so editing that stored
+value does not miss the cache. Adding, removing, or changing a value that
+is sent does. Fields one transport does not send (`top_k`,
+`repeat_penalty`, `num_ctx` on OpenAI-compatible APIs) stay in the identity
+until they are listed in `omit_parameters`. Changing any included component
 misses the cache. Transport-only fields (`keep_alive`, `max_tokens_param`) are
 not part of identity. A key-schema bump drops stale disk entries on load.
+`CACHE_KEY_VERSION` is unchanged by omissions, so a profile without
+`omit_parameters` keeps hitting existing entries.
 Requests that substitute `{RESOURCE_KEY}` also include a versioned namespace
 and the substituted value, including an empty string. This isolates them from
 legacy entries hashed with the marker removed. Requests without the marker
@@ -77,6 +84,12 @@ also synchronized afterward. Windows and other platforms synchronize file
 contents without this additional Linux directory step. These guarantees
 depend on the underlying filesystem and storage.
 
+A timed-out IO worker cannot later replace the destination with its old
+temporary file. If replacement has already started, the call waits for
+that commit boundary before returning or raising the timeout. Consequently
+the configured IO timeout is not a hard deadline for an in-progress atomic
+replacement or its directory synchronization.
+
 If Linux directory synchronization fails after replacement, the new file
 already exists but its persistence after a system crash is unconfirmed.
 The error reports that distinction; the write is not retried as an ordinary
@@ -85,6 +98,13 @@ ordering still records the replacement so an older snapshot cannot overwrite it.
 
 Heartbeat `progress_state.json` keeps atomic replacement but skips storage
 synchronization: losing its latest update after a system crash is acceptable.
+`updated_at` and `elapsed_sec` advance on the time pulse and on leaf, file,
+and stage boundaries. `last_progress_at` and `progress.leaves_done` advance
+only when a leaf finishes. `activity` is `waiting_api` during the model call,
+including retry backoff and preflight, and `processing` otherwise. A snapshot
+whose `updated_at` moved while `last_progress_at` and `leaves_done` did not
+is a live process, not new completed work. `schema_version` remains 1. The
+file stops changing after the terminal status (`completed` or `interrupted`).
 Cache and translation/verification outputs retain durable writes. Large-file
 warnings and debug sizes use the flushed temporary file's actual byte count
 after a successful write, without a second JSON serialization.

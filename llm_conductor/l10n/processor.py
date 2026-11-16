@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from llm_conductor.constants import (
     FAILURE_KIND_REJECTED,
     GLOSSARY_MARKER,
+    HEARTBEAT_ACTIVITY_PROCESSING,
+    HEARTBEAT_ACTIVITY_WAITING_API,
     LEAF_SKIP_REASON_TRANSLATION_MISSING,
     LINGUISTIC_CONTEXT_BLOCK_TEMPLATE,
     LINGUISTIC_CONTEXT_MARKER,
@@ -675,13 +677,19 @@ class RecursiveProcessor:
 
 
         try:
-            outcome = process_func(
-                masked_text,
-                self.config,
-                enhanced_config,
-                "",  # the glossary is already part of the prompt
-                mode=mode
-            )
+            if self._heartbeat is not None:
+                self._heartbeat.set_activity(HEARTBEAT_ACTIVITY_WAITING_API)
+            try:
+                outcome = process_func(
+                    masked_text,
+                    self.config,
+                    enhanced_config,
+                    "",  # the glossary is already part of the prompt
+                    mode=mode
+                )
+            finally:
+                if self._heartbeat is not None:
+                    self._heartbeat.set_activity(HEARTBEAT_ACTIVITY_PROCESSING)
 
             if not outcome.success:
                 if self.config.is_debug_mode:

@@ -8,9 +8,11 @@ order.
 """
 import builtins
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import llm_conductor.utils as utils_module
 from llm_conductor.exceptions import ConductorError
 from llm_conductor.exceptions import TimeoutError as ConductorTimeoutError
 from llm_conductor.utils import (
@@ -207,6 +209,18 @@ def test_thread_pool_strategy_raises_conductor_timeout():
             ThreadPoolTimeoutStrategy().run(lambda: release.wait(5), 0.05, "slow_op")
     finally:
         release.set()
+
+
+def test_posix_timeout_dispatch_in_worker_does_not_install_signal_handlers(monkeypatch):
+    monkeypatch.setattr(utils_module, '_TIMEOUT_STRATEGY', utils_module.SignalTimeoutStrategy())
+
+    def unexpected_signal_strategy(*args):
+        raise AssertionError('Worker must not use the signal timeout strategy')
+
+    monkeypatch.setattr(utils_module.SignalTimeoutStrategy, 'run', unexpected_signal_strategy)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(run_with_timeout, lambda: 42, 5).result(timeout=5)
+    assert result == 42
 
 
 def test_conductor_timeout_error_is_also_builtin_timeout_and_oserror():

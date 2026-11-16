@@ -3,12 +3,18 @@
 ## Commands
 
 ```text
-llm-conductor init                          # write conductor.toml, llm.toml, context.toml (no overwrite)
+llm-conductor init                          # create any missing conductor.toml, llm.toml, context.toml
 llm-conductor check                         # strict validate the TOML files that exist
 llm-conductor run --target PATH [options]   # pipeline
 llm-conductor run --target PATH --dry-run   # preflight plan (no API / result writes)
 llm-conductor --version
 ```
+
+`init` writes a template only when that path is absent. It prints
+`Created <path>` or `Skipped <path> (already exists)` and exits 0 when every
+file is already present. Existing files are not opened for writing and are
+not repaired. The OpenAI key hint is printed only when `llm.toml` is created
+in that run. A write error exits 3. `check` validates the files that exist.
 
 From a checkout without install: `python llm-conductor.py …` (same configs
 layout as the frozen exe). After `pip install`: `llm-conductor …`.
@@ -231,7 +237,7 @@ uses this priority order.
 | `0` | Success; failure ratios within threshold |
 | `1` | Unexpected exception |
 | `2` | Usage / target / manifest / glossary / result ownership |
-| `3` | Config invalid or `init` refused overwrite |
+| `3` | Config invalid, or `init` could not write a template |
 | `4` | Preflight API unavailable |
 | `5` | Request or file failure ratio above `[resilience].max_failure_ratio`, or any degraded leaf when `[resilience].fail_on_any_error` is true |
 | `6` | Consecutive-failure circuit breaker tripped |
@@ -254,6 +260,15 @@ OS-level non-blocking locks on the target, cache dir (when cache enabled),
 and shared result root. Heartbeat JSON: `{cache_dir}/progress_state.json`
 (written even with `--no-cache`) for external monitors — report only, not
 the process exit authority.
+
+Read `last_progress_at`, `progress.leaves_done`, and `activity` for work
+done. `updated_at` and `elapsed_sec` also move on
+`[heartbeat].interval_sec` while a request or retry is waiting
+(`activity` is `waiting_api`) and do not mean another leaf finished.
+`last_progress_at` stays `null` until the first completed leaf.
+`schema_version` is still 1. `status` ends as `completed` (including a
+failed run, with `exit_code`) or `interrupted`, and the file is not
+rewritten after that.
 
 
 ## Prompt preview accuracy

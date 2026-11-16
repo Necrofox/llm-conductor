@@ -1188,6 +1188,17 @@ def test_preview_limit_caps_output_only(make_config, capsys):
     assert capsys.readouterr().out.count("--- translation:") == 1
 
 
+def test_preview_write_reports_a_blocked_parent_without_raising(make_config, tmp_path):
+    config = make_config()
+    blocked = tmp_path / 'blocked'
+    blocked.write_bytes(b'existing input')
+    selection = PreviewSelection(output_path=str(blocked / 'preview.jsonl'))
+
+    assert selection.write(config.file_ops, config.logger) is False
+    assert config.logger.contains('Cannot write preview JSONL', level='ERROR')
+    assert blocked.read_bytes() == b'existing input'
+
+
 def test_preview_export_distinguishes_structural_paths(make_config, tmp_path):
     config = make_config(cache__enabled=False, dedup__enabled=False)
     config.leaf_outcomes.set_active_file("dialogs/ui.json")

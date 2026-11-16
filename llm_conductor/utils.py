@@ -3,6 +3,7 @@ import itertools
 import re
 import signal as signal_module
 import string
+import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -140,7 +141,7 @@ class ThreadPoolTimeoutStrategy(TimeoutStrategy):
             executor.shutdown(wait=False)
 
 
-# Pick the strategy once at import time from platform capabilities.
+# Pick the main-thread strategy once from platform capabilities.
 # Strategy objects are stateless across run() calls, so they are
 # thread-safe by construction without locks.
 _TIMEOUT_STRATEGY: TimeoutStrategy = (
@@ -153,8 +154,8 @@ def run_with_timeout(func: Callable[[], T], timeout_seconds: int,
     """
     Run ``func()`` with a cross-platform time limit.
 
-    Single entry point over TimeoutStrategy: SIGALRM in-process on POSIX,
-    ThreadPoolExecutor on Windows. Callers need not know which is active.
+    Uses SIGALRM on the POSIX main thread and ThreadPoolExecutor on Windows
+    or in worker threads, where Python cannot install signal handlers.
 
     Args:
         func: Zero-argument callable.
@@ -167,7 +168,11 @@ def run_with_timeout(func: Callable[[], T], timeout_seconds: int,
     Raises:
         TimeoutError: On overrun (llm_conductor.exceptions.TimeoutError).
     """
-    return _TIMEOUT_STRATEGY.run(func, timeout_seconds, operation_name)
+    strategy = _TIMEOUT_STRATEGY
+    if (isinstance(strategy, SignalTimeoutStrategy)
+            and threading.current_thread() is not threading.main_thread()):
+        strategy = ThreadPoolTimeoutStrategy()
+    return strategy.run(func, timeout_seconds, operation_name)
 
 # ============================================================================
 # MASQUERADE UTILITIES

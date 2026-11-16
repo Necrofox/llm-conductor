@@ -45,6 +45,25 @@ COPIED_FILES = (
 
 # (id, file, old, new, description[, equivalent])
 MUTANTS = [
+    ("worker_signal_timeout", "llm_conductor/utils.py",
+     "and threading.current_thread() is not threading.main_thread()):",
+     "and False):", "worker IO uses POSIX signal timeouts"),
+    ("atomic_timeout_not_cancelled", "llm_conductor/core/io.py",
+     "                    if cancelled:\n                        return",
+     "                    if False:\n                        return",
+     "timed-out preparation can overwrite a newer file"),
+    ("atomic_commit_unlocked", "llm_conductor/core/io.py",
+     "                with commit_lock:\n", "                if True:\n",
+     "timeout returns while an old replacement can still commit"),
+    ("run_heartbeat_not_finalized", "llm_conductor/cli/runner.py",
+     "            if heartbeat.started and not heartbeat.finalized:",
+     "            if False:", "unexpected failures leave heartbeat running"),
+    ("preflight_omission_ignored", "llm_conductor/cli/validators.py",
+     "            omit_parameters=omit_parameters)", "            omit_parameters=())",
+     "preflight sends an excluded reply-length field"),
+    ("preflight_omission_identity", "llm_conductor/cli/runner.py",
+     "                    'num_predict' in omitted,", "                    False,",
+     "preflight conflates stage-specific omissions on a shared endpoint"),
     # (id, file, old, new, description)
     ("unmask_order", "llm_conductor/utils.py", "key=len, reverse=True", "key=len, reverse=False", "unmask: [T1]/[T10] replacement order", True),
     ("mask_counter", "llm_conductor/utils.py", 'marker = f"[{prefix}{counter}]"', 'marker = f"[{prefix}0]"', "mask: marker counter does not increment"),
@@ -132,7 +151,7 @@ MUTANTS = [
     ("glossary_size_unchecked", "llm_conductor/config.py", "if self.glossary_patterns_cache_max_size <= 0:", "if False:", "glossary_patterns_max_size = 0 passes validation"),
     ("limits_timeout_ignored", "llm_conductor/config.py", "            timeout=config_data.limits.file_operation_timeout,\n", "", "[limits].file_operation_timeout has no effect"),
     ("llm_next_to_app_dir", "llm_conductor/cli/locations.py", "else os.path.join(os.path.dirname(conductor_path), LLM_CONFIG_FILENAME))", "else os.path.join(app_dir, LLM_CONFIG_FILENAME))", "default llm.toml ignores LLMC_CONFIG"),
-    ("init_overwrites", "llm_conductor/cli/init.py", "    if existing:\n        raise", "    if False:\n        raise", "init overwrites an existing profile"),
+    ("init_overwrites", "llm_conductor/cli/init.py", "        if os.path.exists(path):\n", "        if False:\n", "init overwrites an existing profile"),
     # The run command: stages, cache switches, manifests, locks, exit codes.
     ("preflight_always", "llm_conductor/cli/runner.py", "        if not config.preflight.check_availability:", "        if False:", "[preflight].check_availability is ignored"),
     ("stage_verify_uses_source", "llm_conductor/cli/runner.py", "                data = self._read_json(translated_path, \"translated data\")", "                data = source", "--stage verify proofreads the English source"),

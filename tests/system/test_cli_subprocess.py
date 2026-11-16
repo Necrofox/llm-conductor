@@ -43,13 +43,36 @@ def test_init_writes_both_templates(tmp_path):
     assert "# " in (tmp_path / "conductor.toml").read_text(encoding="utf-8")
 
 
-def test_init_refuses_to_overwrite(tmp_path):
-    _run(tmp_path, "init")
+def test_init_skips_files_that_already_exist(tmp_path):
+    first = _run(tmp_path, "init")
+    assert first.returncode == 0, first.stderr
+    names = ("conductor.toml", "llm.toml", "context.toml")
+    before = {name: (tmp_path / name).read_bytes() for name in names}
 
     result = _run(tmp_path, "init")
 
-    assert result.returncode == EXIT_CONFIG_ERROR
-    assert "Refusing to overwrite" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "Refusing to overwrite" not in result.stderr
+    for name, payload in before.items():
+        assert (tmp_path / name).read_bytes() == payload
+        assert f"Skipped {tmp_path / name} (already exists)" in result.stdout
+
+
+def test_init_creates_a_missing_context_file_only(tmp_path):
+    assert _run(tmp_path, "init").returncode == 0
+    context = tmp_path / "context.toml"
+    context.unlink()
+    conductor = (tmp_path / "conductor.toml").read_bytes()
+    llm = (tmp_path / "llm.toml").read_bytes()
+
+    result = _run(tmp_path, "init")
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "conductor.toml").read_bytes() == conductor
+    assert (tmp_path / "llm.toml").read_bytes() == llm
+    assert context.is_file()
+    assert f"Created {context}" in result.stdout
+    assert f"Skipped {tmp_path / 'conductor.toml'}" in result.stdout
 
 
 def test_check_rejects_an_unknown_context_key(tmp_path):

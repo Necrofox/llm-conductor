@@ -157,6 +157,28 @@ def test_each_sampling_field_changes_the_key(manager, field_name, runtime_key):
     ) != manager.create_cache_key(**KEY_PARTS)
 
 
+def test_omitted_sampling_parameter_leaves_the_identity_and_ignores_its_stored_value(manager):
+    """A sent field joins the key; a value that is already omitted does not."""
+    sent = build_sampling_identity(SAMPLE_RUNTIME)
+    omitted = dict(SAMPLE_RUNTIME, omit_parameters=["top_p"])
+    omitted_identity = build_sampling_identity(omitted)
+    changed_while_omitted = build_sampling_identity(dict(omitted, top_p=0.1))
+    sent_again = build_sampling_identity(dict(SAMPLE_RUNTIME, omit_parameters=[]))
+
+    assert "top_p" not in json.loads(omitted_identity)
+    assert omitted_identity != sent
+    assert changed_while_omitted == omitted_identity
+    assert sent_again == sent == SAMPLE_IDENTITY
+    assert manager.create_cache_key(
+        **{**KEY_PARTS, "sampling_identity": omitted_identity}
+    ) != manager.create_cache_key(**KEY_PARTS)
+    assert manager.create_cache_key(
+        **{**KEY_PARTS, "sampling_identity": changed_while_omitted}
+    ) == manager.create_cache_key(
+        **{**KEY_PARTS, "sampling_identity": omitted_identity}
+    )
+
+
 def test_restoring_sampling_parameters_restores_the_key(manager):
     """Issue #12 acceptance: same sampling again → same key (cache hit path)."""
     again = build_sampling_identity(dict(SAMPLE_RUNTIME))

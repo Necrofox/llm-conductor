@@ -17,7 +17,7 @@ name = "Local Ollama (qwen2.5:14b)"
 # Free-form description. Default: "Translation and verification on a local Ollama server"
 description = "Translation and verification on a local Ollama server"
 
-# Endpoint check before the run (sends a 1-token request).
+# Endpoint check before the run (minimal probe; honors sampling exclusions).
 [preflight]
 # Check the endpoints before processing; false skips the check. Default: true
 check_availability = true
@@ -76,6 +76,8 @@ frequency_penalty = 0.0
 presence_penalty = 0.0
 # Stop sequences; at most 4 for 'openai'. Ollama replaces the model's own stop tokens with this list. Default: ["\n\n", "<|im_end|>", "<|im_start|>"]
 stop = ["\n\n", "<|im_end|>", "<|im_start|>"]
+# Sampling names left out of the request, the preview and the cache identity. Empty sends every configured value. Default: []
+omit_parameters = []
 
 # Sampling of --strict (precise UI text).
 [translation.sampling.strict]
@@ -169,6 +171,8 @@ frequency_penalty = 0.0
 presence_penalty = 0.0
 # Stop sequences; at most 4 for 'openai'. Ollama replaces the model's own stop tokens with this list. Default: ["\n\n", "<|im_end|>", "<|im_start|>"]
 stop = ["\n\n", "<|im_end|>", "<|im_start|>"]
+# Sampling names left out of the request, the preview and the cache identity. Empty sends every configured value. Default: []
+omit_parameters = []
 
 # Target writing systems for the reply sanity check (both stages). Other [validation] keys live in conductor.toml.
 [validation]

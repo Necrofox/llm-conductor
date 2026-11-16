@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `[translation.sampling].omit_parameters` and
+  `[verification.sampling].omit_parameters` leave named sampling fields out
+  of the preview, the HTTP body, and the cache identity. Unknown names fail
+  at load. A profile without the key sends every configured value;
+  `CACHE_KEY_VERSION` is unchanged.
+- `[heartbeat].interval_sec` rewrites `progress_state.json` on a timer
+  (default 30 seconds, `0` disables it). The snapshot adds
+  `last_progress_at` and `activity` (`processing` or `waiting_api`). A newer
+  `updated_at` means the process is alive; leaf progress is the other two
+  fields. `schema_version` stays 1.
 - `context.toml` key-context catalog, written by `init` from `schema.py` and
   resolved like a glossary with a fallback beside the program. Rules use
   `match` `last` or `path`, one text per `slot`, optional templates, and
@@ -29,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `init` creates only files that are missing and prints `Created` or
+  `Skipped`. When every file already exists it exits 0 and leaves the bytes
+  unchanged. It does not repair existing files; `check` still validates them.
 - Cache and in-run dedup hash the same user prompt that is sent. A
   substituted `{RESOURCE_KEY}` therefore creates a distinct entry; records
   hashed with that marker removed are not applied to new requests that send
@@ -45,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Periodic heartbeat writes use a thread-safe timeout strategy on POSIX.
+  Timed-out IO workers cannot publish old snapshots after a newer write;
+  a replacement already in progress finishes before its caller returns.
+- Unexpected run failures finalize and stop the heartbeat with exit code 1.
+  Preview failures during interruption preserve the interrupted status.
+- Availability probes honor each stage's `omit_parameters`, including
+  the mapped reply-length field, and distinguish different probe settings
+  on a shared endpoint and model.
 - Preview JSONL export refuses paths that alias run inputs or loaded
   configuration files, or enter the run's result, cache, or log directories,
   before inference, including during dry-run. Parent-directory creation

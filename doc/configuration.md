@@ -70,8 +70,11 @@ An invalid program file on `check` exits 3.
 
 To retain the former suffix hints, copy
 [`examples/context.example.toml`](../examples/context.example.toml) to
-`context.toml` beside `conductor.toml`. `init` refuses to overwrite existing
-configuration files; no catalog is silently created or merged during a run.
+`context.toml` beside `conductor.toml`. Running `init` again creates only
+files that are not already on disk and prints `Created` or `Skipped` for
+each path. Existing files stay byte for byte; `init` does not repair or
+merge their contents. `check` still validates whatever is there. No catalog
+is silently created or merged during a run.
 
 ## Secrets
 
@@ -113,6 +116,62 @@ passed job CLI flags → exit 2. Session flags `--verb` / `--no-cache` /
 fields win over run-level defaults (`target ?? run ?? default`).
 Each entry's effective `llm_config` supplies its allowed writing systems for
 both translation and verification.
+
+## Sampling parameters
+
+`[translation.sampling].omit_parameters` and
+`[verification.sampling].omit_parameters` are independent lists of logical
+sampling names. Allowed names: `temperature`, `top_p`, `num_predict`,
+`stop`, `top_k`, `repeat_penalty`, `num_ctx`, `frequency_penalty`,
+`presence_penalty`. An unknown name, including `model`, `keep_alive`, or
+`max_tokens_param`, fails `check` and load before any request.
+
+A listed name is range-checked with the rest of the profile, then left out
+of the preview, the HTTP body, and the cache identity. The configured value
+stays in the file. `num_predict` also drops the OpenAI reply-length field
+(`max_tokens` or `max_completion_tokens`). An empty list, and a profile
+that does not have the key, sends every configured value and keeps the
+previous cache identity. The cache key version stays the same.
+
+The preflight availability probe respects the same stage's exclusions:
+omitting `num_predict` also removes the probe's reply-length field. Stages
+with different effective probe settings are checked independently, even
+when they use the same endpoint and model.
+
+An endpoint that accepts `temperature` and rejects `top_p` needs no
+adapter:
+
+```toml
+[translation.sampling]
+omit_parameters = ["top_p"]
+```
+
+`temperature` in `[translation.sampling.strict]` or
+`[translation.sampling.style]` is still sent. Verification uses its own
+list under `[verification.sampling]` and does not inherit the translation
+list. One info line per stage names each omitted parameter and the value
+that will not be sent.
+
+## Heartbeat
+
+`[heartbeat].interval` is how many completed string leaves pass between
+rewrites of `{cache_dir}/progress_state.json` (`0` rewrites only on file,
+stage, and run boundaries). `[heartbeat].interval_sec` is a separate timer
+in seconds (default `30`, `0` disables it). The timer refreshes
+`updated_at` and `elapsed_sec` while a request is outstanding, including
+retry backoff and the preflight probe. It does not move `leaves_done` or
+`last_progress_at`.
+
+`last_progress_at` is the UTC time of the last completed leaf, or `null`
+before the first one. `activity` is `processing` or `waiting_api`.
+`schema_version` stays `1`. A `conductor.toml` without `interval_sec`
+loads the default of 30 seconds.
+
+A newer `updated_at` means the process wrote a snapshot. Progress is
+`last_progress_at`, `progress.leaves_done`, and `activity`. After the run
+finishes or is interrupted the file stops changing. A failed run still
+ends as `completed` with a non-zero `exit_code`. A write error is a
+warning; the run continues.
 
 ## Related
 
