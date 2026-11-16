@@ -30,6 +30,9 @@ from llm_conductor.core.api_client import (
     translate_key,
     verify_key,
 )
+from llm_conductor.l10n.context import KeyPath, LinguisticContext
+from llm_conductor.l10n.preview import PreviewSelection
+from llm_conductor.l10n.processor import RecursiveProcessor
 from tests.support import OLLAMA_URL, OPENAI_URL, ollama_reply, openai_reply
 
 
@@ -50,6 +53,99 @@ def _sent_json(http, index=0):
 def _openai_config(make_config, **overrides):
     return make_config(translation__api__type="openai", translation__api__url=OPENAI_URL,
                        translation__api__key="sk-test", **overrides)
+
+
+@pytest.mark.parametrize('mode', [MODE_STRICT, MODE_STYLE, MODE_VERIFICATION])
+@pytest.mark.parametrize('field, before, after, before_omit, after_omit, calls', [
+    ('max_tokens_param', 'max_tokens', 'max_completion_tokens', (), (), 2),
+    ('top_k', 40, 60, (), (), 1),
+    ('repeat_penalty', 1.0, 1.2, (), (), 1),
+    ('num_ctx', 2048, 4096, (), (), 1),
+    ('max_tokens_param', 'max_tokens', 'max_completion_tokens', ('num_predict',), ('num_predict',), 1),
+    ('top_k', 40, 40, (), ('top_k',), 1),
+    ('stop', [], [], (), ('stop',), 1),
+    ('temperature', 0.3, 0.7, (), (), 2),
+])
+def test_openai_warm_cache_tracks_only_effective_sampling(
+        make_config, http, mode, field, before, after, before_omit, after_omit, calls):
+    stage = OPERATION_VERIFICATION if mode == MODE_VERIFICATION else OPERATION_TRANSLATION
+    operation = verify_key if mode == MODE_VERIFICATION else translate_key
+    if field == 'max_tokens_param':
+        setting = f'{stage}__api__{field}'
+    elif field == 'stop' or mode == MODE_VERIFICATION:
+        setting = f'{stage}__sampling__{field}'
+    else:
+        setting = f'{stage}__sampling__{mode}__{field}'
+
+    def configured(value, omitted):
+        return make_config(**{
+            f'{stage}__api__type': 'openai', f'{stage}__api__url': OPENAI_URL,
+            f'{stage}__api__key': 'test-key',
+            f'{stage}__sampling__omit_parameters': list(omitted),
+            setting: value, 'validation__enabled': False,
+        })
+
+    def process(config):
+        preview = PreviewSelection(output_path='preview.jsonl')
+        processor = RecursiveProcessor(config, LinguisticContext(config, ()), preview=preview)
+        runtime = (config.get_verification_config() if mode == MODE_VERIFICATION
+                   else config.get_translation_config_for_mode(mode))
+        result = processor.traverse(
+            data={'title': 'Hello'}, current_path=KeyPath(()), process_func=operation,
+            glossary={}, runtime_config=runtime, mode=mode,
+            original_data={'title': 'Hello'} if mode == MODE_VERIFICATION else None,
+            is_verification=mode == MODE_VERIFICATION,
+        )
+        assert result == {'title': 'Привет'}
+        return json.loads(preview.jsonl_text())['payload']
+
+    http.post(OPENAI_URL, json=openai_reply('Привет'))
+    first = configured(before, before_omit)
+    first_payload = process(first)
+    assert len(http.calls) == 1
+    assert _sent_json(http) == first_payload
+    assert first.cache_manager.save(stage)
+
+    changed = configured(after, after_omit)
+    assert changed.cache_manager.load(stage)
+    changed_payload = process(changed)
+    assert len(http.calls) == calls
+    assert (first_payload == changed_payload) is (calls == 1)
+    assert _sent_json(http, -1) == changed_payload
+    assert changed.cache_manager.save(stage)
+
+    restored = configured(before, before_omit)
+    assert restored.cache_manager.load(stage)
+    assert process(restored) == first_payload
+    assert len(http.calls) == calls
+
+
+@pytest.mark.parametrize('mode', [MODE_STRICT, MODE_STYLE])
+@pytest.mark.parametrize('field, changed_value, omitted, calls', [
+    ('max_tokens_param', 'max_completion_tokens', False, 2),
+    ('top_k', 60, False, 1),
+    ('max_tokens_param', 'max_completion_tokens', True, 1),
+])
+def test_openai_in_run_dedup_uses_the_same_effective_sampling(
+        make_config, http, mode, field, changed_value, omitted, calls):
+    config = _openai_config(
+        make_config, cache__enabled=False, validation__enabled=False,
+        translation__sampling__omit_parameters=['num_predict'] if omitted else [],
+    )
+    processor = RecursiveProcessor(config, LinguisticContext(config, ()))
+    runtime = config.get_translation_config_for_mode(mode)
+    http.post(OPENAI_URL, json=openai_reply('Привет'))
+
+    def process(key, effective):
+        return processor.traverse(
+            data={key: 'Hello'}, current_path=KeyPath(()), process_func=translate_key,
+            glossary={}, runtime_config=effective, mode=mode,
+        )
+
+    assert process('first', runtime) == {'first': 'Привет'}
+    assert process('second', dict(runtime, **{field: changed_value})) == {'second': 'Привет'}
+    assert len(http.calls) == calls
+    assert processor.get_stats_summary()['deduplicated_leaves'] == (1 if calls == 1 else 0)
 
 
 # ============================================================================

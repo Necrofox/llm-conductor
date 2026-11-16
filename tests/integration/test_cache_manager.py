@@ -16,6 +16,7 @@ from llm_conductor.constants import (
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
 )
+from llm_conductor.core.api_client import build_model_payload
 from llm_conductor.core.cache import build_sampling_identity
 
 T = OPERATION_TRANSLATION
@@ -186,6 +187,44 @@ def test_restoring_sampling_parameters_restores_the_key(manager):
     assert manager.create_cache_key(
         **{**KEY_PARTS, 'sampling_identity': again}
     ) == manager.create_cache_key(**KEY_PARTS)
+
+
+@pytest.mark.parametrize('tokens_key', ['max_tokens', 'max_completion_tokens'])
+def test_openai_sampling_identity_contains_the_actual_sent_fields(tokens_key):
+    runtime = dict(SAMPLE_RUNTIME, api_type='openai', max_tokens_param=tokens_key)
+    identity = json.loads(build_sampling_identity(runtime))
+    body = build_model_payload('Hello', runtime)
+    sent_sampling = {key: value for key, value in body.items() if key not in ('model', 'messages', 'stream')}
+
+    assert identity['parameters'] == sent_sampling
+    assert identity['parameters'][tokens_key] == SAMPLE_RUNTIME['num_predict']
+    assert all(name not in identity['parameters'] for name in ('top_k', 'num_ctx', 'repeat_penalty'))
+
+
+def test_openai_missing_limit_selector_is_the_explicit_default():
+    runtime = dict(SAMPLE_RUNTIME, api_type='openai')
+    assert build_sampling_identity(runtime) == build_sampling_identity(
+        dict(runtime, max_tokens_param='max_tokens'))
+
+
+def test_openai_namespace_cannot_reuse_legacy_identity_when_all_parameters_are_omitted():
+    omitted = [name for name, _ in CACHE_SAMPLING_IDENTITY_FIELDS]
+    runtime = dict(SAMPLE_RUNTIME, omit_parameters=omitted)
+    legacy = build_sampling_identity(runtime)
+    current = build_sampling_identity(dict(runtime, api_type='openai'))
+
+    assert legacy == '{}'
+    assert json.loads(current)['parameters'] == {}
+    assert current != legacy
+
+
+def test_ollama_cache_and_options_ignore_the_openai_limit_field_selector():
+    first = dict(SAMPLE_RUNTIME, api_type='ollama', max_tokens_param='max_tokens')
+    changed = dict(first, max_tokens_param='max_completion_tokens')
+
+    assert build_sampling_identity(first) == build_sampling_identity(changed) == SAMPLE_IDENTITY
+    assert build_model_payload('Hello', first) == build_model_payload('Hello', changed)
+    assert 'max_tokens_param' not in build_model_payload('Hello', first)['options']
 
 
 def test_fingerprints_cover_all_components_with_fixed_length(manager):

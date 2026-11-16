@@ -538,10 +538,12 @@ CACHE_KEY_VERSION = 5
 # Separate keyed requests from legacy prompts hashed with the marker removed,
 # including the empty-string resource key. Unkeyed hashes stay compatible.
 RESOURCE_KEY_CACHE_NAMESPACE = "resource-key-v1"
+OPENAI_SAMPLING_CACHE_NAMESPACE = "openai-sampling-v1"
 
-# Generation-affecting sampling fields in the cache key / fingerprints:
-# (canonical name in the identity JSON, runtime_config key). keep_alive and
-# max_tokens_param are intentionally excluded — they do not change the reply.
+# Logical sampling fields and their runtime_config keys. OpenAI identity uses
+# the same transport projection as HTTP: unsupported fields disappear and
+# max_tokens_param selects the actual reply-length field. keep_alive is not
+# generation-affecting. Ollama keeps the legacy logical-field identity.
 CACHE_SAMPLING_IDENTITY_FIELDS = (
     ('temperature', 'temp'),
     ('top_p', 'top_p'),

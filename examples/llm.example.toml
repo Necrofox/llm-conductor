@@ -76,7 +76,7 @@ frequency_penalty = 0.0
 presence_penalty = 0.0
 # Stop sequences; at most 4 for 'openai'. Ollama replaces the model's own stop tokens with this list. Default: ["\n\n", "<|im_end|>", "<|im_start|>"]
 stop = ["\n\n", "<|im_end|>", "<|im_start|>"]
-# Sampling names left out of the request, the preview and the cache identity. Empty sends every configured value. Default: []
+# Sampling names left out of the request, the preview and the cache identity. Empty keeps normal transport selection. Default: []
 omit_parameters = []
 
 # Sampling of --strict (precise UI text).
@@ -171,7 +171,7 @@ frequency_penalty = 0.0
 presence_penalty = 0.0
 # Stop sequences; at most 4 for 'openai'. Ollama replaces the model's own stop tokens with this list. Default: ["\n\n", "<|im_end|>", "<|im_start|>"]
 stop = ["\n\n", "<|im_end|>", "<|im_start|>"]
-# Sampling names left out of the request, the preview and the cache identity. Empty sends every configured value. Default: []
+# Sampling names left out of the request, the preview and the cache identity. Empty keeps normal transport selection. Default: []
 omit_parameters = []
 
 # Target writing systems for the reply sanity check (both stages). Other [validation] keys live in conductor.toml.

@@ -15,11 +15,14 @@ from llm_conductor.constants import (
     CACHE_SAMPLING_IDENTITY_FIELDS,
     DEFAULT_CONTENT_IDENTITY,
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
+    DEFAULT_MAX_TOKENS_PARAM,
+    OPENAI_SAMPLING_CACHE_NAMESPACE,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
     RESOURCE_KEY_CACHE_NAMESPACE,
 )
 from llm_conductor.core.io import safe_read_file
+from llm_conductor.core.sampling import build_openai_sampling_payload
 from llm_conductor.exceptions import FileDurabilityError
 from llm_conductor.interfaces import CacheConfigProtocol
 
@@ -65,15 +68,17 @@ def build_sampling_identity(runtime_config: Mapping[str, Any]) -> str:
     Canonical JSON of generation-affecting sampling parameters that are sent.
 
     Used as one component of the cache key and as the ``sampling`` fingerprint.
-    Field list: ``CACHE_SAMPLING_IDENTITY_FIELDS`` in constants (see also
-    ``doc/pipeline.md``). Names in ``omit_parameters`` are left out, so a
-    change to a value that is not sent does not change the identity. ``stop``
-    order is preserved; outer keys are sorted. An empty omission list keeps
-    the previous nine-field document.
+    Logical fields come from ``CACHE_SAMPLING_IDENTITY_FIELDS``. Explicit
+    omissions are applied first. OpenAI uses the HTTP sampling serializer,
+    including its reply-length field name and omission of unsupported or
+    empty fields, in a namespace isolated from legacy entries. Ollama keeps
+    the previous logical-field document. Stop order is preserved and JSON
+    object keys are sorted. See ``doc/pipeline.md`` for cache migration.
 
     Args:
         runtime_config: Flattened mode config from ConfigBuilder (``temp``,
-            ``top_p``, …, ``stop``, ``omit_parameters``).
+            ``top_p``, …, ``stop``, ``omit_parameters``, ``api_type``,
+            ``max_tokens_param``). Missing ``api_type`` means Ollama.
 
     Returns:
         Stable JSON string suitable for hashing.
@@ -87,6 +92,10 @@ def build_sampling_identity(runtime_config: Mapping[str, Any]) -> str:
         if name == 'stop':
             value = list(value) if value is not None else []
         payload[name] = value
+    if runtime_config.get('api_type') == 'openai':
+        payload['max_tokens_param'] = runtime_config.get('max_tokens_param', DEFAULT_MAX_TOKENS_PARAM)
+        wire = build_openai_sampling_payload(payload)
+        payload = {'transport': OPENAI_SAMPLING_CACHE_NAMESPACE, 'parameters': wire}
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 

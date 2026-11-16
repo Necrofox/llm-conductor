@@ -45,6 +45,17 @@ COPIED_FILES = (
 
 # (id, file, old, new, description[, equivalent])
 MUTANTS = [
+    ("cache_openai_limit_selector_ignored", "llm_conductor/core/cache.py",
+     "payload['max_tokens_param'] = runtime_config.get('max_tokens_param', DEFAULT_MAX_TOKENS_PARAM)",
+     "payload['max_tokens_param'] = DEFAULT_MAX_TOKENS_PARAM",
+     "OpenAI cache ignores the actual reply-limit field name"),
+    ("cache_openai_unused_top_k", "llm_conductor/core/cache.py",
+     "wire = build_openai_sampling_payload(payload)",
+     "wire = {**build_openai_sampling_payload(payload), 'top_k': payload.get('top_k')}",
+     "OpenAI cache hashes a top_k value that HTTP never sends"),
+    ("cache_openai_legacy_namespace", "llm_conductor/core/cache.py",
+     "payload = {'transport': OPENAI_SAMPLING_CACHE_NAMESPACE, 'parameters': wire}",
+     "payload = wire", "OpenAI sampling identity can collide with legacy entries"),
     ("worker_signal_timeout", "llm_conductor/utils.py",
      "and threading.current_thread() is not threading.main_thread()):",
      "and False):", "worker IO uses POSIX signal timeouts"),
@@ -119,7 +130,7 @@ MUTANTS = [
     ("usage_reject_skipped", "llm_conductor/l10n/processor.py", "                if outcome.usage_attempt_id is not None:\n                    self.config.usage_ledger.mark_attempt_rejected(\n                        outcome.usage_attempt_id, failure_kind=error_kind,\n                    )\n", "", "validation reject leaves usage outcome as success"),
     ("cache_masked_value", "llm_conductor/l10n/processor.py", "operation_type, cache_key, unmasked_result, metadata, source_value=value", "operation_type, cache_key, outcome.text, metadata, source_value=value", "cache stores the masked result (§4.4 invariant)"),
     ("autosave_gt", "llm_conductor/l10n/processor.py", "should_save = self._leaves_since_save >= interval", "should_save = self._leaves_since_save > interval", "autosave at N+1"),
-    ("openai_no_max_tokens", "llm_conductor/core/api_client.py", "openai_params[tokens_key] = sampling_params['num_predict']", "pass", "OpenAI: num_predict is not mapped"),
+    ("openai_no_max_tokens", "llm_conductor/core/sampling.py", "openai_params[tokens_key] = sampling_params['num_predict']", "pass", "OpenAI: num_predict is not mapped"),
     ("ollama_tokens_swapped", "llm_conductor/core/api_client.py", "prompt_tokens = response_json.get('prompt_eval_count', 0) if has_prompt else 0\n        completion_tokens = response_json.get('eval_count', 0) if has_completion else 0", "prompt_tokens = response_json.get('eval_count', 0) if has_prompt else 0\n        completion_tokens = response_json.get('prompt_eval_count', 0) if has_completion else 0", "Ollama: token counters swapped"),
     ("backoff_linear", "llm_conductor/core/api_client.py", "            else:\n                wait_time = backoff_factor ** attempt\n", "            else:\n                wait_time = backoff_factor * attempt\n", "linear backoff"),
     ("no_strip", "llm_conductor/core/api_client.py", "result_value = parsed.text.strip()", "result_value = parsed.text", "model reply is not stripped"),

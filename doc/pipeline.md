@@ -48,23 +48,28 @@ in `llm_conductor/constants.py`) includes the operation type, API URL, model nam
 system prompt, assembled user prompt (hints/glossary/original, and
 `{RESOURCE_KEY}` when that marker is used), mode, leaf value,
 the active profile's allowed writing systems, both content-rule expressions,
-and generation-affecting sampling that is actually sent
-(`temperature`, `top_p`, `top_k`,
-`repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
-`num_ctx`, `stop`). A name listed in `omit_parameters` is absent from this
-identity even when the file still stores a value, so editing that stored
-value does not miss the cache. Adding, removing, or changing a value that
-is sent does. Fields one transport does not send (`top_k`,
-`repeat_penalty`, `num_ctx` on OpenAI-compatible APIs) stay in the identity
-until they are listed in `omit_parameters`. Changing any included component
-misses the cache. Transport-only fields (`keep_alive`, `max_tokens_param`) are
-not part of identity. A key-schema bump drops stale disk entries on load.
-`CACHE_KEY_VERSION` is unchanged by omissions, so a profile without
-`omit_parameters` keeps hitting existing entries.
+and generation-affecting sampling that is actually sent. For OpenAI-compatible
+APIs the cache and HTTP body share one sampling serializer: unsupported
+`top_k`, `repeat_penalty`, and `num_ctx` and an empty `stop` list are absent.
+The reply limit uses its actual field name, `max_tokens` or
+`max_completion_tokens`, so switching that name misses the cache. When
+`num_predict` is omitted, neither its stored value nor the selector affects
+identity. Explicit omissions override configured values and defaults.
+Stop sequence order is preserved. `keep_alive` is not generation-affecting.
+
+OpenAI sampling identity uses the `openai-sampling-v1` namespace. Older
+OpenAI cache entries used logical fields and cannot safely distinguish the
+reply-limit selector; they are not reused and are rebuilt on demand. No
+manual cache cleanup is needed. Ollama keeps its compatible logical-field
+identity (`temperature`, `top_p`, `top_k`, `repeat_penalty`,
+`frequency_penalty`, `presence_penalty`, `num_predict`, `num_ctx`, `stop`),
+minus explicit omissions. `max_tokens_param` is an OpenAI selector and is
+neither an Ollama option nor part of its cache identity. `CACHE_KEY_VERSION`
+is unchanged, so compatible Ollama entries remain available.
 Requests that substitute `{RESOURCE_KEY}` also include a versioned namespace
 and the substituted value, including an empty string. This isolates them from
 legacy entries hashed with the marker removed. Requests without the marker
-keep the previous key format and can reuse existing entries.
+keep their key format, subject to the OpenAI sampling migration above.
 
 `--no-cache` / `[cache].enabled = false`: no disk read/write; in-memory dedup
 still runs. Cache dir may still be created for `progress_state.json`.

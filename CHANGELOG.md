@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[translation.sampling].omit_parameters` and
   `[verification.sampling].omit_parameters` leave named sampling fields out
   of the preview, the HTTP body, and the cache identity. Unknown names fail
-  at load. A profile without the key sends every configured value;
+  at load. A profile without the key retains normal transport selection;
   `CACHE_KEY_VERSION` is unchanged.
 - `[heartbeat].interval_sec` rewrites `progress_state.json` on a timer
   (default 30 seconds, `0` disables it). The snapshot adds
@@ -46,8 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   substituted `{RESOURCE_KEY}` therefore creates a distinct entry; records
   hashed with that marker removed are not applied to new requests that send
   the key, including an empty-string key. Keyed requests use a separate
-  namespace. `CACHE_KEY_VERSION` is unchanged, so requests that do not use
-  the marker still hit existing entries and no manual cache wipe is required.
+  namespace. `CACHE_KEY_VERSION` is unchanged; compatible entries are retained
+  without a manual cache wipe, subject to the OpenAI sampling migration below.
 - Suffix and prefix hints are no longer applied as built-in runtime detectors.
   A run with no `context.toml` adds no key context. The `init` catalog keeps the
   previous gender, plural, and formality wording.
@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenAI HTTP payloads and cache identity share sampling serialization.
+  Switching `max_tokens` to `max_completion_tokens` misses the cache when
+  the limit is sent; editing unsupported `top_k`, `repeat_penalty`, or
+  `num_ctx` does not. Omitted limits and empty stop lists do not create
+  false misses. A separate sampling namespace rebuilds old OpenAI entries
+  on demand while retaining compatible Ollama keys. The OpenAI field
+  selector is no longer passed as an Ollama option.
 - Periodic heartbeat writes use a thread-safe timeout strategy on POSIX.
   Timed-out IO workers cannot publish old snapshots after a newer write;
   a replacement already in progress finishes before its caller returns.

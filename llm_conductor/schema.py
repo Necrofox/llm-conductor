@@ -597,7 +597,7 @@ def _shared_sampling_settings(frequency_penalty: float, presence_penalty: float)
         Setting("omit_parameters", ValueKind.STRING_LIST, (),
                 "Sampling names left out of the request, the preview and the cache identity. "
                 "Allowed: " + ", ".join(SAMPLING_OMITTABLE_PARAMETERS) + ". "
-                "Empty sends every configured value; an omission wins over that value and the default."),
+                "Empty keeps normal transport selection; an omission wins over the value and the default."),
     )
 
 

@@ -130,8 +130,15 @@ A listed name is range-checked with the rest of the profile, then left out
 of the preview, the HTTP body, and the cache identity. The configured value
 stays in the file. `num_predict` also drops the OpenAI reply-length field
 (`max_tokens` or `max_completion_tokens`). An empty list, and a profile
-that does not have the key, sends every configured value and keeps the
-previous cache identity. The cache key version stays the same.
+that does not have the key, retains the transport's normal parameter selection.
+
+OpenAI cache identity uses the actual sent sampling fields: switching
+`max_tokens_param` misses the cache when the reply limit is sent; editing
+`top_k`, `repeat_penalty`, or `num_ctx` does not. When `num_predict` is
+omitted, changing the selector or its stored limit also keeps the cache hit.
+Older OpenAI entries are rebuilt on demand because their logical-field
+identity did not distinguish reply-limit field names. Ollama cache keys
+remain compatible; no global cache version bump or manual cleanup is needed.
 
 The preflight availability probe respects the same stage's exclusions:
 omitting `num_predict` also removes the probe's reply-length field. Stages
