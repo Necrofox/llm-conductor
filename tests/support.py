@@ -25,6 +25,7 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core.cache import GlossaryPatternCache
 from llm_conductor.core.circuit_breaker import ConsecutiveFailureTracker
+from llm_conductor.core.io import FileOperations, safe_read_file
 from llm_conductor.core.leaf_report import LeafOutcomeRecorder
 from llm_conductor.core.metrics import MetricsCollector
 from llm_conductor.core.usage import UsageLedger
@@ -185,6 +186,23 @@ def write_configs(directory: Path, llm_doc: Mapping[str, Any], conductor_doc: Ma
     conductor_path = directory / CONDUCTOR_CONFIG_FILENAME
     conductor_path.write_text(dump_toml(conductor_doc), encoding="utf-8")
     return conductor_path
+
+
+def read_heartbeat_text(path: Path) -> str:
+    """Read a heartbeat with bounded retries for transient file locks.
+
+    Args:
+        path: Progress snapshot being replaced by a running writer.
+
+    Returns:
+        UTF-8 snapshot text. JSON parsing remains the caller's responsibility.
+
+    Raises:
+        FileOperationError: If the file is missing or reading keeps failing.
+    """
+    text = safe_read_file(str(path), 'heartbeat snapshot', FileOperations(), as_text=True)
+    assert isinstance(text, str)
+    return text
 
 
 # ============================================================================

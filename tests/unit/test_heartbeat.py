@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for HeartbeatWriter and count_string_leaves (Task #16)."""
+import builtins
+import io
 import json
 import threading
 import time
@@ -26,8 +28,9 @@ from llm_conductor.constants import (
 )
 from llm_conductor.core import io as io_module
 from llm_conductor.core.io import FileOperations
+from llm_conductor.exceptions import FileOperationError
 from llm_conductor.l10n.processor import count_string_leaves
-from tests.support import RecordingLogger
+from tests.support import RecordingLogger, read_heartbeat_text
 
 
 def _target(tmp_path: Path, names: list[str]) -> RunTarget:
@@ -55,9 +58,36 @@ def _writer(tmp_path: Path, *, interval: int = 100, interval_sec: float = 0,
 
 
 def _read(writer: HeartbeatWriter) -> dict:
-    text = Path(writer.path).read_text(encoding="utf-8")
+    text = read_heartbeat_text(Path(writer.path))
     assert "\n" not in text  # compact JSON
     return json.loads(text)
+
+
+@pytest.mark.parametrize('permanent', [False, True])
+def test_heartbeat_reader_handles_sharing_violations(tmp_path, monkeypatch, no_sleep, permanent):
+    writer = _writer(tmp_path)
+    writer.start()
+    real_open = builtins.open
+    attempts = []
+    lock = threading.Lock()
+
+    def locked_open(file, *args, **kwargs):
+        if file == writer.path or file == Path(writer.path):
+            with lock:
+                attempts.append(file)
+                if permanent or len(attempts) == 1:
+                    raise PermissionError('simulated heartbeat sharing violation')
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, 'open', locked_open)
+    monkeypatch.setattr(io, 'open', locked_open)
+    if permanent:
+        with pytest.raises(FileOperationError, match='permission'):
+            _read(writer)
+        assert len(attempts) == 3
+    else:
+        assert _read(writer)['status'] == HEARTBEAT_STATUS_RUNNING
+        assert len(attempts) == 2
 
 
 def test_start_writes_running_snapshot_with_null_exit_code(tmp_path):

@@ -33,7 +33,7 @@ from llm_conductor.constants import (
 from llm_conductor.core import shutdown
 from llm_conductor.core.io import FileOperations
 from llm_conductor.core.locking import FileLock
-from tests.support import write_configs
+from tests.support import read_heartbeat_text, write_configs
 from tests.system.harness import (
     SAMPLE,
     STRICT_PROMPT,
@@ -1562,9 +1562,9 @@ def test_heartbeat_updates_while_the_api_call_is_outstanding(workspace, model, r
     observed = []
 
     def during(_count):
-        first = json.loads(path.read_text(encoding="utf-8"))
+        first = json.loads(read_heartbeat_text(path))
         time.sleep(2.4)
-        second = json.loads(path.read_text(encoding="utf-8"))
+        second = json.loads(read_heartbeat_text(path))
         observed.append((first, second))
 
     model.on_model_call = during
@@ -1609,7 +1609,7 @@ def test_heartbeat_updates_during_retry_backoff(workspace, model, run_main):
     def poll():
         while not stop.wait(0.25):
             if path.exists():
-                samples.append(json.loads(path.read_text(encoding="utf-8")))
+                samples.append(json.loads(read_heartbeat_text(path)))
 
     watcher = threading.Thread(target=poll, daemon=True)
     watcher.start()
@@ -1617,7 +1617,8 @@ def test_heartbeat_updates_during_retry_backoff(workspace, model, run_main):
         assert run_main("run", "--target", "one.json", "--stage", "translate") == EXIT_SUCCESS
     finally:
         stop.set()
-        watcher.join(timeout=2)
+        watcher.join(timeout=5)
+        assert not watcher.is_alive()
 
     waiting = [
         snap for snap in samples

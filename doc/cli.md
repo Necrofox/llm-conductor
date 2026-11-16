@@ -270,6 +270,10 @@ done. `updated_at` and `elapsed_sec` also move on
 failed run, with `exit_code`) or `interrupted`, and the file is not
 rewritten after that.
 
+On Windows, readers should retry transient sharing violations when opening
+the snapshot during atomic replacement. Use bounded retries and report a
+persistent read failure; successfully read snapshots are complete JSON.
+
 
 ## Prompt preview accuracy
 
