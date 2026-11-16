@@ -11,8 +11,39 @@ Machine-readable file identities (``run_report.json`` keys, sidecar
 ``host_relative_path``.
 """
 import os
+from typing import Iterable, Optional
 
 from llm_conductor.constants import MANIFEST_DRIVE_PATTERN
+from llm_conductor.exceptions import TargetError
+
+
+def validate_preview_output(output_path: Optional[str], *,
+                            input_paths: Iterable[str], reserved_dirs: Iterable[str]) -> None:
+    """Reject a preview destination that could overwrite run data.
+
+    Args:
+        output_path: JSONL destination, or None when export is disabled.
+        input_paths: Original, draft, manifest, and loaded configuration files.
+        reserved_dirs: Result, cache, and log directories used by this run.
+
+    Raises:
+        TargetError: If the destination aliases an input or lies in a reserved directory.
+    """
+    if output_path is None:
+        return
+    output_key = os.path.normcase(os.path.realpath(output_path))
+    for path in input_paths:
+        aliases_input = output_key == os.path.normcase(os.path.realpath(path))
+        if not aliases_input:
+            try:
+                aliases_input = os.path.samefile(output_path, path)
+            except OSError:
+                pass  # Nonexistent destinations are compared by their resolved paths.
+        if aliases_input:
+            raise TargetError(f"--preview-output must not overwrite an input or configuration file: {path}")
+    for directory in reserved_dirs:
+        if is_inside(output_key, os.path.realpath(directory)):
+            raise TargetError(f"--preview-output must stay outside the reserved directory {directory}")
 
 
 def portable_relative_path(path: str) -> str:

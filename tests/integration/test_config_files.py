@@ -30,7 +30,7 @@ from llm_conductor.constants import (
     MODE_STYLE,
 )
 from llm_conductor.exceptions import ConfigValidationError, FileOperationError
-from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA, ValueKind
+from llm_conductor.schema import CONDUCTOR_SCHEMA, CONTEXT_SCHEMA, LLM_SCHEMA, ValueKind
 from tests.support import base_llm_doc, deep_merge, split_overrides, write_configs
 
 SCHEMAS = [LLM_SCHEMA, CONDUCTOR_SCHEMA]
@@ -130,6 +130,18 @@ def test_multiline_falls_back_to_a_basic_string_when_a_literal_cannot_hold_the_t
     assert tomllib.loads(f"v = {rendered}")["v"] == text
 
 
+def test_example_context_matches_the_init_render():
+    from pathlib import Path
+
+    rendered = TomlTemplateRenderer(CONTEXT_SCHEMA).render()
+    example = Path("examples/context.example.toml").read_text(encoding="utf-8")
+
+    assert example == rendered
+    document = tomllib.loads(rendered)
+    assert document["rules"][0]["name"] == "speaker-male"
+    assert "templates" not in document
+
+
 def test_init_writes_both_templates_that_load_into_a_valid_config(tmp_path, capsys):
     conductor, llm = tmp_path / "conductor.toml", tmp_path / "llm.toml"
 
@@ -142,15 +154,36 @@ def test_init_writes_both_templates_that_load_into_a_valid_config(tmp_path, caps
     assert f"Created {conductor}" in capsys.readouterr().out
 
 
-def test_init_never_overwrites_an_existing_profile(tmp_path):
+def test_init_leaves_existing_files_byte_for_byte(tmp_path, capsys):
     conductor, llm = tmp_path / "conductor.toml", tmp_path / "llm.toml"
-    llm.write_text("# hand-tuned profile\n", encoding="utf-8")
+    context = tmp_path / "context.toml"
+    original = b"# hand-tuned profile\n"
+    llm.write_bytes(original)
 
-    with pytest.raises(ConfigValidationError, match="Refusing to overwrite"):
-        create_config_files(str(conductor), str(llm))
+    create_config_files(str(conductor), str(llm))
 
-    assert llm.read_text(encoding="utf-8") == "# hand-tuned profile\n"
-    assert not conductor.exists()
+    assert llm.read_bytes() == original
+    assert conductor.is_file() and context.is_file()
+    out = capsys.readouterr().out
+    assert f"Skipped {llm} (already exists)" in out
+    assert f"Created {conductor}" in out
+    assert f"Created {context}" in out
+    assert "For OpenAI-compatible" not in out
+
+
+def test_init_succeeds_when_every_file_already_exists(tmp_path, capsys):
+    conductor, llm = tmp_path / "conductor.toml", tmp_path / "llm.toml"
+    context = tmp_path / "context.toml"
+    create_config_files(str(conductor), str(llm))
+    before = {path: path.read_bytes() for path in (conductor, llm, context)}
+    capsys.readouterr()
+
+    create_config_files(str(conductor), str(llm))
+
+    assert {path: path.read_bytes() for path in before} == before
+    out = capsys.readouterr().out
+    assert "Created " not in out
+    assert all(f"Skipped {path} (already exists)" in out for path in before)
 
 
 # ============================================================================
@@ -350,6 +383,7 @@ def test_misspelled_key_is_rejected_with_a_suggestion(tmp_path):
     ({"resilience__max_consecutive_failures": -1}, "max_consecutive_failures"),
     ({"resilience__max_failure_ratio": 1.5}, "max_failure_ratio"),
     ({"heartbeat__interval": -1}, "heartbeat.interval"),
+    ({"heartbeat__interval_sec": -1}, "heartbeat.interval_sec"),
     ({"validation__max_length_ratio": -1.0}, "max_length_ratio"),
     ({"validation__max_length_slack": -1}, "max_length_slack"),
     ({"validation__latin_text_policy": "ignore"}, "latin_text_policy"),
@@ -441,3 +475,25 @@ def test_max_tokens_param_from_llm_toml_reaches_runtime_config(tmp_path):
     assert (config.get_translation_config_for_mode(MODE_STYLE)['max_tokens_param']
             == "max_completion_tokens")
     assert config.get_verification_config()['max_tokens_param'] == "max_tokens"
+
+
+@pytest.mark.parametrize("catalog", [
+    "[[leaves]]\npath = '[]'\nslot = 'role'\ntext = 'x'\nnope = true",
+    "[templates.role]\ntext = 'x'\nnope = true",
+    "[[rules]]\nname = 'x'\nmatch = 'path'\nslot = 'role'\ntext = 'x'\nnope = true",
+    "[[leaves]]\npath = true\nslot = 'role'\ntext = 'x'",
+    "[[leaves]]\npath = '[true]'\nslot = 'role'\ntext = 'x'",
+    "[[leaves]]\npath = '[]'\nslot = 'role'\ntemplate = 'missing'",
+    "[[rules]]\nname = 'bad'\nmatch = 'path'\npattern = '['\nslot = 'role'\ntext = 'x'",
+    "[[rules]]\nname = 'bad'\nmatch = 'unknown'\nslot = 'role'\ntext = 'x'",
+])
+def test_invalid_context_catalog_fails_before_inference(tmp_path, catalog):
+    from llm_conductor.cli.context_file import ContextResolver
+    from llm_conductor.core.io import FileOperations
+    from llm_conductor.exceptions import TargetError
+    from tests.support import RecordingLogger
+
+    path = tmp_path / "context.toml"
+    path.write_text(catalog, encoding="utf-8")
+    with pytest.raises(TargetError, match="Invalid"):
+        ContextResolver(FileOperations(), RecordingLogger()).load_path(str(path))

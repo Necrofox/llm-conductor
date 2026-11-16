@@ -34,6 +34,9 @@ from llm_conductor.constants import (
     MODE_STRICT,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    RESOURCE_KEY_MARKER,
+    SAMPLING_OMITTABLE_NAMES,
+    SAMPLING_OMITTABLE_PARAMETERS,
     TRACE_LOG_FILE_PREFIX,
     TRACE_LOG_LEVEL,
     TRACE_LOG_LEVEL_NAME,
@@ -388,6 +391,7 @@ class TranslationConfig:
     frequency_penalty: float
     presence_penalty: float
     stop: Tuple[str, ...] = ()
+    omit_parameters: Tuple[str, ...] = ()
 
     @classmethod
     def from_sections(cls, prompt: str, mode: SectionValues, shared: SectionValues) -> 'TranslationConfig':
@@ -399,7 +403,7 @@ class TranslationConfig:
             mode: Resolved per-mode sampling (temperature, top_p, top_k,
                 repeat_penalty, num_predict, num_ctx).
             shared: Resolved shared sampling (frequency_penalty,
-                presence_penalty, stop); may be the same table as mode.
+                presence_penalty, stop, omit_parameters); may be the same table as mode.
 
         Returns:
             The mode configuration (not yet validated).
@@ -415,6 +419,7 @@ class TranslationConfig:
             frequency_penalty=shared["frequency_penalty"],
             presence_penalty=shared["presence_penalty"],
             stop=shared["stop"],
+            omit_parameters=tuple(shared["omit_parameters"]),
         )
 
     def validate(self) -> None:
@@ -443,6 +448,14 @@ class TranslationConfig:
         if self.num_ctx <= 0:
             raise ConfigValidationError(
                 f"num_ctx must be positive, got {self.num_ctx}"
+            )
+
+        unknown = [name for name in self.omit_parameters if name not in SAMPLING_OMITTABLE_NAMES]
+        if unknown:
+            allowed = ", ".join(SAMPLING_OMITTABLE_PARAMETERS)
+            raise ConfigValidationError(
+                f"omit_parameters has unknown sampling names: {', '.join(unknown)}. "
+                f"Allowed: {allowed}"
             )
 
 
@@ -489,15 +502,20 @@ class HeartbeatConfig:
     """Progress-state rewrite cadence ([heartbeat] of conductor.toml)."""
 
     interval: int
+    interval_sec: int
 
     def validate(self) -> None:
         """
         Raises:
-            ConfigValidationError: If interval is negative.
+            ConfigValidationError: If either interval is negative.
         """
         if self.interval < 0:
             raise ConfigValidationError(
                 f"heartbeat.interval must be non-negative, got {self.interval}"
+            )
+        if self.interval_sec < 0:
+            raise ConfigValidationError(
+                f"heartbeat.interval_sec must be non-negative, got {self.interval_sec}"
             )
 
 
@@ -701,6 +719,11 @@ class ConfigData:
         """
         for endpoint in (self.translation_api, self.verification_api):
             endpoint.validate()
+            if RESOURCE_KEY_MARKER in endpoint.system_prompt:
+                raise ConfigValidationError(
+                    f"{RESOURCE_KEY_MARKER} belongs in the user prompt; "
+                    f"the system prompt is shared by every leaf"
+                )
 
         for mode in (self.translation_strict, self.translation_style, self.verification):
             mode.validate()
@@ -849,6 +872,7 @@ class RuntimeConfigFactory:
             'frequency_penalty': sampling.frequency_penalty,
             'presence_penalty': sampling.presence_penalty,
             'stop': list(sampling.stop),
+            'omit_parameters': list(sampling.omit_parameters),
         }
 
     def get_translation_config_for_mode(self, mode: str) -> dict:
@@ -1218,6 +1242,11 @@ class Config:
     def heartbeat_interval(self) -> int:
         """Delegates to ConfigData.heartbeat."""
         return self.data.heartbeat.interval
+
+    @property
+    def heartbeat_interval_sec(self) -> int:
+        """Time-based rewrite cadence, in seconds. Zero disables it."""
+        return self.data.heartbeat.interval_sec
 
     @property
     def resilience(self) -> ResilienceConfig:

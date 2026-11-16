@@ -60,11 +60,15 @@ DEFAULT_DEDUP_ENABLED = True
 
 # [heartbeat]
 DEFAULT_HEARTBEAT_INTERVAL = 100
+DEFAULT_HEARTBEAT_INTERVAL_SEC = 30
+HEARTBEAT_THREAD_JOIN_TIMEOUT_SEC = 5
 PROGRESS_STATE_FILENAME = 'progress_state.json'
 HEARTBEAT_SCHEMA_VERSION = 1
 HEARTBEAT_STATUS_RUNNING = 'running'
 HEARTBEAT_STATUS_COMPLETED = 'completed'
 HEARTBEAT_STATUS_INTERRUPTED = 'interrupted'
+HEARTBEAT_ACTIVITY_PROCESSING = 'processing'
+HEARTBEAT_ACTIVITY_WAITING_API = 'waiting_api'
 
 # [limits]
 DEFAULT_MAX_RECURSION_DEPTH = 30
@@ -216,6 +220,23 @@ MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 MIN_TOP_P = 0.0
 MAX_TOP_P = 1.0
+
+# Logical sampling names a profile may list in omit_parameters. These are the
+# config names, not the provider JSON keys: num_predict drops whichever
+# reply-length field the transport selected. Request identity fields (model,
+# messages, credentials, URL, keep_alive, max_tokens_param) are not here.
+SAMPLING_OMITTABLE_PARAMETERS = (
+    "temperature",
+    "top_p",
+    "num_predict",
+    "stop",
+    "top_k",
+    "repeat_penalty",
+    "num_ctx",
+    "frequency_penalty",
+    "presence_penalty",
+)
+SAMPLING_OMITTABLE_NAMES = frozenset(SAMPLING_OMITTABLE_PARAMETERS)
 
 # Unknown keys in a TOML file are reported with the closest known name when
 # difflib similarity reaches this ratio.
@@ -371,10 +392,10 @@ MANIFEST_DRIVE_PATTERN = re.compile(r'^[A-Za-z]:')
 # Allowed top-level keys of a run manifest (unknown → exit 2).
 RUN_MANIFEST_RUN_KEYS = frozenset({
     'verb', 'result2target', 'cache2target', 'stage', 'strict',
-    'llm_config', 'glossary', 'targets',
+    'llm_config', 'glossary', 'context', 'targets',
 })
 RUN_MANIFEST_TARGET_KEYS = frozenset({
-    'original', 'draft', 'stage', 'strict', 'llm_config', 'glossary',
+    'original', 'draft', 'stage', 'strict', 'llm_config', 'glossary', 'context',
 })
 
 # Results go to <root>/result/{translated,redacted,final}/<relative path>.
@@ -416,6 +437,43 @@ TARGET_CACHE_DIR_NAME = 'cache'
 GLOSSARY_FILENAME = 'glossary.json'
 GLOSSARY_ORIGIN_OPTION = '--glossary'
 GLOSSARY_ORIGIN_TARGET = 'next to the target'
+# Key-context catalog. init writes it beside the profile; a file next to the
+# target or a manifest field replaces that catalog entirely.
+CONTEXT_FILENAME = 'context.toml'
+CONTEXT_ORIGIN_OPTION = '--context'
+CONTEXT_ORIGIN_TARGET = 'next to the target'
+CONTEXT_ORIGIN_PROGRAM = 'next to the program'
+CONTEXT_MATCH_LAST = 'last'
+CONTEXT_MATCH_PATH = 'path'
+CONTEXT_MATCHES = (CONTEXT_MATCH_LAST, CONTEXT_MATCH_PATH)
+# One rule of the init catalog: name, match, pattern, slot, priority, text.
+# Speaker rules precede the generic suffix of the same slot.
+DEFAULT_CONTEXT_RULES = (
+    ("speaker-male", CONTEXT_MATCH_LAST, r"(?i)^speaker_(?:.*_)?male$", "gender", 10,
+     "Speaker is MALE - use masculine verb endings and pronouns if the target language marks gender there"),
+    ("speaker-female", CONTEXT_MATCH_LAST, r"(?i)^speaker_(?:.*_)?female$", "gender", 10,
+     "Speaker is FEMALE - use feminine verb endings and pronouns if the target language marks gender there"),
+    ("suffix-masculine", CONTEXT_MATCH_LAST, r"(?i)(?:_male|_m|_masculine)$", "gender", 10,
+     "Use MASCULINE grammatical forms if the target language has grammatical gender (male speaker/subject)"),
+    ("suffix-feminine", CONTEXT_MATCH_LAST, r"(?i)(?:_female|_f|_feminine)$", "gender", 10,
+     "Use FEMININE grammatical forms if the target language has grammatical gender (female speaker/subject)"),
+    ("suffix-neuter", CONTEXT_MATCH_LAST, r"(?i)(?:_neutral|_n|_neuter)$", "gender", 10,
+     "Use NEUTER grammatical forms if the target language has grammatical gender"),
+    ("suffix-plural", CONTEXT_MATCH_LAST, r"(?i)(?:_plural|_many|_multiple)$", "plural", 5,
+     "Translate in PLURAL form (many items) if the target language distinguishes number"),
+    ("suffix-singular", CONTEXT_MATCH_LAST, r"(?i)(?:_single|_one|_singular)$", "plural", 5,
+     "Translate in SINGULAR form (one item) if the target language distinguishes number"),
+    ("suffix-few", CONTEXT_MATCH_LAST, r"(?i)_few$", "plural", 5,
+     "Translate for FEW items (a small count, e.g. 2-4) if the target language has a dedicated form for it"),
+    ("suffix-zero", CONTEXT_MATCH_LAST, r"(?i)(?:_zero|_none|_empty)$", "plural", 5,
+     "Translate for ZERO items (no items) if the target language has a distinct form for it"),
+    ("prefix-count", CONTEXT_MATCH_LAST, r"(?i)^count_", "plural", 3,
+     "Translate as a COUNTABLE noun"),
+    ("suffix-formal", CONTEXT_MATCH_LAST, r"(?i)(?:_formal|_polite|_respectful)$", "formality", 7,
+     "Use FORMAL address forms if the target language distinguishes formal/informal address (formal tone)"),
+    ("suffix-informal", CONTEXT_MATCH_LAST, r"(?i)(?:_informal|_casual|_friendly)$", "formality", 7,
+     "Use INFORMAL address forms if the target language distinguishes formal/informal address (casual tone)"),
+)
 
 # Log file name: conductor_<target name>_<start time>.log
 LOG_FILE_PREFIX = 'conductor'
@@ -440,6 +498,21 @@ GLOSSARY_MARKER = "{GLOSSARY}"
 # Verification-only marker: the masked English source, inserted for
 # alignment reference. Empty for translation - never present.
 ORIGINAL_TEXT_MARKER = "{ORIGINAL_TEXT}"
+# Optional per-leaf path inserted into the user prompt sent to the API.
+# When the marker is present, the substituted path is part of the request
+# hashed for the cache and in-run dedup. When it is absent, the path stays
+# diagnostic and does not split otherwise identical requests.
+RESOURCE_KEY_MARKER = "{RESOURCE_KEY}"
+# How a winning context hint was chosen. Preview reports these; they do not
+# change slot resolution order.
+HINT_ORIGIN_EXACT = "exact"
+HINT_ORIGIN_RULE = "rule"
+HINT_ORIGIN_INHERITED = "inherited"
+# Offline verification preview while stage all still has no translation.
+PREVIEW_VERIFICATION_PRELIMINARY_NOTE = (
+    "Future translation is not yet known; this editor request is preliminary "
+    "and uses the original text as a placeholder."
+)
 TRANSLATION_TEXT_MARKER = "Text to translate:\n"
 VERIFICATION_TEXT_MARKER = "Text to proofread:\n"
 
@@ -462,10 +535,15 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # v2: generation-affecting sampling parameters join the key identity.
 # v5: invalidate replies accepted before marker-origin fragment validation.
 CACHE_KEY_VERSION = 5
+# Separate keyed requests from legacy prompts hashed with the marker removed,
+# including the empty-string resource key. Unkeyed hashes stay compatible.
+RESOURCE_KEY_CACHE_NAMESPACE = "resource-key-v1"
+OPENAI_SAMPLING_CACHE_NAMESPACE = "openai-sampling-v1"
 
-# Generation-affecting sampling fields in the cache key / fingerprints:
-# (canonical name in the identity JSON, runtime_config key). keep_alive and
-# max_tokens_param are intentionally excluded — they do not change the reply.
+# Logical sampling fields and their runtime_config keys. OpenAI identity uses
+# the same transport projection as HTTP: unsupported fields disappear and
+# max_tokens_param selects the actual reply-length field. keep_alive is not
+# generation-affecting. Ollama keeps the legacy logical-field identity.
 CACHE_SAMPLING_IDENTITY_FIELDS = (
     ('temperature', 'temp'),
     ('top_p', 'top_p'),

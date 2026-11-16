@@ -255,6 +255,26 @@ def test_translation_config_validate_rejects(overrides, message):
         TranslationConfig(**params).validate()
 
 
+def test_unknown_omit_parameters_are_rejected_before_any_request():
+    with pytest.raises(ConfigValidationError, match="omit_parameters"):
+        _data(translation__sampling__omit_parameters=["keep_alive", "model"])
+
+
+def test_omitted_parameter_is_still_range_checked():
+    with pytest.raises(ConfigValidationError, match="temp"):
+        _data(
+            translation__sampling__style__temperature=2.5,
+            translation__sampling__omit_parameters=["temperature"],
+        )
+
+
+def test_verification_omit_list_is_independent_of_translation():
+    data = _data(verification__sampling__omit_parameters=["top_p"])
+
+    assert data.verification.omit_parameters == ("top_p",)
+    assert data.translation_style.omit_parameters == ()
+
+
 # ============================================================================
 # RuntimeConfigFactory
 # ============================================================================
@@ -263,7 +283,7 @@ _RUNTIME_KEYS = {
     'api_url', 'api_type', 'api_key', 'api_timeout', 'max_retries', 'retry_backoff_factor',
     'model', 'system_prompt', 'keep_alive', 'max_tokens_param', 'prompt', 'temp',
     'num_predict', 'num_ctx', 'top_p', 'top_k', 'repeat_penalty', 'frequency_penalty',
-    'presence_penalty', 'stop', 'allowed_scripts', 'processing',
+    'presence_penalty', 'stop', 'omit_parameters', 'allowed_scripts', 'processing',
 }
 
 

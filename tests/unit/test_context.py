@@ -14,6 +14,8 @@ from llm_conductor.l10n.context import (
     LinguisticContext,
     LinguisticHint,
     build_glossary_string,
+    compile_context_rules,
+    default_context_rules,
 )
 from tests.support import StubConfig
 
@@ -128,7 +130,7 @@ def test_linguistic_hints_sort_by_priority():
 
 @pytest.fixture
 def context():
-    return LinguisticContext(StubConfig())
+    return LinguisticContext(StubConfig(), default_context_rules())
 
 
 def _hint_types(hints):
@@ -288,7 +290,7 @@ def test_analysis_cache_requires_clear_after_registering_detector(context):
 
 def test_failing_detector_is_logged_and_does_not_break_analysis():
     config = StubConfig()
-    context = LinguisticContext(config)
+    context = LinguisticContext(config, default_context_rules())
 
     def broken(path):
         raise RuntimeError("detector bug")
@@ -304,7 +306,7 @@ def test_failing_detector_is_logged_and_does_not_break_analysis():
 def test_failing_detector_on_ancestor_is_logged_and_does_not_break_inheritance():
     """_scan_ancestors() must warn like analyze(), not swallow the failure silently."""
     config = StubConfig()
-    context = LinguisticContext(config)
+    context = LinguisticContext(config, default_context_rules())
     calls = {'n': 0}
 
     def flaky_gender(path):
@@ -320,7 +322,7 @@ def test_failing_detector_on_ancestor_is_logged_and_does_not_break_inheritance()
     assert calls['n'] >= 1
     assert _hint_types(hints) == [HintType.GENDER]
     assert "inherited" in hints[0].instruction
-    assert config.logger.contains("failed while scanning ancestor", level='WARNING')
+    assert config.logger.contains("Pattern detector 'flaky_gender' failed", level='WARNING')
 
 
 # ============================================================================
@@ -340,7 +342,7 @@ def test_suspicious_key_without_hints_is_collected(segment):
     assert len(config.logger.messages('WARNING')) == 1
 
 
-@pytest.mark.parametrize("segment", ["title", "description", "item_name", "farewell"])
+@pytest.mark.parametrize("segment", ["title", "description", "farewell"])
 def test_ordinary_key_is_not_reported_as_unknown(context, segment):
     context.analyze(KeyPath(('ui', segment)), "text")
 
@@ -470,3 +472,161 @@ def test_glossary_term_with_regex_metacharacters_is_escaped():
                                    use_word_boundaries=False)
 
     assert "(A) = (А)" in result
+
+
+def test_without_rules_a_gender_suffix_has_no_hints():
+    hints = LinguisticContext(StubConfig()).analyze(KeyPath(("greeting_female",)), "Hi")
+
+    assert hints == []
+
+
+def test_path_rule_fills_gender_on_a_flat_key():
+    rules = compile_context_rules((
+        {
+            "name": "object-case",
+            "match": "path",
+            "pattern": r"(?i)Pronoun\.Female",
+            "slot": "gender",
+            "priority": 1,
+            "text": "referent is feminine",
+        },
+    ))
+    hints = LinguisticContext(StubConfig(), rules).analyze(
+        KeyPath(("Dialog.Interpolation.Pronoun.Female.ObjectCase",)), "her",
+    )
+
+    assert [hint.instruction for hint in hints] == ["referent is feminine"]
+    assert hints[0].hint_type is HintType.GENDER
+
+
+def test_two_slots_both_apply_from_the_default_catalog():
+    hints = LinguisticContext(StubConfig(), default_context_rules()).analyze(
+        KeyPath(("count_male",)), "swords",
+    )
+
+    assert {hint.slot for hint in hints} == {"gender", "plural"}
+
+
+def test_template_substitutes_value_into_a_custom_slot():
+    rules = compile_context_rules(
+        (
+            {
+                "name": "narrator",
+                "match": "last",
+                "pattern": r"^title$",
+                "slot": "note",
+                "priority": 1,
+                "template": "role",
+                "value": "narrator",
+            },
+        ),
+        {"role": {"text": "Role: {value}"}},
+    )
+    hints = LinguisticContext(StubConfig(), rules).analyze(KeyPath(("title",)), "Hello")
+
+    assert hints[0].instruction == "Role: narrator"
+    assert hints[0].hint_type is HintType.CUSTOM
+
+
+def test_rule_cannot_set_both_text_and_template():
+    with pytest.raises(ValueError, match="exactly one"):
+        compile_context_rules((
+            {
+                "name": "both",
+                "match": "last",
+                "pattern": "title",
+                "slot": "note",
+                "priority": 0,
+                "text": "plain",
+                "template": "role",
+            },
+        ), {"role": {"text": "Role: {value}"}})
+
+
+@pytest.mark.parametrize("segments", [("a.b",), ("a", "b")])
+def test_analysis_cache_uses_structural_paths(segments):
+    rules = compile_context_rules(({"name": "b", "match": "last", "pattern": "^b$",
+                                        "slot": "role", "text": "nested"},))
+    analyzer = LinguisticContext(StubConfig(), rules)
+    analyzer.analyze(KeyPath(segments), "Hello")
+    assert analyzer.analyze(KeyPath(("a.b",)), "Hello") == []
+    assert analyzer.analyze(KeyPath(("a", "b")), "Hello")[0].instruction == "nested"
+
+
+def test_hint_origin_names_exact_local_and_inherited_rules():
+    from llm_conductor.constants import (
+        HINT_ORIGIN_EXACT,
+        HINT_ORIGIN_INHERITED,
+        HINT_ORIGIN_RULE,
+    )
+    from llm_conductor.l10n.context import compile_leaf_context
+
+    exact = compile_leaf_context(({"path": '["flat.key"]', "slot": "role", "text": "Point"},))
+    rules = compile_context_rules((
+        {"name": "npc-female", "match": "last", "pattern": "^npc_female$", "slot": "gender",
+         "text": "Feminine speaker"},
+        {"name": "title-rule", "match": "last", "pattern": "^title$", "slot": "role",
+         "text": "Local title"},
+    ))
+    analyzer = LinguisticContext(StubConfig(), exact + rules)
+
+    point = analyzer.analyze(KeyPath(("flat.key",)), "A")[0]
+    assert (point.origin, point.rule_name, point.instruction) == (HINT_ORIGIN_EXACT, "leaf-0", "Point")
+    local = analyzer.analyze(KeyPath(("title",)), "B")[0]
+    assert (local.origin, local.rule_name, local.parent_path) == (HINT_ORIGIN_RULE, "title-rule", "")
+    inherited = analyzer.analyze(KeyPath(("npc_female", "line")), "C")[0]
+    assert inherited.origin == HINT_ORIGIN_INHERITED
+    assert inherited.rule_name == "npc-female"
+    assert inherited.parent_path == KeyPath(("npc_female",)).report_key()
+    assert inherited.instruction.startswith("(inherited from parent) ")
+    assert analyzer.analyze(KeyPath(("flat", "key")), "D") == []
+
+
+def test_registered_detector_is_reported_as_a_local_rule():
+    from llm_conductor.constants import HINT_ORIGIN_RULE
+
+    context = LinguisticContext(StubConfig())
+
+    def detect(path):
+        if path.matches_suffix("_dim"):
+            return LinguisticHint(HintType.CUSTOM, "diminutive")
+        return None
+
+    context.register_pattern("diminutive", detect)
+    hint = context.analyze(KeyPath(("cat_dim",)), "x")[0]
+    assert (hint.origin, hint.rule_name) == (HINT_ORIGIN_RULE, "diminutive")
+
+
+def test_exact_context_overrides_regex_without_inheriting():
+    from llm_conductor.l10n.context import compile_leaf_context
+
+    exact = compile_leaf_context(({"path": '["a"]', "slot": "role", "text": "exact"},))
+    regex = compile_context_rules(({"name": "role", "match": "last", "pattern": ".*",
+                                        "slot": "role", "text": "regex"},))
+    analyzer = LinguisticContext(StubConfig(), exact + regex)
+    assert analyzer.analyze(KeyPath(("a",)), "Hi")[0].instruction == "exact"
+    assert analyzer.analyze(KeyPath(("a", "b")), "Hi")[0].instruction == "regex"
+
+
+@pytest.mark.parametrize("path", ['true', '[true]', '[-1]', '{}', '[1.5]', 'bad'])
+def test_exact_context_rejects_invalid_paths(path):
+    from llm_conductor.l10n.context import compile_leaf_context
+
+    with pytest.raises(ValueError, match="path"):
+        compile_leaf_context(({"path": path, "slot": "role", "text": "exact"},))
+
+
+def test_exact_context_rejects_duplicate_slot_and_path():
+    from llm_conductor.l10n.context import compile_leaf_context
+
+    with pytest.raises(ValueError, match="duplicate"):
+        compile_leaf_context(({"path": '["a"]', "slot": "role", "text": "one"},
+                              {"path": '[ "a" ]', "slot": "role", "text": "two"}))
+
+
+def test_file_order_wins_over_priority_in_the_same_slot():
+    rules = compile_context_rules((
+        {"name": "first", "match": "last", "pattern": ".*", "slot": "role", "text": "first", "priority": 1},
+        {"name": "second", "match": "last", "pattern": ".*", "slot": "role", "text": "second", "priority": 99},
+    ))
+    assert LinguisticContext(StubConfig(), rules).analyze(KeyPath(("a",)), "Hi")[0].instruction == "first"

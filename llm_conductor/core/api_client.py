@@ -4,7 +4,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Sequence, Tuple
 
 import requests
 
@@ -28,6 +28,8 @@ from llm_conductor.constants import (
     USAGE_OUTCOME_FAILED,
     USAGE_OUTCOME_SUCCESS,
 )
+from llm_conductor.core.cache import omitted_sampling_names
+from llm_conductor.core.sampling import build_openai_sampling_payload
 from llm_conductor.exceptions import APIRequestError
 
 if TYPE_CHECKING:
@@ -102,7 +104,8 @@ class APIClient(ABC):
 
     @abstractmethod
     def build_test_payload(self, model: str, *,
-                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM) -> dict:
+                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+                           omit_parameters: Sequence[str] = ()) -> dict:
         """
         Build a minimal payload for a preflight availability check.
 
@@ -110,6 +113,7 @@ class APIClient(ABC):
             model: Model name.
             max_tokens_param: OpenAI-compatible reply-length field name;
                 ignored by Ollama.
+            omit_parameters: Logical sampling names excluded by this stage.
 
         Returns:
             A minimal request payload.
@@ -166,10 +170,11 @@ class OllamaAPIClient(APIClient):
 
         # A None option means "not configured"; Ollama would read an explicit
         # null as a value, so unset parameters are left out. keep_alive is a
-        # top-level Ollama field, not an options entry.
+        # top-level Ollama field, not an options entry. max_tokens_param is
+        # an OpenAI field selector, never an Ollama option.
         options = {
             k: v for k, v in sampling_params.items()
-            if v is not None and k != 'keep_alive'
+            if v is not None and k not in ('keep_alive', 'max_tokens_param')
         }
         payload = {
             "model": model,
@@ -237,7 +242,8 @@ class OllamaAPIClient(APIClient):
         return None
 
     def build_test_payload(self, model: str, *,
-                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM) -> dict:
+                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+                           omit_parameters: Sequence[str] = ()) -> dict:
         """Build a minimal test request for the Ollama /api/chat endpoint."""
         return {
             "model": model,
@@ -248,9 +254,7 @@ class OllamaAPIClient(APIClient):
                 }
             ],
             "stream": False,
-            "options": {
-                "num_predict": 1
-            }
+            "options": {} if 'num_predict' in omit_parameters else {"num_predict": 1},
         }
 
 class OpenAIAPIClient(APIClient):
@@ -266,21 +270,7 @@ class OpenAIAPIClient(APIClient):
         repeat_penalty, num_ctx, keep_alive) are dropped; num_predict is
         sent under sampling_params['max_tokens_param'] (default max_tokens).
         """
-        openai_params = {}
-
-        if sampling_params.get('num_predict') is not None:
-            tokens_key = sampling_params.get('max_tokens_param') or DEFAULT_MAX_TOKENS_PARAM
-            openai_params[tokens_key] = sampling_params['num_predict']
-        if sampling_params.get('temperature') is not None:
-            openai_params['temperature'] = sampling_params['temperature']
-        if sampling_params.get('top_p') is not None:
-            openai_params['top_p'] = sampling_params['top_p']
-        if sampling_params.get('frequency_penalty') is not None:
-            openai_params['frequency_penalty'] = sampling_params['frequency_penalty']
-        if sampling_params.get('presence_penalty') is not None:
-            openai_params['presence_penalty'] = sampling_params['presence_penalty']
-        if sampling_params.get('stop'):
-            openai_params['stop'] = sampling_params['stop']
+        openai_params = build_openai_sampling_payload(sampling_params)
 
         messages = []
         if system_prompt:
@@ -374,14 +364,17 @@ class OpenAIAPIClient(APIClient):
         return None
 
     def build_test_payload(self, model: str, *,
-                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM) -> dict:
+                           max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+                           omit_parameters: Sequence[str] = ()) -> dict:
         """Build a minimal test request for an OpenAI-compatible API."""
         return {
             "model": model,
             "messages": [
                 {"role": "user", "content": "test"}
             ],
-            max_tokens_param: DEFAULT_OPENAI_PREFLIGHT_MAX_TOKENS,
+            **({} if 'num_predict' in omit_parameters else {
+                max_tokens_param: DEFAULT_OPENAI_PREFLIGHT_MAX_TOKENS,
+            }),
             "stream": False
         }
 
@@ -623,6 +616,48 @@ def make_request_with_retry(
         original_exception=last_exception
     )
 
+def build_model_payload(value: str, runtime_config: dict, glossary_string: str = "") -> dict:
+    """Build the provider payload used by preview and HTTP submission.
+
+    Args:
+        value: Masked leaf text.
+        runtime_config: Effective endpoint, prompts and sampling parameters.
+        glossary_string: Optional glossary text appended before the leaf.
+
+    Returns:
+        Provider-specific JSON payload, without authentication headers.
+    """
+    try:
+        api_client = create_api_client(runtime_config.get('api_type', 'ollama'))
+    except ValueError:
+        api_client = create_api_client('ollama')
+    # value may already be tag-masked by the caller (_process_leaf)
+    user_prompt = runtime_config.get('prompt', '') + glossary_string + value
+    system_prompt = runtime_config.get('system_prompt', '')
+    model_name = runtime_config.get('model', '')
+
+    keep_alive = runtime_config.get('keep_alive') or None
+    sampling_params = {
+        'temperature': runtime_config.get('temp'),
+        'top_p': runtime_config.get('top_p'),
+        'top_k': runtime_config.get('top_k'),
+        'num_predict': runtime_config.get('num_predict'),
+        'num_ctx': runtime_config.get('num_ctx'),
+        'repeat_penalty': runtime_config.get('repeat_penalty'),
+        'frequency_penalty': runtime_config.get('frequency_penalty'),
+        'presence_penalty': runtime_config.get('presence_penalty'),
+        'stop': runtime_config.get('stop', []),
+        'keep_alive': keep_alive,
+        'max_tokens_param': runtime_config.get(
+            'max_tokens_param', DEFAULT_MAX_TOKENS_PARAM),
+    }
+    for name in omitted_sampling_names(runtime_config):
+        if name in sampling_params:
+            sampling_params[name] = None
+
+    return api_client.build_request_payload(model_name, user_prompt, system_prompt, sampling_params)
+
+
 def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProtocol', runtime_config: dict,
                   glossary_string: str = "", mode: Optional[str] = None) -> CallOutcome:
     """
@@ -667,28 +702,10 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
         config.logger.warning(f"{e}. Falling back to 'ollama'")
         api_client = create_api_client('ollama')
 
-    # value may already be tag-masked by the caller (_process_leaf)
-    user_prompt = runtime_config.get('prompt', '') + glossary_string + value
+    json_data = build_model_payload(value, runtime_config, glossary_string)
+    user_prompt = json_data['messages'][-1]['content']
     system_prompt = runtime_config.get('system_prompt', '')
     model_name = runtime_config.get('model', '')
-
-    keep_alive = runtime_config.get('keep_alive') or None
-    sampling_params = {
-        'temperature': runtime_config.get('temp'),
-        'top_p': runtime_config.get('top_p'),
-        'top_k': runtime_config.get('top_k'),
-        'num_predict': runtime_config.get('num_predict'),
-        'num_ctx': runtime_config.get('num_ctx'),
-        'repeat_penalty': runtime_config.get('repeat_penalty'),
-        'frequency_penalty': runtime_config.get('frequency_penalty'),
-        'presence_penalty': runtime_config.get('presence_penalty'),
-        'stop': runtime_config.get('stop', []),
-        'keep_alive': keep_alive,
-        'max_tokens_param': runtime_config.get(
-            'max_tokens_param', DEFAULT_MAX_TOKENS_PARAM),
-    }
-
-    json_data = api_client.build_request_payload(model_name, user_prompt, system_prompt, sampling_params)
 
     headers = {"Content-Type": "application/json"}
 
@@ -720,11 +737,22 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
             f"User Prompt:\n{prompt_preview}"
         )
 
+        omitted = omitted_sampling_names(runtime_config)
+        configured = {
+            'temperature': runtime_config.get('temp'),
+            'top_p': runtime_config.get('top_p'),
+            'top_k': runtime_config.get('top_k'),
+            'num_predict': runtime_config.get('num_predict'),
+        }
+
+        def _shown(name: str) -> str:
+            value = configured[name]
+            if name in omitted:
+                return f"{name}=omitted (configured {value!r})"
+            return f"{name}={value}"
+
         config.logger.debug(
-            f"Sampling params: temp={sampling_params['temperature']}, "
-            f"top_p={sampling_params['top_p']}, "
-            f"top_k={sampling_params['top_k']}, "
-            f"num_predict={sampling_params['num_predict']}"
+            "Sampling params: " + ", ".join(_shown(name) for name in configured)
         )
 
     provider = str(api_type)

@@ -25,7 +25,6 @@ Equivalent mutations (5th tuple element = True) do not change behaviour
 and are expected to survive; the list is for the history of findings:
   - unmask_order: [T1] is not a prefix of [T10] (closing bracket), so
     replacement order in unmask_tags() has no effect — doc/pipeline.md;
-  - coord_lt: snapshot version numbers are unique, equality is unreachable.
 """
 import shutil
 import subprocess
@@ -38,7 +37,7 @@ from llm_conductor.core.io import FileOperations, safe_read_file
 from llm_conductor.exceptions import FileOperationError
 
 REPO = Path(__file__).resolve().parents[1]
-COPIED_DIRS = ("llm_conductor", "tests", "doc")
+COPIED_DIRS = ("llm_conductor", "tests", "doc", "examples")
 COPIED_FILES = (
     "llm-conductor.py", "llm-conductor.spec", "pytest.ini", "pyproject.toml",
     "README.md", "LICENSE", ".gitignore", ".gitattributes",
@@ -46,6 +45,36 @@ COPIED_FILES = (
 
 # (id, file, old, new, description[, equivalent])
 MUTANTS = [
+    ("cache_openai_limit_selector_ignored", "llm_conductor/core/cache.py",
+     "payload['max_tokens_param'] = runtime_config.get('max_tokens_param', DEFAULT_MAX_TOKENS_PARAM)",
+     "payload['max_tokens_param'] = DEFAULT_MAX_TOKENS_PARAM",
+     "OpenAI cache ignores the actual reply-limit field name"),
+    ("cache_openai_unused_top_k", "llm_conductor/core/cache.py",
+     "wire = build_openai_sampling_payload(payload)",
+     "wire = {**build_openai_sampling_payload(payload), 'top_k': payload.get('top_k')}",
+     "OpenAI cache hashes a top_k value that HTTP never sends"),
+    ("cache_openai_legacy_namespace", "llm_conductor/core/cache.py",
+     "payload = {'transport': OPENAI_SAMPLING_CACHE_NAMESPACE, 'parameters': wire}",
+     "payload = wire", "OpenAI sampling identity can collide with legacy entries"),
+    ("worker_signal_timeout", "llm_conductor/utils.py",
+     "and threading.current_thread() is not threading.main_thread()):",
+     "and False):", "worker IO uses POSIX signal timeouts"),
+    ("atomic_timeout_not_cancelled", "llm_conductor/core/io.py",
+     "                    if cancelled:\n                        return",
+     "                    if False:\n                        return",
+     "timed-out preparation can overwrite a newer file"),
+    ("atomic_commit_unlocked", "llm_conductor/core/io.py",
+     "                with commit_lock:\n", "                if True:\n",
+     "timeout returns while an old replacement can still commit"),
+    ("run_heartbeat_not_finalized", "llm_conductor/cli/runner.py",
+     "            if heartbeat.started and not heartbeat.finalized:",
+     "            if False:", "unexpected failures leave heartbeat running"),
+    ("preflight_omission_ignored", "llm_conductor/cli/validators.py",
+     "            omit_parameters=omit_parameters)", "            omit_parameters=())",
+     "preflight sends an excluded reply-length field"),
+    ("preflight_omission_identity", "llm_conductor/cli/runner.py",
+     "                    'num_predict' in omitted,", "                    False,",
+     "preflight conflates stage-specific omissions on a shared endpoint"),
     # (id, file, old, new, description)
     ("unmask_order", "llm_conductor/utils.py", "key=len, reverse=True", "key=len, reverse=False", "unmask: [T1]/[T10] replacement order", True),
     ("mask_counter", "llm_conductor/utils.py", 'marker = f"[{prefix}{counter}]"', 'marker = f"[{prefix}0]"', "mask: marker counter does not increment"),
@@ -63,6 +92,17 @@ MUTANTS = [
     ("custom_mask_ignored", "llm_conductor/l10n/processor.py", "masked_text, tag_map = mask_tags(core, rules)", "masked_text, tag_map = mask_tags(core)", "model masking ignores the custom content policy"),
     ("profile_content_ignored", "llm_conductor/l10n/processor.py", "rules = runtime_config.get('processing', self.config.processing)", "rules = self.config.processing", "manifest processing uses the bootstrap profile"),
     ("key_no_content", "llm_conductor/core/cache.py", "api_url, sorted(set(allowed_scripts)), content_identity,", "api_url, sorted(set(allowed_scripts)),", "cache key ignores content policy"),
+    ("key_no_resource_namespace", "llm_conductor/core/cache.py",
+     "        if resource_key is not None:\n            cache_key_data.append",
+     "        if False:\n            cache_key_data.append",
+     "keyed cache accepts legacy entries for an empty key"),
+    ("preview_inputs_unchecked", "llm_conductor/cli/paths.py",
+     "        if aliases_input:\n            raise TargetError",
+     "        if False:\n            raise TargetError",
+     "preview export can overwrite an input or configuration"),
+    ("preview_parent_error_unhandled", "llm_conductor/l10n/preview.py",
+     "        except OSError as exc:", "        except FileNotFoundError as exc:",
+     "preview directory errors bypass heartbeat finalization"),
     ("fragment_origin_unchecked", "llm_conductor/l10n/validation.py", "    if _has_fabricated_fragments(masked_reply, unmasked_reply, tag_map, rules):", "    if False:", "literal inventions bypass fragment-origin validation"),
     ("restored_regions_ignored", "llm_conductor/l10n/validation.py", "    restored = _restored_fragment_spans(masked_reply, tag_map)", "    restored: List[Tuple[int, int]] = []", "relocated protected fragments lose their marker origin"),
     ("dump_char_limit", "llm_conductor/l10n/processor.py", "        return sanitized.encode('utf-8')[:REJECTED_REPLY_LABEL_MAX_BYTES].decode('utf-8', errors='ignore')", "        return sanitized[:REJECTED_REPLY_LABEL_MAX_BYTES]", "dump labels truncate characters instead of UTF-8 bytes"),
@@ -75,7 +115,7 @@ MUTANTS = [
     ("no_version_check", "llm_conductor/core/cache.py", "if entry.get('cache_key_version') != CACHE_KEY_VERSION:", "if False:", "load: old key format is accepted"),
     ("no_deepcopy", "llm_conductor/core/cache.py", "return copy.deepcopy(value)", "return value", "get: without deepcopy"),
     ("deindex_skip", "llm_conductor/core/cache.py", "        self.deindex_key(cache_key, value_hash)\n        return cache_key", "        return cache_key", "eviction does not clean value_index"),
-    ("coord_lt", "llm_conductor/core/cache.py", "if version <= self._last_written_version:", "if version < self._last_written_version:", "coordinator: rewrite of the same version", True),
+    ("coord_lt", "llm_conductor/core/cache.py", "if version <= self._last_written_version:", "if version < self._last_written_version:", "coordinator: rewrite of the same version"),
     ("glossary_lru_off", "llm_conductor/core/cache.py", "                self._cache.move_to_end(cache_key)\n                self._hits += 1", "                self._hits += 1", "glossary LRU becomes FIFO"),
     ("inherit_priority", "llm_conductor/l10n/context.py", "priority=max(hint.priority - 5, 1)", "priority=hint.priority", "inherited hint without priority demotion"),
     ("hints_sort_asc", "llm_conductor/l10n/context.py", "hints.sort(reverse=True)", "hints.sort()", "hints sorted by ascending priority"),
@@ -90,7 +130,7 @@ MUTANTS = [
     ("usage_reject_skipped", "llm_conductor/l10n/processor.py", "                if outcome.usage_attempt_id is not None:\n                    self.config.usage_ledger.mark_attempt_rejected(\n                        outcome.usage_attempt_id, failure_kind=error_kind,\n                    )\n", "", "validation reject leaves usage outcome as success"),
     ("cache_masked_value", "llm_conductor/l10n/processor.py", "operation_type, cache_key, unmasked_result, metadata, source_value=value", "operation_type, cache_key, outcome.text, metadata, source_value=value", "cache stores the masked result (§4.4 invariant)"),
     ("autosave_gt", "llm_conductor/l10n/processor.py", "should_save = self._leaves_since_save >= interval", "should_save = self._leaves_since_save > interval", "autosave at N+1"),
-    ("openai_no_max_tokens", "llm_conductor/core/api_client.py", "openai_params[tokens_key] = sampling_params['num_predict']", "pass", "OpenAI: num_predict is not mapped"),
+    ("openai_no_max_tokens", "llm_conductor/core/sampling.py", "openai_params[tokens_key] = sampling_params['num_predict']", "pass", "OpenAI: num_predict is not mapped"),
     ("ollama_tokens_swapped", "llm_conductor/core/api_client.py", "prompt_tokens = response_json.get('prompt_eval_count', 0) if has_prompt else 0\n        completion_tokens = response_json.get('eval_count', 0) if has_completion else 0", "prompt_tokens = response_json.get('eval_count', 0) if has_prompt else 0\n        completion_tokens = response_json.get('prompt_eval_count', 0) if has_completion else 0", "Ollama: token counters swapped"),
     ("backoff_linear", "llm_conductor/core/api_client.py", "            else:\n                wait_time = backoff_factor ** attempt\n", "            else:\n                wait_time = backoff_factor * attempt\n", "linear backoff"),
     ("no_strip", "llm_conductor/core/api_client.py", "result_value = parsed.text.strip()", "result_value = parsed.text", "model reply is not stripped"),
@@ -113,14 +153,16 @@ MUTANTS = [
     ("unmask_silent_debug", "llm_conductor/utils.py", "if missing_markers and config.is_debug_mode:", "if False:", "lost markers are not logged"),
     ("glossary_by_translation", "llm_conductor/l10n/processor.py", "glossary_string = build_glossary_string(original_data, glossary, self.config)", "glossary_string = build_glossary_string(value, glossary, self.config)", "verification glossary keyed off the translation"),
     # Configuration layer: strict TOML schema, key lookup, path anchoring, init.
-    ("schema_unknown_ignored", "llm_conductor/schema.py", "errors.append(f\"unknown key", "(f\"unknown key", "unknown TOML keys are silently accepted"),
+    ('schema_unknown_ignored', 'llm_conductor/schema.py', 'errors.append(f"unknown key \'{key}\' in {location}{self._suggestion(key, known)}")', '(f"unknown key \'{key}\' in {location}{self._suggestion(key, known)}")', 'unknown TOML keys are silently accepted'),
+    ('context_array_unknown', 'llm_conductor/schema.py', '                setting = array.find(key)\n                if setting is None:\n                    errors.append(f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', '                setting = array.find(key)\n                if setting is None:\n                    (f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', 'unknown context fields are silently accepted'),
+    ('context_template_unknown', 'llm_conductor/schema.py', '                setting = table_map.find(key)\n                if setting is None:\n                    errors.append(f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', '                setting = table_map.find(key)\n                if setting is None:\n                    (f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', 'unknown context fields are silently accepted'),
     ("schema_bool_as_int", "llm_conductor/schema.py", "        if isinstance(value, bool):\n            return False\n", "", "true/false accepted where a number is expected"),
     ("key_env_ignored", "llm_conductor/config.py", "api_key = env_key if env_key.strip() else api[\"key\"]", "api_key = api[\"key\"]", "key_env is never consulted"),
     ("dir_not_anchored", "llm_conductor/config.py", "return os.path.normpath(os.path.join(base_dir, path))", "return path", "cache/log dirs resolved from the cwd again"),
     ("glossary_size_unchecked", "llm_conductor/config.py", "if self.glossary_patterns_cache_max_size <= 0:", "if False:", "glossary_patterns_max_size = 0 passes validation"),
     ("limits_timeout_ignored", "llm_conductor/config.py", "            timeout=config_data.limits.file_operation_timeout,\n", "", "[limits].file_operation_timeout has no effect"),
     ("llm_next_to_app_dir", "llm_conductor/cli/locations.py", "else os.path.join(os.path.dirname(conductor_path), LLM_CONFIG_FILENAME))", "else os.path.join(app_dir, LLM_CONFIG_FILENAME))", "default llm.toml ignores LLMC_CONFIG"),
-    ("init_overwrites", "llm_conductor/cli/init.py", "    if existing:\n        raise", "    if False:\n        raise", "init overwrites an existing profile"),
+    ("init_overwrites", "llm_conductor/cli/init.py", "        if os.path.exists(path):\n", "        if False:\n", "init overwrites an existing profile"),
     # The run command: stages, cache switches, manifests, locks, exit codes.
     ("preflight_always", "llm_conductor/cli/runner.py", "        if not config.preflight.check_availability:", "        if False:", "[preflight].check_availability is ignored"),
     ("stage_verify_uses_source", "llm_conductor/cli/runner.py", "                data = self._read_json(translated_path, \"translated data\")", "                data = source", "--stage verify proofreads the English source"),
@@ -161,38 +203,46 @@ def _run_mutant(work: Path, rel: str, old: str, new: str):
         return "SKIP", f"pattern found {original.count(old)} time(s)"
     path.write_text(original.replace(old, new), encoding="utf-8")
     try:
-        with tempfile.TemporaryDirectory(prefix="llmc-pytest-") as report_dir:
-            report_path = Path(report_dir) / "results.xml"
-            try:
-                result = subprocess.run(
-                    [sys.executable, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider",
-                     "-m", "not live and not meta", "--junitxml", str(report_path)],
-                    cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=300, check=False,
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                return "HARNESS_ERROR", str(exc)
-            if result.returncode == 0:
-                return "SURVIVED", ""
-            diagnostics = f"pytest exit {result.returncode}:\n{result.stdout}\n{result.stderr}".strip()
-            if result.returncode != 1:
-                return "HARNESS_ERROR", diagnostics
-            try:
-                report = ET.fromstring(safe_read_file(
-                    str(report_path), "pytest report", FileOperations(), as_text=True,
-                ))
-            except (ET.ParseError, FileOperationError) as exc:
-                return "HARNESS_ERROR", f"{exc}\n{diagnostics}"
-            failures = report.findall(".//failure")
-            if (report.find(".//error") is not None or not failures
-                    or any(failure.get("message", "").startswith(("ImportError:", "ModuleNotFoundError:"))
-                           for failure in failures)):
-                return "HARNESS_ERROR", diagnostics
-            failed = next((ln[len("FAILED "):] for ln in result.stdout.splitlines()
-                           if ln.startswith("FAILED ")), failures[0].get("message", "test failure"))
-            return "KILLED", failed.split(" - ")[0]
+        return _run_pytest(work)
     finally:
         path.write_text(original, encoding="utf-8")
+
+
+def _run_pytest(work: Path):
+    """Run the copied suite and classify its verdict."""
+    with tempfile.TemporaryDirectory(prefix="llmc-pytest-", ignore_cleanup_errors=True) as report_dir:
+        report_path = Path(report_dir) / "results.xml"
+        # Fast unit checks run first; the complete non-live suite remains selected.
+        tiers = ["tests/unit", "tests/integration", "tests/system"] if (work / "tests/unit").is_dir() else []
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", *tiers, "-x", "-q", "-p", "no:cacheprovider",
+                 "-m", "not live and not meta", "--basetemp", str(Path(report_dir) / "tmp"),
+                 "--junitxml", str(report_path)],
+                cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=300, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return "HARNESS_ERROR", str(exc)
+        if result.returncode == 0:
+            return "SURVIVED", ""
+        diagnostics = f"pytest exit {result.returncode}:\n{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 1:
+            return "HARNESS_ERROR", diagnostics
+        try:
+            report = ET.fromstring(safe_read_file(
+                str(report_path), "pytest report", FileOperations(), as_text=True,
+            ))
+        except (ET.ParseError, FileOperationError) as exc:
+            return "HARNESS_ERROR", f"{exc}\n{diagnostics}"
+        failures = report.findall(".//failure")
+        if (report.find(".//error") is not None or not failures
+                or any(failure.get("message", "").startswith(("ImportError:", "ModuleNotFoundError:"))
+                       for failure in failures)):
+            return "HARNESS_ERROR", diagnostics
+        failed = next((ln[len("FAILED "):] for ln in result.stdout.splitlines()
+                       if ln.startswith("FAILED ")), failures[0].get("message", "test failure"))
+        return "KILLED", failed.split(" - ")[0]
 
 
 def main(selected) -> int:
@@ -201,6 +251,11 @@ def main(selected) -> int:
     with tempfile.TemporaryDirectory(prefix="llmc-mutants-") as tmp:
         work = Path(tmp)
         _prepare_copy(work)
+        baseline, detail = _run_pytest(work)
+        if baseline != "SURVIVED":
+            print(f"HARNESS_ERROR baseline: unmutated copy did not pass\n{detail}")
+            return 1
+        print("Baseline: unmutated copy passed")
         for mutant_id, rel, old, new, description, *rest in mutants:
             equivalent = bool(rest and rest[0])
             status, detail = _run_mutant(work, rel, old, new)

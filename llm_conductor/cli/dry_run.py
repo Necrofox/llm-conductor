@@ -8,6 +8,7 @@ WARNING per file (last value wins); they do not fail the plan.
 import json
 from typing import Dict, List, Mapping, Optional, TextIO
 
+from llm_conductor.cli.context_file import ContextSource
 from llm_conductor.cli.glossary import GlossarySource
 from llm_conductor.cli.runner import RunOptions
 from llm_conductor.cli.targets import ResultLayout, RunTarget, TargetEntry
@@ -140,11 +141,26 @@ def _result_paths_for(
     return "; ".join(paths)
 
 
+def _context_path_for(
+        entry: TargetEntry,
+        contexts: Dict[Optional[str], ContextSource],
+) -> str:
+    """Context path for the table, or ``-`` when empty."""
+    if entry.context_path is not None:
+        source = contexts.get(entry.context_path)
+        if source is not None and source.path:
+            return source.path
+        return entry.context_path
+    source = contexts.get(None, ContextSource())
+    return source.path if source.path else "-"
+
+
 def format_effective_table(
         target: RunTarget,
         layout: ResultLayout,
         profile_paths: Mapping[str, object],
         glossaries: Dict[Optional[str], GlossarySource],
+        contexts: Optional[Dict[Optional[str], ContextSource]] = None,
         *,
         default_options: RunOptions,
         bootstrap_llm: str,
@@ -158,8 +174,9 @@ def format_effective_table(
     """
     headers = (
         "index", "original", "draft", "stage", "strict",
-        "llm_config", "glossary", "result_paths",
+        "llm_config", "glossary", "context", "result_paths",
     )
+    contexts = contexts or {}
     rows: List[List[str]] = []
     for entry in target.entries:
         options = _options_for(entry, target, default_options)
@@ -171,6 +188,7 @@ def format_effective_table(
             "true" if options.strict else "false",
             _llm_path_for(entry, profile_paths, bootstrap_llm),
             _glossary_path_for(entry, glossaries),
+            _context_path_for(entry, contexts),
             _result_paths_for(entry, layout, options),
         ])
 
@@ -192,6 +210,7 @@ def print_effective_table(
         layout: ResultLayout,
         profile_paths: Mapping[str, object],
         glossaries: Dict[Optional[str], GlossarySource],
+        contexts: Optional[Dict[Optional[str], ContextSource]] = None,
         *,
         default_options: RunOptions,
         bootstrap_llm: str,
@@ -199,7 +218,7 @@ def print_effective_table(
 ) -> None:
     """Write the effective-settings table to stdout (or ``stream``)."""
     text = format_effective_table(
-        target, layout, profile_paths, glossaries,
+        target, layout, profile_paths, glossaries, contexts,
         default_options=default_options, bootstrap_llm=bootstrap_llm,
     )
     print(text, file=stream)
@@ -211,6 +230,7 @@ def run_dry_run(
         layout: ResultLayout,
         profile_paths: Mapping[str, object],
         glossaries: Dict[Optional[str], GlossarySource],
+        contexts: Optional[Dict[Optional[str], ContextSource]] = None,
         *,
         default_options: RunOptions,
         bootstrap_llm: str,
@@ -226,7 +246,7 @@ def run_dry_run(
     """
     emit_duplicate_key_warnings(target, config.file_ops, config.logger)
     print_effective_table(
-        target, layout, profile_paths, glossaries,
+        target, layout, profile_paths, glossaries, contexts,
         default_options=default_options, bootstrap_llm=bootstrap_llm,
     )
     config.logger.info(

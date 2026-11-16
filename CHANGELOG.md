@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-17
+
+### Added
+
+- `[translation.sampling].omit_parameters` and
+  `[verification.sampling].omit_parameters` leave named sampling fields out
+  of the preview, the HTTP body, and the cache identity. Unknown names fail
+  at load. A profile without the key retains normal transport selection;
+  `CACHE_KEY_VERSION` is unchanged.
+- `[heartbeat].interval_sec` rewrites `progress_state.json` on a timer
+  (default 30 seconds, `0` disables it). The snapshot adds
+  `last_progress_at` and `activity` (`processing` or `waiting_api`). A newer
+  `updated_at` means the process is alive; leaf progress is the other two
+  fields. `schema_version` stays 1.
+- `context.toml` key-context catalog, written by `init` from `schema.py` and
+  resolved like a glossary with a fallback beside the program. Rules use
+  `match` `last` or `path`, one text per `slot`, optional templates, and
+  an exact structural-path sidecar map (`[[leaves]]`) that overrides regex slots.
+  `{RESOURCE_KEY}` fills the leaf path in the user prompt. When the marker is
+  used, that substituted value is part of the cache and dedup identity; when
+  it is absent, the path stays diagnostic and does not by itself split
+  identical requests. `--preview-prompts` prints the provider payload
+  (including masked leaf text, system/user messages, and where each final
+  hint came from) on a live run and, with `--dry-run`, without calling the
+  API (#8). `--preview-path` selects exact structural paths, `--preview-limit`
+  caps how many requests are shown, and `--preview-output` writes JSONL.
+  Those filters do not change processing, call counts, or input preflight.
+  Preview and HTTP submission share payload construction; preview errors
+  return a nonzero exit status. Offline verification preview in stage `all`
+  marks each editor request as preliminary because the future translation is
+  not yet known.
+
+### Changed
+
+- `init` creates only files that are missing and prints `Created` or
+  `Skipped`. When every file already exists it exits 0 and leaves the bytes
+  unchanged. It does not repair existing files; `check` still validates them.
+- Cache and in-run dedup hash the same user prompt that is sent. A
+  substituted `{RESOURCE_KEY}` therefore creates a distinct entry; records
+  hashed with that marker removed are not applied to new requests that send
+  the key, including an empty-string key. Keyed requests use a separate
+  namespace. `CACHE_KEY_VERSION` is unchanged; compatible entries are retained
+  without a manual cache wipe, subject to the OpenAI sampling migration below.
+- Suffix and prefix hints are no longer applied as built-in runtime detectors.
+  A run with no `context.toml` adds no key context. The `init` catalog keeps the
+  previous gender, plural, and formality wording.
+- Mutation checks require a passing unmutated baseline, include example files
+  in the test copy, and run unit tests before integration and system tests.
+  Rewriting an already replaced cache snapshot version is no longer treated
+  as an equivalent mutation; dedicated tests detect it.
+
+### Fixed
+
+- OpenAI HTTP payloads and cache identity share sampling serialization.
+  Switching `max_tokens` to `max_completion_tokens` misses the cache when
+  the limit is sent; editing unsupported `top_k`, `repeat_penalty`, or
+  `num_ctx` does not. Omitted limits and empty stop lists do not create
+  false misses. A separate sampling namespace rebuilds old OpenAI entries
+  on demand while retaining compatible Ollama keys. The OpenAI field
+  selector is no longer passed as an Ollama option.
+- Periodic heartbeat writes use a thread-safe timeout strategy on POSIX.
+  Timed-out IO workers cannot publish old snapshots after a newer write;
+  a replacement already in progress finishes before its caller returns.
+- Unexpected run failures finalize and stop the heartbeat with exit code 1.
+  Preview failures during interruption preserve the interrupted status.
+- Availability probes honor each stage's `omit_parameters`, including
+  the mapped reply-length field, and distinguish different probe settings
+  on a shared endpoint and model.
+- Preview JSONL export refuses paths that alias run inputs or loaded
+  configuration files, or enter the run's result, cache, or log directories,
+  before inference, including during dry-run. Parent-directory creation
+  failures produce a normal error outcome and preserve heartbeat finalization
+  and interruption exit codes.
+- Key-context analysis caches structural paths separately, preventing collisions
+  between flat dotted keys and nested JSON paths.
+- Manifest context resolution does not load the program catalog when every
+  target selects another catalog; an invalid unused fallback cannot block a run.
+
 ## [1.1.2] - 2026-11-15
 
 ### Added

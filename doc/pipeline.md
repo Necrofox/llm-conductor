@@ -13,10 +13,14 @@ rationale kept locally, see `history/` on a maintainer checkout.
    for the contract and regex recipes, including numeric/date processing.
 3. Peel leading/trailing whitespace from the leaf (restore after accept).
 4. Build glossary snippet (on verify: match terms in the **original**).
-5. Linguistic hints from the key path.
-6. Assemble enhanced prompt ([prompts.md](prompts.md)).
+5. Key-context hints from the loaded `context.toml` (empty when no catalog is found).
+6. Assemble enhanced prompt ([prompts.md](prompts.md)). When `{RESOURCE_KEY}`
+   is present it is filled before both the API call and the cache hash.
+   When it is absent the path is not inserted.
 7. Full cache key + component fingerprints (on the **full** leaf, including
-   outer whitespace).
+   outer whitespace). The hashed user prompt is the effective request. A
+   substituted `{RESOURCE_KEY}` is part of that string; a path that was
+   never substituted is not.
 8. Persistent cache lookup; in-run dedup (translation only) on the same key.
 9. Mask formatting tags on the peeled core → call translate/verify → unmask.
 10. Transport/parse/truncation/refusal failures → degrade to original; not
@@ -41,14 +45,31 @@ client (not trusted to the model or reply `strip()`); the cache stores the
 
 Full-request identity (see `CACHE_KEY_VERSION` / `CACHE_SAMPLING_IDENTITY_FIELDS`
 in `llm_conductor/constants.py`) includes the operation type, API URL, model name,
-system prompt, assembled user prompt (hints/glossary/original), mode, leaf value,
+system prompt, assembled user prompt (hints/glossary/original, and
+`{RESOURCE_KEY}` when that marker is used), mode, leaf value,
 the active profile's allowed writing systems, both content-rule expressions,
-and generation-affecting sampling
-(`temperature`, `top_p`, `top_k`,
-`repeat_penalty`, `frequency_penalty`, `presence_penalty`, `num_predict`,
-`num_ctx`, `stop`). Changing any of these components
-misses the cache. Transport-only fields (`keep_alive`, `max_tokens_param`) are
-not part of identity. A key-schema bump drops stale disk entries on load.
+and generation-affecting sampling that is actually sent. For OpenAI-compatible
+APIs the cache and HTTP body share one sampling serializer: unsupported
+`top_k`, `repeat_penalty`, and `num_ctx` and an empty `stop` list are absent.
+The reply limit uses its actual field name, `max_tokens` or
+`max_completion_tokens`, so switching that name misses the cache. When
+`num_predict` is omitted, neither its stored value nor the selector affects
+identity. Explicit omissions override configured values and defaults.
+Stop sequence order is preserved. `keep_alive` is not generation-affecting.
+
+OpenAI sampling identity uses the `openai-sampling-v1` namespace. Older
+OpenAI cache entries used logical fields and cannot safely distinguish the
+reply-limit selector; they are not reused and are rebuilt on demand. No
+manual cache cleanup is needed. Ollama keeps its compatible logical-field
+identity (`temperature`, `top_p`, `top_k`, `repeat_penalty`,
+`frequency_penalty`, `presence_penalty`, `num_predict`, `num_ctx`, `stop`),
+minus explicit omissions. `max_tokens_param` is an OpenAI selector and is
+neither an Ollama option nor part of its cache identity. `CACHE_KEY_VERSION`
+is unchanged, so compatible Ollama entries remain available.
+Requests that substitute `{RESOURCE_KEY}` also include a versioned namespace
+and the substituted value, including an empty string. This isolates them from
+legacy entries hashed with the marker removed. Requests without the marker
+keep their key format, subject to the OpenAI sampling migration above.
 
 `--no-cache` / `[cache].enabled = false`: no disk read/write; in-memory dedup
 still runs. Cache dir may still be created for `progress_state.json`.
@@ -68,6 +89,12 @@ also synchronized afterward. Windows and other platforms synchronize file
 contents without this additional Linux directory step. These guarantees
 depend on the underlying filesystem and storage.
 
+A timed-out IO worker cannot later replace the destination with its old
+temporary file. If replacement has already started, the call waits for
+that commit boundary before returning or raising the timeout. Consequently
+the configured IO timeout is not a hard deadline for an in-progress atomic
+replacement or its directory synchronization.
+
 If Linux directory synchronization fails after replacement, the new file
 already exists but its persistence after a system crash is unconfirmed.
 The error reports that distinction; the write is not retried as an ordinary
@@ -76,6 +103,13 @@ ordering still records the replacement so an older snapshot cannot overwrite it.
 
 Heartbeat `progress_state.json` keeps atomic replacement but skips storage
 synchronization: losing its latest update after a system crash is acceptable.
+`updated_at` and `elapsed_sec` advance on the time pulse and on leaf, file,
+and stage boundaries. `last_progress_at` and `progress.leaves_done` advance
+only when a leaf finishes. `activity` is `waiting_api` during the model call,
+including retry backoff and preflight, and `processing` otherwise. A snapshot
+whose `updated_at` moved while `last_progress_at` and `leaves_done` did not
+is a live process, not new completed work. `schema_version` remains 1. The
+file stops changing after the terminal status (`completed` or `interrupted`).
 Cache and translation/verification outputs retain durable writes. Large-file
 warnings and debug sizes use the flushed temporary file's actual byte count
 after a successful write, without a second JSON serialization.

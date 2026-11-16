@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from llm_conductor.constants import (
     FAILURE_KIND_REJECTED,
     GLOSSARY_MARKER,
+    HEARTBEAT_ACTIVITY_PROCESSING,
+    HEARTBEAT_ACTIVITY_WAITING_API,
     LEAF_SKIP_REASON_TRANSLATION_MISSING,
     LINGUISTIC_CONTEXT_BLOCK_TEMPLATE,
     LINGUISTIC_CONTEXT_MARKER,
@@ -23,12 +25,14 @@ from llm_conductor.constants import (
     REJECTED_REPLY_LOG_LENGTH,
     REJECTED_REPLY_META_SUFFIX,
     REJECTED_REPLY_NO_FILE_LABEL,
+    RESOURCE_KEY_MARKER,
     STATISTICS_LOG_LEVELS,
     TRANSLATION_TEXT_MARKER,
     USAGE_NON_API_CACHE_HIT,
     USAGE_NON_API_DEDUP,
     VERIFICATION_TEXT_MARKER,
 )
+from llm_conductor.core.api_client import build_model_payload
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
 from llm_conductor.core.leaf_report import (
@@ -46,6 +50,11 @@ from llm_conductor.l10n.context import (
     LinguisticContext,
     LinguisticHint,
     build_glossary_string,
+)
+from llm_conductor.l10n.preview import (
+    PreviewSelection,
+    build_preview_record,
+    format_prompt_preview,
 )
 from llm_conductor.l10n.validation import ReplyValidationResult, validate_model_reply
 from llm_conductor.utils import (
@@ -104,14 +113,28 @@ class RecursiveProcessor:
 
     def __init__(self, config: 'ProcessorConfigProtocol',
                  context_analyzer: 'LinguisticContext',
-                 heartbeat: Optional['HeartbeatProgressProtocol'] = None):
+                 heartbeat: Optional['HeartbeatProgressProtocol'] = None,
+                 *,
+                 preview_prompts: bool = False,
+                 preview_only: bool = False,
+                 preview: Optional[PreviewSelection] = None,
+                 verification_preliminary: bool = False):
         """
         Args:
             config: Processor-facing configuration.
             context_analyzer: Linguistic analyzer of key paths.
             heartbeat: Optional progress ticks (begin_stage / note_leaf).
+            preview_prompts: Print the effective user prompt for each shown leaf.
+            preview_only: Print and return the original text. No cache and no model call.
+            preview: Optional path filter, limit, and JSONL sink. Filters emission only.
+            verification_preliminary: Mark offline verification requests whose
+                translation is not yet known.
         """
         self.config = config
+        self.preview_prompts = preview_prompts
+        self.preview_only = preview_only
+        self._preview = preview
+        self._verification_preliminary = verification_preliminary
 
         self.logger = config.logger
         self.is_debug = config.is_debug_mode
@@ -527,6 +550,24 @@ class RecursiveProcessor:
             operation_type=operation_type,
             original_text_block=original_text_block
         )
+        # The cache, dedup, and the API share one prompt. A substituted
+        # {RESOURCE_KEY} is part of that string. Without the marker the path
+        # is not inserted, so identical requests still merge.
+        resource_key: Optional[str] = None
+        if RESOURCE_KEY_MARKER in enhanced_prompt:
+            resource_key = path_label
+            request_prompt = enhanced_prompt.replace(RESOURCE_KEY_MARKER, resource_key)
+        else:
+            request_prompt = enhanced_prompt
+        masked_text, tag_map = mask_tags(core, rules)
+        enhanced_config = runtime_config.copy()
+        enhanced_config['prompt'] = request_prompt
+        self._emit_preview(
+            path, operation_type, linguistic_hints, masked_text, enhanced_config,
+            is_verification,
+        )
+        if self.preview_only:
+            return value
 
         # The key hashes the whole request, so identical text with different
         # hints (`_male` / `_female`) or sampling never shares a cache/dedup entry.
@@ -549,18 +590,20 @@ class RecursiveProcessor:
                 api_url=api_url,
                 allowed_scripts=allowed_scripts,
                 content_identity=rules.identity,
+                resource_key=resource_key,
             )
             cache_key = cache_manager.create_cache_key(
                 operation_type=operation_type,
                 model=runtime_config['model'],
                 system_prompt=runtime_config['system_prompt'],
-                enhanced_prompt=enhanced_prompt,
+                enhanced_prompt=request_prompt,
                 mode=mode,
                 value=value,
                 sampling_identity=sampling_identity,
                 api_url=api_url,
                 allowed_scripts=allowed_scripts,
                 content_identity=rules.identity,
+                resource_key=resource_key,
             )
 
         if self.cache_enabled and cache_manager is not None and cache_key is not None:
@@ -632,20 +675,21 @@ class RecursiveProcessor:
                         )
                         return translated
 
-        enhanced_config = runtime_config.copy()
-        enhanced_config['prompt'] = enhanced_prompt
-
-        # Model sees the peeled core; outer whitespace is restored after accept.
-        masked_text, tag_map = mask_tags(core, rules)
 
         try:
-            outcome = process_func(
-                masked_text,
-                self.config,
-                enhanced_config,
-                "",  # the glossary is already part of the prompt
-                mode=mode
-            )
+            if self._heartbeat is not None:
+                self._heartbeat.set_activity(HEARTBEAT_ACTIVITY_WAITING_API)
+            try:
+                outcome = process_func(
+                    masked_text,
+                    self.config,
+                    enhanced_config,
+                    "",  # the glossary is already part of the prompt
+                    mode=mode
+                )
+            finally:
+                if self._heartbeat is not None:
+                    self._heartbeat.set_activity(HEARTBEAT_ACTIVITY_PROCESSING)
 
             if not outcome.success:
                 if self.config.is_debug_mode:
@@ -771,6 +815,34 @@ class RecursiveProcessor:
             )
             return value
     
+    def _emit_preview(
+            self,
+            path: KeyPath,
+            operation_type: str,
+            linguistic_hints: List[LinguisticHint],
+            masked_text: str,
+            enhanced_config: dict,
+            is_verification: bool,
+    ) -> None:
+        """Print and/or record one preview. A declined slot does not skip the leaf."""
+        selection = self._preview
+        captures = selection is not None and selection.captures
+        if not self.preview_prompts and not captures:
+            return
+        if selection is not None and selection.captures and not selection.reserve(path.report_key()):
+            return
+        source = self.config.leaf_outcomes.active_file() or ""
+        preliminary = is_verification and self._verification_preliminary
+        record = build_preview_record(
+            source, path, operation_type, linguistic_hints,
+            build_model_payload(masked_text, enhanced_config),
+            preliminary=preliminary,
+        )
+        if self.preview_prompts or (selection is not None and selection.stdout):
+            print(format_prompt_preview(record))
+        if selection is not None and selection.output_path:
+            selection.add(record)
+
     def _inject_original_text(self, prompt: str, original_text_block: str, operation_type: str) -> str:
         """
         Place the verification reference block, before any other marker is resolved.
@@ -1232,6 +1304,12 @@ def process_stage_recursive(
     glossary: dict,
     config_prefix: str,
     runtime_config: dict,
+    context_rules: Tuple = (),
+    *,
+    preview_prompts: bool = False,
+    preview_only: bool = False,
+    preview: Optional[PreviewSelection] = None,
+    verification_preliminary: bool = False,
     heartbeat: Optional['HeartbeatProgressProtocol'] = None,
 ) -> Any:
     """
@@ -1250,6 +1328,8 @@ def process_stage_recursive(
         config_prefix: Cache type whose statistics are printed
             (OPERATION_TRANSLATION / OPERATION_VERIFICATION).
         runtime_config: Flat API parameters, including 'mode'.
+        preview: Path filter, limit, and JSONL sink for this stage. Emission only.
+        verification_preliminary: Mark this stage's offline verification requests.
         heartbeat: Optional progress writer for begin_stage / note_leaf.
 
     Returns:
@@ -1259,8 +1339,12 @@ def process_stage_recursive(
 
     config.logger.info(f"Starting {stage_name} stage (recursive mode)...")
 
-    context_analyzer = LinguisticContext(config)
-    processor = RecursiveProcessor(config, context_analyzer, heartbeat=heartbeat)
+    context_analyzer = LinguisticContext(config, tuple(context_rules))
+    processor = RecursiveProcessor(
+        config, context_analyzer, heartbeat=heartbeat,
+        preview_prompts=preview_prompts, preview_only=preview_only,
+        preview=preview, verification_preliminary=verification_preliminary,
+    )
 
     if config.value_deduplication_enabled and not is_verification:
         processor.build_dedup_index(input_data)
@@ -1289,6 +1373,9 @@ def process_stage_recursive(
 
     end_time = time.time()
 
+    if preview_only:
+        return result_data
+
     if safe_write_file(output_path, result_data, f"{stage_name} output", config.file_ops, config.logger):
         config.logger.info(f"Saved {stage_name} results to {output_path}")
     else:
@@ -1308,7 +1395,7 @@ def process_stage_recursive(
     if unknown_patterns:
         config.logger.warning(
             f"Encountered {len(unknown_patterns)} unknown key pattern(s) during processing. "
-            f"Review WARNING logs for details and consider extending pattern detection."
+            f"Review WARNING logs for details and consider a [[rules]] entry in context.toml."
         )
 
         if config.is_debug_mode:

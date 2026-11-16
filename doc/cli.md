@@ -3,12 +3,18 @@
 ## Commands
 
 ```text
-llm-conductor init                          # write conductor.toml + llm.toml (no overwrite)
-llm-conductor check                         # strict validate both TOML files
+llm-conductor init                          # create any missing conductor.toml, llm.toml, context.toml
+llm-conductor check                         # strict validate the TOML files that exist
 llm-conductor run --target PATH [options]   # pipeline
 llm-conductor run --target PATH --dry-run   # preflight plan (no API / result writes)
 llm-conductor --version
 ```
+
+`init` writes a template only when that path is absent. It prints
+`Created <path>` or `Skipped <path> (already exists)` and exits 0 when every
+file is already present. Existing files are not opened for writing and are
+not repaired. The OpenAI key hint is printed only when `llm.toml` is created
+in that run. A write error exits 3. `check` validates the files that exist.
 
 From a checkout without install: `python llm-conductor.py …` (same configs
 layout as the frozen exe). After `pip install`: `llm-conductor …`.
@@ -26,7 +32,12 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
 | `--strict` | Translation in strict mode (JSON targets only) |
 | `--no-cache` | Disable persistent cache for this run |
 | `--dry-run` | Validate inputs and print effective settings; no API, locks, or result writes (session flag) |
+| `--preview-prompts` | Print each shown leaf: source file, structural path, operation, final hints with origin, and the provider JSON payload. With `--dry-run`, print only. Without it, the run still calls the API (session flag) |
+| `--preview-path JSON` | Exact structural path as a JSON array (`["flat.key"]`, `["flat","key"]`, `["items",0,"name"]`). Repeatable. Filters the preview only (session flag) |
+| `--preview-limit N` | Non-negative maximum number of preview requests across all files and stages. Default: unlimited; `0` emits none. Does not limit processing or API calls (session flag) |
+| `--preview-output PATH` | Write the same preview as JSONL. Does not by itself print to stdout (session flag) |
 | `--llm-config PATH` | Alternate profile, cwd-relative (JSON targets only) |
+| `--context PATH` | Key-context TOML (else `context.toml` beside the target, else beside the program, else none; JSON targets only) |
 | `--glossary PATH` | Glossary JSON (else `glossary.json` beside target, else empty; JSON targets only) |
 | `--verb LEVEL` | Log level override (session flag; also overrides manifest `verb`) |
 | `--result2target` | Write `result/` next to the target (JSON targets only) |
@@ -37,8 +48,16 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
 `run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary/draft
 errors, exit `3` when a resolved profile/config fails to load (same as a real
 `run`). On success it prints an effective-settings table (index, original,
-draft, stage, strict, llm_config, glossary, result paths). During dry-run,
-duplicate object keys in originals and drafts emit one WARNING per file
+draft, stage, strict, llm_config, glossary, context, result paths).
+`--preview-prompts` with `--dry-run` then prints the provider JSON payload of
+every shown leaf and still makes no API call and writes no results.
+`--preview-path` and `--preview-limit` choose which of those requests are
+shown; they do not change the set of processed resources, the number of real
+calls, or input preflight. Using either without `--preview-prompts` or
+`--preview-output` is exit 2. `--preview-output` writes one JSON object per
+shown request and does not print that preview to stdout unless
+`--preview-prompts` is also set.
+During dry-run, duplicate object keys in originals and drafts emit one WARNING per file
 (last value wins) and do **not** fail the plan. Dry-run does not acquire locks
 or report lock contention. There is no `plan` / `inspect` command and no
 `dry_run` field in the manifest (unknown key → exit 2).
@@ -54,7 +73,7 @@ writes no results.
 
 | Fault | Stages | Dry-run | Real run |
 |---|---|---|---|
-| Manifest / path / glossary / result-ownership contract | any | exit `2` | exit `2` |
+| Manifest / path / glossary / context / result-ownership contract | any | exit `2` | exit `2` |
 | Unreadable or invalid original JSON | any | exit `2` | exit `2` |
 | Root JSON `null` (original) | any | exit `2` | exit `2` |
 | Draft missing / unreadable / structure or marker mismatch | verify via `draft` | exit `2` | exit `2` |
@@ -84,12 +103,14 @@ stage = "all"          # all | translate | verify
 strict = false
 llm_config = "llm.toml"
 glossary = "glossary.json"
+context = "context.toml"
 
 [[targets]]
 original = "dialogs/ui.json"
 # draft = "drafts/ui.ru.json"   # implies verify; do not set stage here
 # llm_config = "profiles/editor-a.toml"
 # glossary = "glossaries/matrix.json"
+# context = "contexts/dialog.toml"
 # strict = true
 
 [[targets]]
@@ -100,13 +121,14 @@ llm_config = "profiles/mechanics.toml"
 ### Precedence B (manifest target)
 
 Job fields come **only** from the manifest: `stage`, `strict`, `llm_config`,
-`glossary`, `result2target`, `cache2target`, plus per-target `original` /
+`glossary`, `context`, `result2target`, `cache2target`, plus per-target `original` /
 `draft` / overrides. Any **passed** job CLI flag with a `.toml` target →
 **exit 2** (not quiet ignore). Session flags still apply: `--verb`,
-`--no-cache`, `--dry-run`.
+`--no-cache`, `--dry-run`, `--preview-prompts`, `--preview-path`,
+`--preview-limit`, `--preview-output`.
 
 Effective settings per target: `target ?? run ?? default`. Paths
-(`original`, `draft`, manifest-relative `llm_config` / `glossary`) are
+(`original`, `draft`, manifest-relative `llm_config` / `glossary` / `context`) are
 relative to the manifest directory, must not use `..` to escape it, and are
 validated for the whole manifest before inference (1-based `[[targets]]`
 index in errors). Duplicate `original` after normpath/normcase and
@@ -152,6 +174,21 @@ unset everywhere → `glossary.json` beside the manifest, else empty. CLI
 `--glossary` is forbidden (precedence B).
 
 A found but invalid file is an error. Source is always logged at INFO.
+
+## Key-context resolution
+
+**JSON target:** `--context PATH` (missing → exit 2) → else `context.toml`
+beside the target → else `context.toml` beside the program (`init`) → else
+no key context.
+
+**Run manifest:** `context` on the target or run (manifest-relative); if
+unset everywhere → `context.toml` beside the manifest when that file exists,
+else the program file. CLI `--context` is forbidden (precedence B).
+
+A found but invalid file exits 2. The selected file is the whole catalog:
+it is not merged with the program file, and omitted `[[rules]]` are not
+filled back in. Source is logged at INFO. `check` validates the program
+file when it exists (invalid → exit 3); absence is success.
 
 ## Result layout
 
@@ -200,7 +237,7 @@ uses this priority order.
 | `0` | Success; failure ratios within threshold |
 | `1` | Unexpected exception |
 | `2` | Usage / target / manifest / glossary / result ownership |
-| `3` | Config invalid or `init` refused overwrite |
+| `3` | Config invalid, or `init` could not write a template |
 | `4` | Preflight API unavailable |
 | `5` | Request or file failure ratio above `[resilience].max_failure_ratio`, or any degraded leaf when `[resilience].fail_on_any_error` is true |
 | `6` | Consecutive-failure circuit breaker tripped |
@@ -223,3 +260,61 @@ OS-level non-blocking locks on the target, cache dir (when cache enabled),
 and shared result root. Heartbeat JSON: `{cache_dir}/progress_state.json`
 (written even with `--no-cache`) for external monitors — report only, not
 the process exit authority.
+
+Read `last_progress_at`, `progress.leaves_done`, and `activity` for work
+done. `updated_at` and `elapsed_sec` also move on
+`[heartbeat].interval_sec` while a request or retry is waiting
+(`activity` is `waiting_api`) and do not mean another leaf finished.
+`last_progress_at` stays `null` until the first completed leaf.
+`schema_version` is still 1. `status` ends as `completed` (including a
+failed run, with `exit_code`) or `interrupted`, and the file is not
+rewritten after that.
+
+On Windows, readers should retry transient sharing violations when opening
+the snapshot during atomic replacement. Use bounded retries and report a
+persistent read failure; successfully read snapshots are complete JSON.
+
+
+## Prompt preview accuracy
+
+```bash
+llm-conductor run --target strings.json --stage translate --dry-run --preview-prompts
+llm-conductor run --target review.toml --dry-run --preview-prompts \
+  --preview-path '["flat.key"]' --preview-limit 20 --preview-output preview.jsonl
+```
+
+Preview and HTTP submission use the same payload builder, including masked
+leaf text, system message, context, glossary and provider-specific sampling.
+Each shown request names the source file, the operation, and the structural
+path as a JSON array, so a flat key `["flat.key"]` is distinct from a nested
+path `["flat","key"]` and from an array index. Final hints are listed per
+slot with where that text won: `exact` (a `[[leaves]]` row, named `leaf-<index>`),
+`rule` (a local `[[rules]]` entry or registered detector, by name), or
+`inherited` (the same rule on an ancestor, plus that parent's structural path).
+The listing explains the hint that was already chosen; it does not change
+which text wins a slot. Authentication headers are never printed. Preview
+does not contact or probe the endpoint. File-processing errors return a
+nonzero status (currently exit 1).
+
+`--preview-output` writes the same records as JSONL. Each line has `source`,
+`path` (segment array), `operation`, `hints` (`slot`, `text`, `origin`,
+`rule`, and `parent` when inherited), `payload`, `preliminary`, and `note`.
+A manifest run puts the source file's portable relative path in `source`.
+The destination is relative to the working directory. An existing export is
+replaced, not appended to; no matches or `--preview-limit 0` produces an empty
+file. Parent directories are created when the export is written. Export paths
+that alias an original, draft, manifest, or loaded configuration/glossary/context
+file, or lie inside this run's result, cache, or log directories, are rejected
+with exit 2 before any API calls. This also applies to dry-run. Write failures
+return a nonzero status and a real run's heartbeat records its final status.
+
+With `stage = "all"`, offline preview cannot know the future translation:
+the verification payload uses the original string as a placeholder, the log
+emits a warning, and each verification record sets `preliminary` with a note
+that the future translation is not yet known and the editor request is
+preliminary. Use verify with an existing translated result or a manifest
+`draft` for an exact verification payload. On a real run, verification
+previews use the actual translation and are not marked preliminary. Previews
+are printed before cache/dedup lookup, so a printed candidate payload does
+not imply that an HTTP call will be needed. A path filter or limit stops
+only this output.

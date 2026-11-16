@@ -3,10 +3,12 @@ import json
 import re
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from collections.abc import Mapping as AbcMapping
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Dict,
     FrozenSet,
@@ -16,7 +18,16 @@ from typing import (
     Union,
 )
 
-from llm_conductor.constants import GLOSSARY_DEFINITIONS_BLOCK_TEMPLATE
+from llm_conductor.constants import (
+    CONTEXT_MATCH_LAST,
+    CONTEXT_MATCH_PATH,
+    CONTEXT_MATCHES,
+    DEFAULT_CONTEXT_RULES,
+    GLOSSARY_DEFINITIONS_BLOCK_TEMPLATE,
+    HINT_ORIGIN_EXACT,
+    HINT_ORIGIN_INHERITED,
+    HINT_ORIGIN_RULE,
+)
 
 if TYPE_CHECKING:
     from llm_conductor.interfaces import ProcessorConfigProtocol
@@ -226,11 +237,21 @@ class LinguisticHint:
         instruction: English instruction text for the model.
         confidence: Detector confidence in ``[0.0, 1.0]``.
         priority: Application priority (higher wins when ordering hints).
+        slot: Context channel. Defaults to ``hint_type.value``. One text per slot.
+        origin: Why this text won the slot: ``exact``, ``rule``, or ``inherited``.
+            Empty on hints built outside the analyzer.
+        rule_name: Name of the matching rule or registered detector.
+        parent_path: ``KeyPath.report_key()`` of the ancestor that supplied an
+            inherited hint. Empty otherwise.
     """
     hint_type: HintType
     instruction: str
     confidence: float = 1.0
     priority: int = 0
+    slot: str = ""
+    origin: str = ""
+    rule_name: str = ""
+    parent_path: str = ""
 
     def __post_init__(self):
         """Validate fields on construction."""
@@ -240,21 +261,183 @@ class LinguisticHint:
         if not self.instruction.strip():
             raise ValueError("instruction cannot be empty")
 
+        if not self.slot:
+            object.__setattr__(self, "slot", self.hint_type.value)
+
     def __lt__(self, other: 'LinguisticHint') -> bool:
         """Order by priority (used when sorting hints)."""
         return self.priority < other.priority
 
+
+def hint_type_for_slot(slot: str) -> HintType:
+    """Map a slot name onto HintType when the name is one of the enum values."""
+    for item in HintType:
+        if item.value == slot:
+            return item
+    return HintType.CUSTOM
+
+
+@dataclass(frozen=True)
+class ContextRule:
+    """One compiled key-context rule from context.toml."""
+
+    name: str
+    match: str
+    pattern: 're.Pattern[str]'
+    slot: str
+    priority: int
+    text: str
+    exact_path: Optional[KeyPath] = None
+
+    def matches(self, key_path: KeyPath) -> bool:
+        """True when this rule's regex matches the last segment or the full path."""
+        if self.exact_path is not None:
+            return key_path == self.exact_path
+        if self.match == CONTEXT_MATCH_PATH:
+            subject = str(key_path)
+        else:
+            last = key_path.get_last_segment()
+            if not isinstance(last, str):
+                return False
+            subject = last
+        return self.pattern.search(subject) is not None
+
+    def as_hint(self) -> LinguisticHint:
+        """The hint this rule contributes when it matches."""
+        origin = HINT_ORIGIN_EXACT if self.exact_path is not None else HINT_ORIGIN_RULE
+        return LinguisticHint(
+            hint_type=hint_type_for_slot(self.slot),
+            instruction=self.text,
+            priority=self.priority,
+            slot=self.slot,
+            origin=origin,
+            rule_name=self.name,
+        )
+
+
+def compile_context_rules(
+        rows: Tuple[AbcMapping[str, Any], ...],
+        templates: Optional[AbcMapping[str, AbcMapping[str, Any]]] = None,
+) -> Tuple[ContextRule, ...]:
+    """
+    Check rule rows and compile their patterns.
+
+    Args:
+        rows: Normalized ``[[rules]]`` rows (name, match, pattern, slot, priority, text, template, value).
+        templates: ``[templates.<name>]`` entries mapping to ``{"text": ...}``.
+
+    Returns:
+        Compiled rules in file order.
+
+    Raises:
+        ValueError: On a blank name, unknown match, bad regex, or text/template conflict.
+    """
+    templates = templates or {}
+    compiled: List[ContextRule] = []
+    seen_names = set()
+    for index, row in enumerate(rows):
+        name = str(row.get("name", "")).strip()
+        where = f"[[rules]][{index}]" + (f" ({name})" if name else "")
+        if not name:
+            raise ValueError(f"{where}: name is required")
+        if name in seen_names:
+            raise ValueError(f"{where}: duplicate rule name '{name}'")
+        seen_names.add(name)
+
+        match = str(row.get("match", "")).strip()
+        if match not in CONTEXT_MATCHES:
+            raise ValueError(f"{where}: match must be {CONTEXT_MATCH_LAST} or {CONTEXT_MATCH_PATH}, got {match!r}")
+
+        slot = str(row.get("slot", "")).strip()
+        if not slot:
+            raise ValueError(f"{where}: slot is required")
+
+        text = str(row.get("text", "")).strip()
+        template_name = str(row.get("template", "")).strip()
+        if bool(text) == bool(template_name):
+            raise ValueError(f"{where}: set exactly one of text or template")
+        if template_name:
+            entry = templates.get(template_name)
+            if not isinstance(entry, AbcMapping) or not str(entry.get("text", "")).strip():
+                raise ValueError(f"{where}: unknown template '{template_name}'")
+            value = str(row.get("value", ""))
+            text = str(entry["text"]).replace("{value}", value).strip()
+            if not text:
+                raise ValueError(f"{where}: template '{template_name}' produced an empty text")
+
+        try:
+            pattern = re.compile(str(row.get("pattern", "")))
+        except re.error as exc:
+            raise ValueError(f"{where}: pattern does not compile: {exc}") from exc
+
+        compiled.append(ContextRule(
+            name=name,
+            match=match,
+            pattern=pattern,
+            slot=slot,
+            priority=int(row.get("priority", 0)),
+            text=text,
+        ))
+    return tuple(compiled)
+
+
+def compile_leaf_context(
+        rows: Tuple[AbcMapping[str, Any], ...],
+        templates: Optional[AbcMapping[str, AbcMapping[str, Any]]] = None,
+) -> Tuple[ContextRule, ...]:
+    """Compile exact leaf mappings; reject ambiguous or duplicate path/slot pairs.
+
+    Args:
+        rows: Schema-validated ``[[leaves]]`` rows with JSON-array paths.
+        templates: Reusable context text templates.
+
+    Returns:
+        Rules that match structural paths, without ancestor inheritance.
+
+    Raises:
+        ValueError: If a path, slot or context text is invalid or duplicated.
+    """
+    result = []
+    seen = set()
+    for index, row in enumerate(rows):
+        try:
+            segments = json.loads(row.get('path', ''))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"[[leaves]][{index}]: path must be a JSON array") from exc
+        if not isinstance(segments, list) or any(
+            not isinstance(segment, (str, int)) or isinstance(segment, bool)
+            or (isinstance(segment, int) and segment < 0) for segment in segments
+        ):
+            raise ValueError(f"[[leaves]][{index}]: path must contain string keys or non-negative indices")
+        path = KeyPath(tuple(segments))
+        identity = (path, str(row.get('slot', '')).strip())
+        if identity in seen:
+            raise ValueError(f"[[leaves]][{index}]: duplicate path/slot {identity}")
+        seen.add(identity)
+        rule_row = dict(row, name=f"leaf-{index}", match=CONTEXT_MATCH_PATH, pattern='')
+        rule = compile_context_rules((rule_row,), templates)[0]
+        result.append(replace(rule, exact_path=path))
+    return tuple(result)
+
+
+def default_context_rules() -> Tuple[ContextRule, ...]:
+    """The catalog ``init`` writes, compiled. Runtime does not apply this unless a file is loaded."""
+    rows = tuple(
+        {"name": name, "match": match, "pattern": pattern, "slot": slot, "priority": priority, "text": text}
+        for name, match, pattern, slot, priority, text in DEFAULT_CONTEXT_RULES
+    )
+    return compile_context_rules(rows)
+
+
 class LinguisticContext:
     """
-    Thread-safe analyzer of JSON key paths, extracting linguistic patterns.
+    Thread-safe analyzer of JSON key paths.
 
-    Supported patterns (extensible via register_pattern()):
-      - Plurals: *_plural, *_many, *_few, *_zero, count_*
-      - Gender: *_male, *_female, *_m, *_f, speaker_male, speaker_female
-      - Formality: *_formal, *_informal
+    Rules come from a loaded context.toml (``rules``). ``register_pattern()``
+    remains a programmatic hook. Nothing is matched when both are empty.
 
     Features:
-      - Custom detectors registered through register_pattern()
+      - One text per slot; file order, then registered detectors
       - Unknown patterns logged automatically (see _log_unknown_pattern())
       - Two independent threading.Lock instances (_unknown_lock, _cache_lock)
       - LRU cache of analysis results
@@ -265,13 +448,16 @@ class LinguisticContext:
     the same rule: it releases _unknown_lock before logging, so the logger
     call below never runs with the lock held.
     """
-    
-    def __init__(self, config: 'ProcessorConfigProtocol'):
+
+    def __init__(self, config: 'ProcessorConfigProtocol',
+                 rules: Tuple[ContextRule, ...] = ()):
         """
         Args:
             config: Processor-facing config (logger and related settings).
+            rules: Compiled context.toml rules. Empty means no key context.
         """
         self.config = config
+        self._rules = tuple(rules)
 
         # name -> detector
         self._pattern_rules: Dict[str, Callable[[KeyPath], Optional[LinguisticHint]]] = {}
@@ -281,17 +467,9 @@ class LinguisticContext:
         self._unknown_lock = threading.Lock()
 
         # LRU of analysis results.
-        self._analysis_cache: OrderedDict[str, List[LinguisticHint]] = OrderedDict()
+        self._analysis_cache: OrderedDict[KeyPath, List[LinguisticHint]] = OrderedDict()
         self._cache_max_size = 5000
         self._cache_lock = threading.Lock()
-
-        self._register_builtin_patterns()
-
-    def _register_builtin_patterns(self):
-        """Register the built-in plural / gender / formality detectors."""
-        self.register_pattern("plural", self._detect_plural)
-        self.register_pattern("gender", self._detect_gender)
-        self.register_pattern("formality", self._detect_formality)
 
     def register_pattern(self, name: str, detector: Callable[[KeyPath], Optional[LinguisticHint]]):
         """
@@ -332,33 +510,23 @@ class LinguisticContext:
         Returns:
             LinguisticHint list sorted by priority (descending).
         """
-        cache_key = str(key_path)
+        cache_key = key_path
 
         with self._cache_lock:
             if cache_key in self._analysis_cache:
                 self._analysis_cache.move_to_end(cache_key)
                 return self._analysis_cache[cache_key]
 
-        hints = []
-        seen_types = set()
+        hints: List[LinguisticHint] = []
+        seen_slots: set = set()
 
         try:
-            # 1. Local analysis (current segment only).
-            for rule_name, detector in self._pattern_rules.items():
-                try:
-                    hint = detector(key_path)
-                    if hint and hint.hint_type not in seen_types:
-                        hints.append(hint)
-                        seen_types.add(hint.hint_type)
-                except Exception as e:  # noqa: BLE001 - a broken detector must not abort analysis
-                    self.config.logger.warning(
-                        f"Pattern detector '{rule_name}' failed for {key_path}: {e}"
-                    )
+            # 1. Local analysis: file rules, then registered detectors.
+            self._collect_on(key_path, seen_slots, hints)
 
-            # 2. Vertical scan of ancestors when some hint types are still missing.
-            if len(seen_types) < len(HintType):
-                inherited_hints = self._scan_ancestors(key_path, seen_types)
-                hints.extend(inherited_hints)
+            # 2. Ancestors fill slots the leaf did not.
+            inherited_hints = self._scan_ancestors(key_path, seen_slots)
+            hints.extend(inherited_hints)
 
             hints.sort(reverse=True)
 
@@ -366,8 +534,8 @@ class LinguisticContext:
             if not hints and self._is_suspicious_key(key_path):
                 self._log_unknown_pattern(key_path)
 
-            if self.config.is_debug_mode and any(h.priority < 10 for h in hints):
-                inherited = [h for h in hints if h.priority < 10]
+            if self.config.is_debug_mode:
+                inherited = [h for h in hints if h.instruction.startswith("(inherited from parent) ")]
                 if inherited:
                     self.config.logger.debug(
                         f"Inherited {len(inherited)} hint(s) from ancestors for {key_path}"
@@ -386,19 +554,49 @@ class LinguisticContext:
 
         return hints
 
-    def _scan_ancestors(self, key_path: KeyPath, skip_types: set) -> List[LinguisticHint]:
+    def _collect_on(self, key_path: KeyPath, seen_slots: set, hints: List[LinguisticHint],
+                    *, inherit: bool = False) -> None:
+        """Append the first hit per slot from file rules, then from registered detectors."""
+        for rule in self._rules:
+            if rule.slot in seen_slots or (inherit and rule.exact_path is not None):
+                continue
+            try:
+                if rule.matches(key_path):
+                    hint = rule.as_hint()
+                    hints.append(hint)
+                    seen_slots.add(rule.slot)
+            except Exception as e:  # noqa: BLE001 - a broken rule must not abort analysis
+                self.config.logger.warning(f"Context rule '{rule.name}' failed for {key_path}: {e}")
+
+        for rule_name, detector in self._pattern_rules.items():
+            try:
+                detected = detector(key_path)
+                if detected is not None and detected.slot not in seen_slots:
+                    detected = replace(
+                        detected,
+                        origin=detected.origin or HINT_ORIGIN_RULE,
+                        rule_name=detected.rule_name or rule_name,
+                    )
+                    hints.append(detected)
+                    seen_slots.add(detected.slot)
+            except Exception as e:  # noqa: BLE001 - a broken detector must not abort analysis
+                self.config.logger.warning(
+                    f"Pattern detector '{rule_name}' failed for {key_path}: {e}"
+                )
+
+    def _scan_ancestors(self, key_path: KeyPath, skip_slots: set) -> List[LinguisticHint]:
         """
         Scan ancestor segments for inherited hints.
 
         Algorithm:
         1. List ancestors from root to the current node.
-        2. Run detectors on each ancestor (nearest parent first).
+        2. Run rules and detectors on each ancestor (nearest parent first).
         3. Lower inherited priority by 5 and confidence by 0.8×.
-        4. Skip hint types already found locally (``skip_types``).
+        4. Skip slots already filled (``skip_slots``, mutated in place).
 
         Args:
             key_path: Leaf path being analyzed.
-            skip_types: HintType set already satisfied locally (mutated in place).
+            skip_slots: Slot names already satisfied (mutated in place).
 
         Returns:
             Inherited LinguisticHint list with reduced priority.
@@ -411,221 +609,37 @@ class LinguisticContext:
             if not ancestor_path.segments:  # Skip root.
                 continue
 
-            for rule_name, detector in self._pattern_rules.items():
-                try:
-                    hint = detector(ancestor_path)
-
-                    if hint and hint.hint_type not in skip_types:
-                        inherited_hint = LinguisticHint(
-                            hint_type=hint.hint_type,
-                            instruction=f"(inherited from parent) {hint.instruction}",
-                            confidence=hint.confidence * 0.8,
-                            priority=max(hint.priority - 5, 1),
-                        )
-
-                        inherited_hints.append(inherited_hint)
-                        skip_types.add(hint.hint_type)
-
-                        if self.config.is_debug_mode:
-                            self.config.logger.debug(
-                                f"Inherited {hint.hint_type.value} from '{ancestor_path}' "
-                                f"for leaf '{key_path}'"
-                            )
-
-                except Exception as e:  # noqa: BLE001 - same policy as analyze(): skip this detector
-                    self.config.logger.warning(
-                        f"Pattern detector '{rule_name}' failed while scanning "
-                        f"ancestor '{ancestor_path}' for {key_path}: {e}"
+            found: List[LinguisticHint] = []
+            before = set(skip_slots)
+            self._collect_on(ancestor_path, skip_slots, found, inherit=True)
+            for hint in found:
+                if hint.slot in before:
+                    continue
+                inherited_hint = LinguisticHint(
+                    hint_type=hint.hint_type,
+                    instruction=f"(inherited from parent) {hint.instruction}",
+                    confidence=hint.confidence * 0.8,
+                    priority=max(hint.priority - 5, 1),
+                    slot=hint.slot,
+                    origin=HINT_ORIGIN_INHERITED,
+                    rule_name=hint.rule_name,
+                    parent_path=ancestor_path.report_key(),
+                )
+                inherited_hints.append(inherited_hint)
+                if self.config.is_debug_mode:
+                    self.config.logger.debug(
+                        f"Inherited {hint.slot} from '{ancestor_path}' for leaf '{key_path}'"
                     )
 
         return inherited_hints
 
-    def _detect_plural(self, key_path: KeyPath) -> Optional[LinguisticHint]:
-        """
-        Detect number (plural/singular/few/zero/countable) from the key suffix.
-
-        Matches are anchored to the end of the last segment (`endswith`), not
-        a substring search - otherwise e.g. "button_name" would spuriously
-        match "_n" and "phone_number" would match "_m".
-
-        Patterns:
-          - *_plural / *_many / *_multiple -> many items
-          - *_single / *_one / *_singular -> one item
-          - *_few -> few items
-          - *_zero / *_none / *_empty -> zero items
-          - count_* -> countable form
-        """
-        last = key_path.get_last_segment()
-        if not isinstance(last, str):
-            return None
-
-        last_lower = last.lower()
-
-        # Plural
-        if any(last_lower.endswith(suffix) for suffix in ['_plural', '_many', '_multiple']):
-            return LinguisticHint(
-                hint_type=HintType.PLURAL,
-                instruction="Translate in PLURAL form (many items) if the target language distinguishes number",
-                confidence=1.0,
-                priority=5
-            )
-
-        # Singular
-        if any(last_lower.endswith(suffix) for suffix in ['_single', '_one', '_singular']):
-            return LinguisticHint(
-                hint_type=HintType.PLURAL,
-                instruction="Translate in SINGULAR form (one item) if the target language distinguishes number",
-                confidence=1.0,
-                priority=5
-            )
-
-        # Small count (e.g. 2-4, for languages with a dedicated "few" form)
-        if last_lower.endswith('_few'):
-            return LinguisticHint(
-                hint_type=HintType.PLURAL,
-                instruction="Translate for FEW items (a small count, e.g. 2-4) if the target language has a "
-                            "dedicated form for it",
-                confidence=0.9,
-                priority=5
-            )
-
-        # Zero items
-        if any(last_lower.endswith(suffix) for suffix in ['_zero', '_none', '_empty']):
-            return LinguisticHint(
-                hint_type=HintType.PLURAL,
-                instruction="Translate for ZERO items (no items) if the target language has a distinct form for it",
-                confidence=0.9,
-                priority=5
-            )
-
-        # count_ prefix
-        if last_lower.startswith('count_'):
-            return LinguisticHint(
-                hint_type=HintType.PLURAL,
-                instruction="Translate as a COUNTABLE noun",
-                confidence=0.8,
-                priority=3
-            )
-
-        return None
-
-    def _detect_gender(self, key_path: KeyPath) -> Optional[LinguisticHint]:
-        """
-        Detect grammatical gender from the key suffix.
-
-        Matches are anchored to the end of the last segment (`endswith`), not
-        a substring search. The speaker_male/speaker_female prefix
-        is checked first and wins over the generic suffix rules below: a key
-        like "speaker_female" also legitimately ends with "_female", so
-        checking the generic rule first would make this specific branch
-        unreachable.
-
-        Patterns:
-          - speaker_male / speaker_female -> speaker's own gender
-          - *_male / *_m / *_masculine -> masculine
-          - *_female / *_f / *_feminine -> feminine
-          - *_neutral / *_n / *_neuter -> neuter
-        """
-        last = key_path.get_last_segment()
-        if not isinstance(last, str):
-            return None
-
-        last_lower = last.lower()
-
-        # speaker_* has its own wording and takes priority over the generic
-        # suffix rules below.
-        if last_lower.startswith('speaker_'):
-            if last_lower.endswith('_male'):
-                return LinguisticHint(
-                    hint_type=HintType.GENDER,
-                    instruction="Speaker is MALE - use masculine verb endings and pronouns if the target "
-                                "language marks gender there",
-                    confidence=1.0,
-                    priority=10
-                )
-            if last_lower.endswith('_female'):
-                return LinguisticHint(
-                    hint_type=HintType.GENDER,
-                    instruction="Speaker is FEMALE - use feminine verb endings and pronouns if the target "
-                                "language marks gender there",
-                    confidence=1.0,
-                    priority=10
-                )
-
-        # Masculine
-        if any(last_lower.endswith(suffix) for suffix in ['_male', '_m', '_masculine']):
-            return LinguisticHint(
-                hint_type=HintType.GENDER,
-                instruction="Use MASCULINE grammatical forms if the target language has grammatical gender "
-                            "(male speaker/subject)",
-                confidence=1.0,
-                priority=10
-            )
-
-        # Feminine
-        if any(last_lower.endswith(suffix) for suffix in ['_female', '_f', '_feminine']):
-            return LinguisticHint(
-                hint_type=HintType.GENDER,
-                instruction="Use FEMININE grammatical forms if the target language has grammatical gender "
-                            "(female speaker/subject)",
-                confidence=1.0,
-                priority=10
-            )
-
-        # Neuter
-        if any(last_lower.endswith(suffix) for suffix in ['_neutral', '_n', '_neuter']):
-            return LinguisticHint(
-                hint_type=HintType.GENDER,
-                instruction="Use NEUTER grammatical forms if the target language has grammatical gender",
-                confidence=0.9,
-                priority=10
-            )
-
-        return None
-
-    def _detect_formality(self, key_path: KeyPath) -> Optional[LinguisticHint]:
-        """
-        Detect formal/informal address from the key suffix.
-
-        Matches are anchored to the end of the last segment (`endswith`), not
-        a substring search.
-
-        Patterns:
-          - *_formal / *_polite / *_respectful -> formal address
-          - *_informal / *_casual / *_friendly -> informal address
-        """
-        last = key_path.get_last_segment()
-        if not isinstance(last, str):
-            return None
-
-        last_lower = last.lower()
-
-        if any(last_lower.endswith(suffix) for suffix in ['_formal', '_polite', '_respectful']):
-            return LinguisticHint(
-                hint_type=HintType.FORMALITY,
-                instruction="Use FORMAL address forms if the target language distinguishes formal/informal "
-                            "address (formal tone)",
-                confidence=0.9,
-                priority=7
-            )
-
-        if any(last_lower.endswith(suffix) for suffix in ['_informal', '_casual', '_friendly']):
-            return LinguisticHint(
-                hint_type=HintType.FORMALITY,
-                instruction="Use INFORMAL address forms if the target language distinguishes formal/informal "
-                            "address (casual tone)",
-                confidence=0.9,
-                priority=7
-            )
-
-        return None
     
     def _is_suspicious_key(self, key_path: KeyPath) -> bool:
         """
         Heuristic: whether a key looks like an unknown linguistic pattern.
 
         Suspicious when any of:
-          - a ``_``-suffix of length >= 3 that is not a known detector suffix
+          - a ``_``-suffix of length >= 3 (the catalog no longer lives in code)
           - a system-like prefix (``meta_``, ``sys_``, ``internal_``, ``config_``, …)
           - special characters in the key name (other than ``_`` / word chars)
 
@@ -642,18 +656,7 @@ class LinguisticContext:
         last_lower = last.lower()
 
         if re.search(r'_[a-z]{3,}$', last_lower):
-            known_suffixes = [
-                'plural', 'single', 'many', 'few', 'zero',
-                'male', 'female', 'neutral',
-                'formal', 'informal',
-                'name', 'desc', 'text', 'title'
-            ]
-
-            match = re.search(r'_([a-z]{3,})$', last_lower)
-            if match:
-                suffix = match.group(1)
-                if suffix not in known_suffixes:
-                    return True
+            return True
 
         if re.match(r'^(meta|sys|internal|config|debug|temp)_', last_lower):
             return True
@@ -688,8 +691,8 @@ class LinguisticContext:
             f"  Path: {key_path}\n"
             f"  Last segment: '{last_segment}'\n"
             f"  Action: Proceeding with default translation (no linguistic hints)\n"
-            f"  Recommendation: If this is a recurring pattern, consider extending\n"
-            f"                  LinguisticContext.register_pattern() with custom detector"
+            f"  Recommendation: If this is a recurring pattern, add a [[rules]] entry\n"
+            f"                  in context.toml"
         )
     
     def get_unknown_patterns(self) -> FrozenSet[str]:

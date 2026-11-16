@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
+from llm_conductor.cli.context_file import ContextSource
 from llm_conductor.cli.draft_validate import compare_json_structure
 from llm_conductor.cli.exit_status import ExitStatus
 from llm_conductor.cli.glossary import GlossaryResolver, GlossarySource
@@ -33,6 +34,8 @@ from llm_conductor.constants import (
     EXIT_INTERRUPTED,
     EXIT_SUCCESS,
     EXIT_TARGET_LOCKED,
+    HEARTBEAT_ACTIVITY_PROCESSING,
+    HEARTBEAT_ACTIVITY_WAITING_API,
     HEARTBEAT_STATUS_COMPLETED,
     HEARTBEAT_STATUS_INTERRUPTED,
     MODE_STRICT,
@@ -50,6 +53,7 @@ from llm_conductor.constants import (
     USAGE_REPORT_FILENAME,
 )
 from llm_conductor.core.api_client import translate_key, verify_key
+from llm_conductor.core.cache import format_sampling_omission
 from llm_conductor.core.io import safe_read_file, safe_write_file
 from llm_conductor.core.leaf_report import legacy_sidecar_v1_reason
 from llm_conductor.core.locking import FileLock
@@ -65,6 +69,7 @@ from llm_conductor.interfaces import (
     HeartbeatProgressProtocol,
     RuntimeConfigFactoryProtocol,
 )
+from llm_conductor.l10n.preview import PreviewSelection
 from llm_conductor.l10n.processor import process_stage_recursive
 
 
@@ -143,20 +148,31 @@ class FilePipeline:
     """
 
     def __init__(self, config: ConfigProtocol, layout: ResultLayout,
-                 heartbeat: Optional[HeartbeatProgressProtocol] = None):
+                 heartbeat: Optional[HeartbeatProgressProtocol] = None,
+                 *,
+                 preview_prompts: bool = False,
+                 preview_only: bool = False,
+                 preview: Optional[PreviewSelection] = None):
         """
         Args:
             config: Configuration of the run (logger, caches, resilience).
             layout: Where results are written.
             heartbeat: Optional progress ticks for process_stage_recursive.
+            preview_prompts: Print the effective user prompt of each shown leaf.
+            preview_only: Print prompts and skip the model, the cache and result writes.
+            preview: Shared path filter, limit, and JSONL sink. Emission only.
         """
         self._config = config
         self._layout = layout
         self._heartbeat = heartbeat
+        self._preview_prompts = preview_prompts
+        self._preview_only = preview_only
+        self._preview = preview
 
     def process(self, entry: TargetEntry, options: RunOptions,
                 glossary: Dict[str, str],
-                runtime_configs: Dict[str, dict]) -> FileOutcome:
+                runtime_configs: Dict[str, dict],
+                context_rules: Tuple = ()) -> FileOutcome:
         """
         Process one file; never raises for a problem of this file alone.
 
@@ -171,7 +187,7 @@ class FilePipeline:
         """
         logger = self._config.logger
         try:
-            return self._process(entry, options, glossary, runtime_configs)
+            return self._process(entry, options, glossary, runtime_configs, context_rules)
         except (FileOperationError, OSError) as e:
             logger.error(f"{entry.relative_path}: {e}")
             return FileOutcome(entry, FileStatus.FAILED)
@@ -181,7 +197,8 @@ class FilePipeline:
 
     def _process(self, entry: TargetEntry, options: RunOptions,
                  glossary: Dict[str, str],
-                 runtime_configs: Dict[str, dict]) -> FileOutcome:
+                 runtime_configs: Dict[str, dict],
+                 context_rules: Tuple = ()) -> FileOutcome:
         """
         The stages of one file.
 
@@ -199,8 +216,9 @@ class FilePipeline:
         if options.translates:
             data = self._run_stage(
                 entry, STAGE_TRANSLATED, data, source, translate_key,
-                OPERATION_TRANSLATION, glossary, runtime_configs)
-            self._write_leaves_sidecar(entry)
+                OPERATION_TRANSLATION, glossary, runtime_configs, context_rules)
+            if not self._preview_only:
+                self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_TRANSLATION):
                 return self._abort(entry, data, OPERATION_TRANSLATION)
 
@@ -217,11 +235,17 @@ class FilePipeline:
                     self._load_leaves_sidecar(entry)
             data = self._run_stage(
                 entry, STAGE_REDACTED, data, source, verify_key,
-                OPERATION_VERIFICATION, glossary, runtime_configs)
-            if options.translates or self._config.leaf_outcomes.sidecar_was_merged():
+                OPERATION_VERIFICATION, glossary, runtime_configs, context_rules,
+                verification_preliminary=self._preview_only and options.translates)
+            if not self._preview_only and (
+                options.translates or self._config.leaf_outcomes.sidecar_was_merged()
+            ):
                 self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_VERIFICATION):
                 return self._abort(entry, data, OPERATION_VERIFICATION)
+
+        if self._preview_only:
+            return FileOutcome(entry, FileStatus.DONE)
 
         final_path = self._write_final(entry, data)
         self._config.logger.info(f"Final output saved to {final_path}")
@@ -230,10 +254,14 @@ class FilePipeline:
     def _run_stage(self, entry: TargetEntry, stage: str, data: Any, source: Any,
                    process_func: StageFunction, operation_type: str,
                    glossary: Dict[str, str],
-                   runtime_configs: Dict[str, dict]) -> Any:
+                   runtime_configs: Dict[str, dict],
+                   context_rules: Tuple = (),
+                   *,
+                   verification_preliminary: bool = False) -> Any:
         """Run one stage over the tree and write its stage result."""
+        output_path = "" if self._preview_only else self._layout.prepare(stage, entry)
         return process_stage_recursive(
-            self._layout.prepare(stage, entry),
+            output_path,
             stage,
             data,
             source,  # the English source: glossary terms are matched against it
@@ -243,6 +271,11 @@ class FilePipeline:
             glossary,
             operation_type,
             runtime_config=dict(runtime_configs[operation_type]),
+            context_rules=context_rules,
+            preview_prompts=self._preview_prompts,
+            preview_only=self._preview_only,
+            preview=self._preview,
+            verification_preliminary=verification_preliminary,
             heartbeat=self._heartbeat,
         )
 
@@ -367,7 +400,12 @@ class TargetRunner:
                  factories: Mapping[str, RuntimeConfigFactoryProtocol],
                  endpoints: Mapping[str, ProfileEndpoints],
                  glossaries: Dict[Optional[str], GlossarySource],
-                 default_options: Optional[RunOptions] = None):
+                 contexts: Optional[Dict[Optional[str], ContextSource]] = None,
+                 default_options: Optional[RunOptions] = None,
+                 *,
+                 preview_prompts: bool = False,
+                 preview_only: bool = False,
+                 preview: Optional[PreviewSelection] = None):
         """
         Args:
             config: Bootstrap configuration (logger, caches, resilience).
@@ -385,7 +423,42 @@ class TargetRunner:
         self._factories = factories
         self._endpoints = endpoints
         self._glossaries = glossaries
+        self._contexts = contexts or {}
         self._default_options = default_options or RunOptions()
+        self._preview_prompts = preview_prompts
+        self._preview_only = preview_only
+        self._preview = preview
+        self._sampling_omission_logged: set[Tuple[str, str]] = set()
+
+    def _write_preview(self) -> bool:
+        """Write the preview JSONL when one was requested."""
+        if self._preview is None:
+            return True
+        return self._preview.write(self._config.file_ops, self._config.logger)
+
+    def preview(self) -> int:
+        """Print effective prompts for every selected stage. No locks, API or result writes."""
+        show_stdout = True if self._preview is None else self._preview.stdout
+        pipeline = FilePipeline(
+            self._config, self._layout,
+            preview_prompts=show_stdout, preview_only=True, preview=self._preview,
+        )
+        failed = False
+        for entry in self._target.entries:
+            options = self._options_for(entry)
+            if options.translates and options.verifies:
+                self._config.logger.warning(
+                    "Offline verification preview uses original text as a placeholder; "
+                    "use a translated draft for an exact verification request."
+                )
+            glossary = self._glossary_for(entry)
+            context = self._context_for(entry)
+            runtime_configs = self._runtime_configs_for(entry, options)
+            outcome = pipeline.process(entry, options, glossary.terms, runtime_configs, context.rules)
+            failed = failed or outcome.status != FileStatus.DONE
+        if not self._write_preview():
+            failed = True
+        return EXIT_INTERNAL_ERROR if failed else EXIT_SUCCESS
 
     def run(self) -> int:
         """
@@ -405,6 +478,7 @@ class TargetRunner:
         heartbeat = HeartbeatWriter(
             cache_dir=self._config.cache_dir,
             interval=self._config.heartbeat_interval,
+            interval_sec=self._config.heartbeat_interval_sec,
             file_ops=self._config.file_ops,
             logger=self._config.logger,
             target=self._target,
@@ -412,25 +486,40 @@ class TargetRunner:
             stages=union_ops,
             glossary=first_glossary,
         )
+        terminal_status = HEARTBEAT_STATUS_COMPLETED
         try:
-            with ExitStack() as locks:
-                self._acquire_locks(locks)
-                self._execute(status, heartbeat)
-        except RunInterrupted:
-            heartbeat.set_problems(status.records)
-            heartbeat.finalize(HEARTBEAT_STATUS_INTERRUPTED, EXIT_INTERRUPTED)
-            raise
-        except LockUnavailableError as e:
-            self._config.logger.error(f"{e}; exiting - a later run will pick the work up.")
-            status.record(EXIT_TARGET_LOCKED, str(e))
-        except ConfigValidationError as e:
-            self._config.logger.error(f"Runtime configuration is invalid: {e}")
-            status.record(EXIT_CONFIG_ERROR, str(e))
+            try:
+                with ExitStack() as locks:
+                    self._acquire_locks(locks)
+                    self._execute(status, heartbeat)
+            except LockUnavailableError as e:
+                self._config.logger.error(f"{e}; exiting - a later run will pick the work up.")
+                status.record(EXIT_TARGET_LOCKED, str(e))
+            except ConfigValidationError as e:
+                self._config.logger.error(f"Runtime configuration is invalid: {e}")
+                status.record(EXIT_CONFIG_ERROR, str(e))
 
+            if not self._write_preview():
+                status.record(EXIT_INTERNAL_ERROR, "failed to write the preview JSONL")
+        except RunInterrupted:
+            terminal_status = HEARTBEAT_STATUS_INTERRUPTED
+            status.record(EXIT_INTERRUPTED, "run interrupted")
+            try:
+                self._write_preview()
+            except Exception as exc:  # noqa: BLE001 - preserve the interruption
+                self._config.logger.warning(f"Could not save interrupted preview: {exc}")
+            raise
+        except Exception:
+            status.record(EXIT_INTERNAL_ERROR, "unexpected run failure")
+            raise
+        finally:
+            if heartbeat.started and not heartbeat.finalized:
+                heartbeat.set_problems(status.records)
+                heartbeat.finalize(
+                    terminal_status,
+                    EXIT_INTERRUPTED if terminal_status == HEARTBEAT_STATUS_INTERRUPTED else status.code,
+                )
         code = status.code
-        if heartbeat.started and not heartbeat.finalized:
-            heartbeat.set_problems(status.records)
-            heartbeat.finalize(HEARTBEAT_STATUS_COMPLETED, code)
         log = self._config.logger.info if code == EXIT_SUCCESS else self._config.logger.error
         log(f"Run finished with exit code {code}")
         return code
@@ -451,6 +540,12 @@ class TargetRunner:
     def _glossary_for(self, entry: TargetEntry) -> GlossarySource:
         """Glossary source for one entry."""
         return self._glossaries.get(entry.glossary_path, GlossarySource())
+
+    def _context_for(self, entry: TargetEntry) -> ContextSource:
+        """Context catalog for one entry."""
+        if entry.context_path is not None and entry.context_path in self._contexts:
+            return self._contexts[entry.context_path]
+        return self._contexts.get(None, ContextSource())
 
     def _union_operations(self) -> Tuple[str, ...]:
         """Union of operation types across all entries, in pipeline order."""
@@ -484,10 +579,13 @@ class TargetRunner:
         logger.info(f"  - Cache: {cache}")
         if self._target.is_manifest:
             logger.info("  - Glossary: per-target")
+            logger.info("  - Context: per-target")
         else:
             entry = self._target.entries[0] if self._target.entries else None
             glossary = self._glossary_for(entry) if entry else GlossarySource()
+            context = self._context_for(entry) if entry else ContextSource()
             logger.info(f"  - {glossary.describe()}")
+            logger.info(f"  - {context.describe()}")
         logger.info(f"  - Log level: {self._config.log_level}")
 
     def _acquire_locks(self, locks: ExitStack) -> None:
@@ -528,7 +626,15 @@ class TargetRunner:
             self._layout.claim_owner(self._target.path, config.file_ops, config.logger)
         heartbeat.start()
 
-        if not self._endpoints_available():
+        checking = config.preflight.check_availability
+        if checking:
+            heartbeat.set_activity(HEARTBEAT_ACTIVITY_WAITING_API)
+        try:
+            available = self._endpoints_available()
+        finally:
+            if checking:
+                heartbeat.set_activity(HEARTBEAT_ACTIVITY_PROCESSING)
+        if not available:
             status.record(EXIT_API_UNAVAILABLE, "an API endpoint is not available")
             return
 
@@ -563,6 +669,13 @@ class TargetRunner:
             verification['mode'] = MODE_VERIFICATION
             configs[OPERATION_VERIFICATION] = validate_runtime_config(
                 verification, self._config, OPERATION_VERIFICATION)
+        profile = self._profile_path_for(entry)
+        for operation_type, runtime in configs.items():
+            notice = format_sampling_omission(runtime)
+            logged = (profile, operation_type)
+            if notice is not None and logged not in self._sampling_omission_logged:
+                self._sampling_omission_logged.add(logged)
+                self._config.logger.info(f"{operation_type}: {notice}")
         return configs
 
     def _endpoints_available(self) -> bool:
@@ -579,9 +692,10 @@ class TargetRunner:
             config.logger.info("API availability check disabled ([preflight].check_availability = false)")
             return True
 
-        checked: List[Tuple[str, str]] = []
+        checked: set[Tuple[str, str, str, str, bool]] = set()
         for entry in self._target.entries:
             options = self._options_for(entry)
+            runtime_configs = self._runtime_configs_for(entry, options)
             ends = self._endpoints[self._profile_path_for(entry)]
             pairs = []
             if options.translates:
@@ -589,17 +703,23 @@ class TargetRunner:
             if options.verifies:
                 pairs.append((OPERATION_VERIFICATION, ends.verification))
             for operation_type, api in pairs:
-                if (api.url, api.model) in checked:
+                omitted = runtime_configs[operation_type]['omit_parameters']
+                probe_identity = (
+                    api.url, api.model, api.api_type, api.max_tokens_param,
+                    'num_predict' in omitted,
+                )
+                if probe_identity in checked:
                     continue
                 config.logger.info(f"Checking {operation_type} API availability "
                                    f"({os.path.basename(self._profile_path_for(entry))})...")
                 if not check_api_availability(api.url, api.model, api.api_type, config,
                                               api_key=api.api_key, timeout=config.preflight.timeout,
-                                              max_tokens_param=api.max_tokens_param):
+                                              max_tokens_param=api.max_tokens_param,
+                                              omit_parameters=omitted):
                     config.logger.error(f"{operation_type.capitalize()} API is not available. "
                                         f"Check the profile and the API server.")
                     return False
-                checked.append((api.url, api.model))
+                checked.add(probe_identity)
         return True
 
     def _process_files(self, status: ExitStatus,
@@ -610,13 +730,19 @@ class TargetRunner:
         Returns:
             The outcomes of the processed files.
         """
-        pipeline = FilePipeline(self._config, self._layout, heartbeat=heartbeat)
+        pipeline = FilePipeline(
+            self._config, self._layout, heartbeat=heartbeat,
+            preview_prompts=self._preview_prompts,
+            preview_only=self._preview_only,
+            preview=self._preview,
+        )
         entries = self._target.entries
         outcomes: List[FileOutcome] = []
 
         for index, entry in enumerate(entries, 1):
             options = self._options_for(entry)
             glossary = self._glossary_for(entry)
+            context = self._context_for(entry)
             runtime_configs = self._runtime_configs_for(entry, options)
 
             if self._target.is_manifest:
@@ -625,13 +751,16 @@ class TargetRunner:
                 self._config.logger.info(
                     f"  stage={options.stage} strict={options.strict} "
                     f"llm_config={entry.llm_config_path or '(bootstrap)'} "
-                    f"glossary={glossary.path or '(none)'}"
+                    f"glossary={glossary.path or '(none)'} "
+                    f"context={context.path or '(none)'}"
                     + (f" draft={entry.draft_path}" if entry.draft_path else "")
                 )
                 self._config.logger.info("=" * 70)
 
             heartbeat.on_file_start(entry, index)
-            outcome = pipeline.process(entry, options, glossary.terms, runtime_configs)
+            outcome = pipeline.process(
+                entry, options, glossary.terms, runtime_configs, context.rules,
+            )
             outcomes.append(outcome)
             heartbeat.on_file_done(entry.relative_path, outcome.status.value)
 

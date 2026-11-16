@@ -30,8 +30,9 @@ from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.leaf_report import make_degraded, make_ok
-from llm_conductor.exceptions import FileOperationError
-from llm_conductor.l10n.context import KeyPath, LinguisticContext
+from llm_conductor.exceptions import ConfigValidationError, FileOperationError
+from llm_conductor.l10n.context import KeyPath, LinguisticContext, default_context_rules
+from llm_conductor.l10n.preview import PreviewSelection
 from llm_conductor.l10n.processor import RecursiveProcessor, process_stage_recursive
 
 SAMPLE = {
@@ -113,7 +114,7 @@ class BadReplyModel:
 
 
 def _run(config, data, model, mode=MODE_STYLE, glossary=None, original=None, verification=False):
-    processor = RecursiveProcessor(config, LinguisticContext(config))
+    processor = RecursiveProcessor(config, LinguisticContext(config, default_context_rules()))
     runtime = config.get_verification_config() if verification else config.get_translation_config_for_mode(mode)
     result = processor.traverse(
         data=data,
@@ -647,7 +648,7 @@ def test_cached_value_is_unmasked_original_text(make_config):
 
 def _key_for_leaf(config, value, path=("t",), mode=MODE_STYLE):
     """Replay the key computation from _process_leaf for a leaf with no hints/glossary."""
-    processor = RecursiveProcessor(config, LinguisticContext(config))
+    processor = RecursiveProcessor(config, LinguisticContext(config, default_context_rules()))
     runtime = config.get_translation_config_for_mode(mode)
     prompt = processor._build_enhanced_prompt(runtime['prompt'], [], "", OPERATION_TRANSLATION)
     return config.cache_manager.create_cache_key(
@@ -1007,3 +1008,235 @@ def test_process_stage_recursive_writes_stage_file_and_reports(make_config, tmp_
         assert json.load(f) == result
     assert config.logger.contains("Translated stage completed in", level='INFO')
     assert config.logger.contains("Translation cache:", level='INFO')
+
+
+def test_resource_key_splits_cache_and_dedup_and_a_repeat_hits(make_config):
+    config = make_config(translation__prompts__style="Key {RESOURCE_KEY}\nText to translate:\n")
+    model = FakeModel()
+
+    result, processor = _run(config, {"a": "Hello", "b": "Hello"}, model)
+
+    assert result == {"a": "RU(Hello)", "b": "RU(Hello)"}
+    assert len(model.calls) == 2
+    assert processor.get_stats_summary()["deduplicated_leaves"] == 0
+    assert {call["prompt"].split("\n", 1)[0] for call in model.calls} == {"Key a", "Key b"}
+    assert config.cache_manager.get_stats(OPERATION_TRANSLATION)["cache_size"] == 2
+
+    again = FakeModel()
+    cached, _ = _run(config, {"a": "Hello", "b": "Hello"}, again)
+    assert cached == result
+    assert again.calls == []
+
+
+@pytest.mark.parametrize("leaf_key", ["a", ""])
+@pytest.mark.parametrize("verification", [False, True])
+def test_legacy_resource_key_cache_entry_is_not_reused(make_config, leaf_key, verification):
+    """An entry hashed with the marker removed must not answer a keyed request."""
+    config = make_config(translation__prompts__style="Key {RESOURCE_KEY}\nText to translate:\n")
+    processor = RecursiveProcessor(config, LinguisticContext(config, ()))
+    operation = OPERATION_VERIFICATION if verification else OPERATION_TRANSLATION
+    mode = MODE_VERIFICATION if verification else MODE_STYLE
+    runtime = config.get_verification_config() if verification else config.get_translation_config_for_mode(MODE_STYLE)
+    runtime["prompt"] = "Key {RESOURCE_KEY}\nText to process:\n"
+    enhanced = processor._build_enhanced_prompt(
+        runtime["prompt"], [], "", operation, "",
+    )
+    rules = runtime.get("processing", config.processing)
+    old_key = config.cache_manager.create_cache_key(
+        operation_type=operation,
+        model=runtime["model"],
+        system_prompt=runtime["system_prompt"],
+        enhanced_prompt=enhanced.replace("{RESOURCE_KEY}", ""),
+        mode=mode,
+        value="Hello",
+        sampling_identity=build_sampling_identity(runtime),
+        api_url=runtime.get("api_url", ""),
+        allowed_scripts=runtime.get("allowed_scripts", config.validation.allowed_scripts),
+        content_identity=rules.identity,
+    )
+    config.cache_manager.set(operation, old_key, "STALE", source_value="Hello")
+    assert config.cache_manager.save(operation)
+    config = make_config()
+    assert config.cache_manager.load(operation)
+    processor = RecursiveProcessor(config, LinguisticContext(config, ()))
+
+    model = FakeModel()
+    result = processor.traverse(
+        data={leaf_key: "Hello"}, current_path=KeyPath(()), process_func=model, glossary={},
+        runtime_config=runtime, mode=mode, is_verification=verification,
+    )
+
+    assert result == {leaf_key: "RU(Hello)"}
+    assert len(model.calls) == 1
+    assert f"Key {leaf_key}\n" in model.calls[0]["prompt"]
+    assert config.cache_manager.get(operation, old_key) == "STALE"
+    assert config.cache_manager.get_stats(operation)["cache_size"] == 2
+    again = FakeModel()
+    assert processor.traverse(
+        data={leaf_key: "Hello"}, current_path=KeyPath(()), process_func=again, glossary={},
+        runtime_config=runtime, mode=mode, is_verification=verification,
+    ) == result
+    assert again.calls == []
+
+
+@pytest.mark.parametrize("verification", [False, True])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_keyed_requests_split_in_both_stages(make_config, verification, persistent):
+    config = make_config(cache__enabled=persistent)
+    operation = OPERATION_VERIFICATION if verification else OPERATION_TRANSLATION
+    runtime = config.get_verification_config() if verification else config.get_translation_config_for_mode(MODE_STYLE)
+    runtime["prompt"] = "Key {RESOURCE_KEY}\nText to process:\n"
+    model = FakeModel()
+    args = {
+        "data": {"a": "Hello", "b": "Hello"}, "current_path": KeyPath(()), "process_func": model,
+        "glossary": {}, "runtime_config": runtime, "mode": MODE_VERIFICATION if verification else MODE_STYLE,
+        "is_verification": verification,
+    }
+    result = RecursiveProcessor(config, LinguisticContext(config, ())).traverse(**args)
+    assert result == {"a": "RU(Hello)", "b": "RU(Hello)"}
+    assert len(model.calls) == 2
+    if persistent:
+        assert config.cache_manager.save(operation)
+        reloaded = make_config()
+        assert reloaded.cache_manager.load(operation)
+        model.calls.clear()
+        assert RecursiveProcessor(reloaded, LinguisticContext(reloaded, ())).traverse(**args) == result
+        assert model.calls == []
+
+
+def test_resource_key_in_the_system_prompt_is_rejected(make_config):
+    with pytest.raises(ConfigValidationError, match="user prompt"):
+        make_config(translation__prompts__system="Leaf {RESOURCE_KEY}")
+
+
+def test_preview_only_prints_the_prompt_and_skips_the_model(make_config, capsys):
+    config = make_config()
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, default_context_rules()),
+        preview_prompts=True, preview_only=True,
+    )
+    model = FakeModel()
+    data = {"greeting_female": "Welcome."}
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+
+    result = processor.traverse(
+        data=data, current_path=KeyPath(()), process_func=model, glossary={},
+        runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert result == data
+    assert model.calls == []
+    printed = capsys.readouterr().out
+    assert "greeting_female" in printed
+    assert "FEMININE" in printed
+
+
+def test_preview_limit_and_path_do_not_limit_model_calls(make_config, tmp_path, capsys):
+    config = make_config(cache__enabled=False, dedup__enabled=False)
+    output = tmp_path / "preview.jsonl"
+    selection = PreviewSelection(
+        paths=frozenset({KeyPath(("flat.key",)).report_key()}),
+        limit=1,
+        stdout=True,
+        output_path=str(output),
+    )
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, ()),
+        preview_prompts=True, preview=selection,
+    )
+    model = FakeModel()
+    data = {"flat.key": "Literal.", "flat": {"key": "Nested."}, "items": ["Indexed."]}
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+
+    result = processor.traverse(
+        data=data, current_path=KeyPath(()), process_func=model, glossary={},
+        runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert result == {
+        "flat.key": "RU(Literal.)",
+        "flat": {"key": "RU(Nested.)"},
+        "items": ["RU(Indexed.)"],
+    }
+    assert len(model.calls) == 3
+    printed = capsys.readouterr().out
+    assert printed.count("--- translation:") == 1
+    assert '["flat.key"]' in printed
+    assert '["flat","key"]' not in printed
+    assert selection.write(config.file_ops, config.logger)
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert rows == [row for row in rows if row["path"] == ["flat.key"]]
+    assert len(rows) == 1
+
+
+def test_preview_limit_caps_output_only(make_config, capsys):
+    config = make_config(cache__enabled=False, dedup__enabled=False)
+    selection = PreviewSelection(limit=1, stdout=True)
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, ()),
+        preview_prompts=True, preview=selection,
+    )
+    model = FakeModel()
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+    result = processor.traverse(
+        data={"a": "One", "b": "Two"}, current_path=KeyPath(()), process_func=model,
+        glossary={}, runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert result == {"a": "RU(One)", "b": "RU(Two)"}
+    assert len(model.calls) == 2
+    assert capsys.readouterr().out.count("--- translation:") == 1
+
+
+def test_preview_write_reports_a_blocked_parent_without_raising(make_config, tmp_path):
+    config = make_config()
+    blocked = tmp_path / 'blocked'
+    blocked.write_bytes(b'existing input')
+    selection = PreviewSelection(output_path=str(blocked / 'preview.jsonl'))
+
+    assert selection.write(config.file_ops, config.logger) is False
+    assert config.logger.contains('Cannot write preview JSONL', level='ERROR')
+    assert blocked.read_bytes() == b'existing input'
+
+
+def test_preview_export_distinguishes_structural_paths(make_config, tmp_path):
+    config = make_config(cache__enabled=False, dedup__enabled=False)
+    config.leaf_outcomes.set_active_file("dialogs/ui.json")
+    output = tmp_path / "preview.jsonl"
+    selection = PreviewSelection(stdout=False, output_path=str(output))
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, ()), preview=selection,
+    )
+    data = {"flat.key": "Literal.", "flat": {"key": "Nested."}, "items": ["Indexed."]}
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+    processor.traverse(
+        data=data, current_path=KeyPath(()), process_func=FakeModel(), glossary={},
+        runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert selection.write(config.file_ops, config.logger)
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    paths = [row["path"] for row in rows]
+    assert ["flat.key"] in paths
+    assert ["flat", "key"] in paths
+    assert ["items", 0] in paths
+    assert {row["source"] for row in rows} == {"dialogs/ui.json"}
+
+
+def test_preview_prompts_on_a_live_leaf_still_calls_the_model(make_config, capsys):
+    config = make_config()
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, default_context_rules()),
+        preview_prompts=True,
+    )
+    model = FakeModel()
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+
+    result = processor.traverse(
+        data={"greeting_male": "Welcome."}, current_path=KeyPath(()), process_func=model,
+        glossary={}, runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert result == {"greeting_male": "RU(Welcome.)"}
+    assert len(model.calls) == 1
+    assert "greeting_male" in capsys.readouterr().out

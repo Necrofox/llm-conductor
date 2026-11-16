@@ -4,14 +4,17 @@ System tests: main() of llm-conductor.py end to end, in-process, with the
 fake model (EchoModel) behind responses. They cover the run command
 contract and exit codes (doc/cli.md) without real inference.
 """
+import json
 import os
 import signal
+import threading
+import time
 from pathlib import Path
 
 import pytest
 import responses
 
-from llm_conductor.cli.runner import FilePipeline
+from llm_conductor.cli.runner import FilePipeline, TargetRunner
 from llm_conductor.constants import (
     CACHE_LOCK_FILENAME,
     EXIT_API_UNAVAILABLE,
@@ -30,7 +33,7 @@ from llm_conductor.constants import (
 from llm_conductor.core import shutdown
 from llm_conductor.core.io import FileOperations
 from llm_conductor.core.locking import FileLock
-from tests.support import write_configs
+from tests.support import read_heartbeat_text, write_configs
 from tests.system.harness import (
     SAMPLE,
     STRICT_PROMPT,
@@ -93,6 +96,261 @@ def test_model_never_sees_raw_tags(workspace, model, run_main):
     for payload in model.model_calls:
         content = payload["messages"][-1]["content"]
         assert "<b>" not in content and "{0}" not in content and "\n" not in content.split("the text: ")[-1]
+
+
+def test_preview_with_dry_run_prints_prompts_and_skips_the_model(workspace, model, run_main, capsys):
+    assert run_main(*RUN, "--dry-run", "--preview-prompts") == EXIT_SUCCESS
+
+    printed = capsys.readouterr().out
+    assert "greeting_male" in printed
+    assert "MASCULINE" in printed
+    assert model.model_calls == []
+    assert not workspace.exists(workspace.result("translated"))
+    assert not workspace.exists(workspace.result("final"))
+
+
+def test_preview_filters_do_not_limit_a_real_run(workspace, model, run_main, capsys):
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-prompts", "--preview-limit", "1",
+        "--preview-path", '["ui","title"]',
+    ) == EXIT_SUCCESS
+
+    assert len(model.model_calls) == 7
+    printed = capsys.readouterr().out
+    assert printed.count("--- translation:") == 1
+    assert '["ui","title"]' in printed
+    final = workspace.read_json(workspace.result("final"))
+    assert final["ui"]["title"].startswith("RU(")
+    assert final["ui"]["warning"].startswith("RU(")
+    assert final["options"][0].startswith("RU(")
+
+
+def test_preview_output_distinguishes_paths_and_names_the_manifest_file(
+        workspace, model, run_main, capsys):
+    workspace.write_json("dialogs/ui.json", {
+        "flat.key": "Literal.",
+        "flat": {"key": "Nested."},
+        "items": ["Indexed."],
+    })
+    workspace.write_text(
+        "job.toml",
+        'stage = "translate"\n[[targets]]\noriginal = "dialogs/ui.json"\n',
+    )
+
+    assert run_main(
+        "run", "--target", "job.toml", "--dry-run",
+        "--preview-prompts", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+
+    assert model.model_calls == []
+    printed = capsys.readouterr().out
+    assert '["flat.key"]' in printed
+    assert '["flat","key"]' in printed
+    assert '["items",0]' in printed
+    rows = [
+        json.loads(line)
+        for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["path"] for row in rows] == [["flat.key"], ["flat", "key"], ["items", 0]]
+    assert {row["source"] for row in rows} == {"dialogs/ui.json"}
+
+
+def test_offline_all_verification_preview_is_marked_preliminary(workspace, model, run_main):
+    assert run_main(*RUN, "--dry-run", "--preview-output", "preview.jsonl") == EXIT_SUCCESS
+
+    assert model.model_calls == []
+    rows = [
+        json.loads(line)
+        for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    verification = [row for row in rows if row["operation"] == "verification"]
+    translation = [row for row in rows if row["operation"] == "translation"]
+    assert translation and verification
+    assert all(not row["preliminary"] and row["note"] == "" for row in translation)
+    assert all(row["preliminary"] for row in verification)
+    assert "not yet known" in verification[0]["note"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("destination", ["sample.json", "unused/../sample.json"])
+def test_preview_output_cannot_overwrite_original(workspace, model, run_main, destination, dry_run):
+    original = (workspace.root / "sample.json").read_bytes()
+    flags = ["--dry-run"] if dry_run else []
+    assert run_main(*RUN, *flags, "--preview-output", destination) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert (workspace.root / "sample.json").read_bytes() == original
+    assert not workspace.exists(workspace.result("final"))
+
+
+@pytest.mark.parametrize("destination", [
+    "job.toml", "draft.json", "conductor.toml", "llm.toml", "alternate.toml",
+    "context.toml", "glossary.json", "sample.json",
+])
+def test_manifest_preview_preserves_inputs_and_loaded_configs(workspace, model, run_main, destination):
+    workspace.write_json("draft.json", SAMPLE)
+    workspace.write_json("glossary.json", {"Guild": "Гильдия"})
+    profile = 'llm_config = "alternate.toml"\n' if destination == "alternate.toml" else ""
+    if profile:
+        workspace.write_text("alternate.toml", (workspace.root / "llm.toml").read_text(encoding="utf-8"))
+    workspace.write_text("job.toml", profile + '[[targets]]\noriginal = "sample.json"\ndraft = "draft.json"\n')
+    original = (workspace.root / destination).read_bytes()
+    assert run_main(
+        "run", "--target", "job.toml", "--dry-run", "--preview-output", destination,
+    ) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert (workspace.root / destination).read_bytes() == original
+
+
+@pytest.mark.parametrize("destination", [
+    "result/sample.json/translated/sample.json", "result/sample.json/leaves/sample.json",
+    "cache/translation_cache.json", "cache/progress_state.json", "logs/preview.jsonl",
+])
+def test_preview_output_cannot_enter_reserved_directories(workspace, model, run_main, destination):
+    workspace.write_text(destination, "Keep this file.")
+    assert run_main(*RUN, "--preview-output", destination) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert (workspace.root / destination).read_text(encoding="utf-8") == "Keep this file."
+
+
+def test_preview_output_rejects_a_hard_link_to_an_input(workspace, model, run_main):
+    alias = workspace.root / "preview.jsonl"
+    os.link(workspace.root / "sample.json", alias)
+    original = alias.read_bytes()
+    assert run_main(*RUN, "--dry-run", "--preview-output", str(alias)) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert alias.read_bytes() == original
+
+
+def test_preview_output_parent_error_finalizes_heartbeat(workspace, model, run_main):
+    workspace.write_text("blocked", "Existing file.")
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-output", "blocked/preview.jsonl",
+    ) == EXIT_INTERNAL_ERROR
+    assert len(model.model_calls) == 7
+    heartbeat = workspace.read_json("cache/progress_state.json")
+    assert heartbeat["status"] == "completed"
+    assert heartbeat["exit_code"] == EXIT_INTERNAL_ERROR
+    assert workspace.read_json(workspace.result("final")) == TRANSLATED
+
+
+def test_preview_output_failure_does_not_hide_interruption(workspace, model, run_main):
+    workspace.write_text("blocked", "Existing file.")
+
+    def interrupt(call_number):
+        if call_number == 2:
+            shutdown.signal_handler(signal.SIGINT, None)
+
+    model.on_model_call = interrupt
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-output", "blocked/preview.jsonl",
+    ) == EXIT_INTERRUPTED
+    heartbeat = workspace.read_json("cache/progress_state.json")
+    assert heartbeat["status"] == "interrupted"
+    assert heartbeat["exit_code"] == EXIT_INTERRUPTED
+
+
+def test_preview_limit_is_shared_across_files_and_stages(workspace, model, run_main):
+    workspace.write_json("a.json", {"title": "Hello"})
+    workspace.write_json("b.json", {"title": "World"})
+    workspace.write_text("job.toml", '[[targets]]\noriginal="a.json"\n[[targets]]\noriginal="b.json"\n')
+    assert run_main(
+        "run", "--target", "job.toml", "--preview-limit", "3", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+    rows = [json.loads(line) for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 3
+    assert [row["source"] for row in rows] == ["a.json", "a.json", "b.json"]
+    assert len(model.model_calls) == 4
+    assert all(not row["preliminary"] for row in rows)
+
+
+def test_zero_preview_limit_replaces_export_without_limiting_processing(workspace, model, run_main):
+    workspace.write_text("preview.jsonl", "Previous export.\n")
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-limit", "0", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+    assert len(model.model_calls) == 7
+    assert (workspace.root / "preview.jsonl").read_bytes() == b""
+
+
+@pytest.mark.parametrize("selection", [("--preview-path", '["title"]'), ("--preview-limit", "0")])
+def test_preview_selection_does_not_skip_preflight_of_other_files(workspace, model, run_main, capsys, selection):
+    workspace.write_json("good.json", {"title": "Hello"})
+    workspace.write_text("bad.json", "{")
+    workspace.write_text(
+        "job.toml",
+        '[[targets]]\noriginal = "good.json"\n\n[[targets]]\noriginal = "bad.json"\n',
+    )
+
+    assert run_main(
+        "run", "--target", "job.toml", "--dry-run", "--preview-prompts",
+        *selection,
+    ) == EXIT_USAGE_ERROR
+    assert model.model_calls == []
+    captured = capsys.readouterr()
+    assert "bad.json" in captured.err + captured.out
+
+
+def test_preview_filter_without_a_sink_is_a_usage_error(workspace, run_main, capsys):
+    assert run_main(*RUN, "--preview-limit", "1") == EXIT_USAGE_ERROR
+    assert "--preview-prompts or --preview-output" in capsys.readouterr().err
+
+
+def test_preview_path_must_be_a_structural_json_array(workspace, run_main, capsys):
+    assert run_main(
+        *RUN, "--dry-run", "--preview-prompts", "--preview-path", "ui.title",
+    ) == EXIT_USAGE_ERROR
+    assert "JSON array" in capsys.readouterr().err
+
+
+def test_preview_explains_where_each_hint_came_from(workspace, model, run_main):
+    workspace.write_json("sample.json", {
+        "flat.key": "A",
+        "title": "B",
+        "npc_female": {"line": "C"},
+    })
+    workspace.write_text("context.toml", """
+[[leaves]]
+path = '["flat.key"]'
+slot = "role"
+text = "Point record."
+[[rules]]
+name = "title-rule"
+match = "last"
+pattern = '^title$'
+slot = "role"
+text = "Local title."
+[[rules]]
+name = "npc-female"
+match = "last"
+pattern = '^npc_female$'
+slot = "gender"
+text = "Feminine speaker."
+""")
+
+    assert run_main(
+        *RUN, "--stage", "translate", "--dry-run", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+    assert model.model_calls == []
+    rows = [
+        json.loads(line)
+        for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    by_path = {tuple(row["path"]): row["hints"] for row in rows}
+    exact = by_path[("flat.key",)][0]
+    assert (exact["origin"], exact["rule"], exact["text"]) == ("exact", "leaf-0", "Point record.")
+    local = by_path[("title",)][0]
+    assert (local["origin"], local["rule"]) == ("rule", "title-rule")
+    inherited = by_path[("npc_female", "line")][0]
+    assert (inherited["origin"], inherited["rule"], inherited["parent"]) == (
+        "inherited", "npc-female", ["npc_female"],
+    )
+
+
+def test_preview_prompts_on_a_real_run_still_calls_the_model(workspace, model, run_main, capsys):
+    assert run_main(*RUN, "--stage", "translate", "--preview-prompts") == EXIT_SUCCESS
+
+    assert "greeting_female" in capsys.readouterr().out
+    assert model.calls_with("FEMININE")
 
 
 def test_gender_hints_reach_the_model(workspace, model, run_main):
@@ -1249,3 +1507,201 @@ def test_verify_rejects_stale_translated_structure(
     combined = "".join(capsys.readouterr())
     assert "translated structure does not match original" in combined
     assert fragment in combined
+
+
+def test_preview_reports_sidecar_failure(workspace, run_main):
+    workspace.write_json(workspace.result("translated"), SAMPLE)
+    workspace.write_json("result/sample.json/leaves/sample.json", {"schema_version": 1})
+    assert run_main(*RUN, "--stage", "verify", "--dry-run", "--preview-prompts") != EXIT_SUCCESS
+
+
+def test_manifest_ignores_unselected_program_context(workspace, run_main):
+    workspace.write_text("context.toml", "invalid = true")
+    workspace.write_text("selected.toml", "")
+    workspace.write_text("job.toml", 'context = "selected.toml"\nstage = "translate"\n'
+                         '[[targets]]\noriginal = "sample.json"\n')
+    assert run_main("run", "--target", "job.toml", "--dry-run") == EXIT_SUCCESS
+
+
+def test_exact_sidecar_map_reaches_preview_and_model(workspace, model, run_main, capsys):
+    workspace.write_json("sample.json", {"a.b": "Hello", "a": {"b": "Hello"}})
+    workspace.write_text("context.toml", """
+[templates.role]
+text = "Referent: {value}"
+[[leaves]]
+path = '["a.b"]'
+slot = "gender"
+template = "role"
+value = "third-person feminine"
+[[leaves]]
+path = '["a","b"]'
+slot = "gender"
+text = "Speaker: masculine"
+""")
+    assert run_main(*RUN, "--stage", "translate", "--dry-run", "--preview-prompts") == EXIT_SUCCESS
+    preview = capsys.readouterr().out
+    assert "third-person feminine" in preview and "Speaker: masculine" in preview
+    assert model.model_calls == []
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+    assert len(model.calls_with("Referent: third-person feminine")) == 1
+    assert len(model.calls_with("Speaker: masculine")) == 1
+
+
+def _progress(workspace) -> Path:
+    return workspace.root / "cache" / PROGRESS_STATE_FILENAME
+
+
+def test_heartbeat_updates_while_the_api_call_is_outstanding(workspace, model, run_main):
+    workspace.write_configs(
+        preflight__check_availability=False,
+        heartbeat__interval_sec=1,
+        heartbeat__interval=0,
+    )
+    workspace.write_json("one.json", {"title": "Hello"})
+    path = _progress(workspace)
+    observed = []
+
+    def during(_count):
+        first = json.loads(read_heartbeat_text(path))
+        time.sleep(2.4)
+        second = json.loads(read_heartbeat_text(path))
+        observed.append((first, second))
+
+    model.on_model_call = during
+    assert run_main("run", "--target", "one.json", "--stage", "translate") == EXIT_SUCCESS
+
+    first, second = observed[0]
+    assert second["activity"] == "waiting_api"
+    assert second["status"] == "running"
+    assert first["progress"]["leaves_done"] == second["progress"]["leaves_done"]
+    assert first["last_progress_at"] == second["last_progress_at"]
+    assert first["updated_at"] != second["updated_at"]
+    assert second["elapsed_sec"] >= first["elapsed_sec"]
+    final_text = path.read_text(encoding="utf-8")
+    final = json.loads(final_text)
+    assert final["status"] == "completed"
+    assert final["exit_code"] == EXIT_SUCCESS
+    time.sleep(1.5)
+    assert path.read_text(encoding="utf-8") == final_text
+
+
+def test_heartbeat_updates_during_retry_backoff(workspace, model, run_main):
+    workspace.write_configs(
+        preflight__check_availability=False,
+        heartbeat__interval_sec=1,
+        heartbeat__interval=0,
+        translation__api__max_retries=3,
+        translation__api__retry_backoff_factor=3,
+    )
+    workspace.write_json("one.json", {"title": "Hello"})
+    path = _progress(workspace)
+
+    def release(count):
+        # The current call is already counted. Two 500s, then a normal reply.
+        if count >= 3:
+            model.fail_model_calls = False
+
+    model.fail_model_calls = True
+    model.on_model_call = release
+    samples = []
+    stop = threading.Event()
+
+    def poll():
+        while not stop.wait(0.25):
+            if path.exists():
+                samples.append(json.loads(read_heartbeat_text(path)))
+
+    watcher = threading.Thread(target=poll, daemon=True)
+    watcher.start()
+    try:
+        assert run_main("run", "--target", "one.json", "--stage", "translate") == EXIT_SUCCESS
+    finally:
+        stop.set()
+        watcher.join(timeout=5)
+        assert not watcher.is_alive()
+
+    waiting = [
+        snap for snap in samples
+        if snap["status"] == "running" and snap["activity"] == "waiting_api"
+    ]
+    assert len({snap["updated_at"] for snap in waiting}) >= 2
+    assert {snap["progress"]["leaves_done"] for snap in waiting} == {0}
+    assert {snap["last_progress_at"] for snap in waiting} == {None}
+    final_text = path.read_text(encoding="utf-8")
+    assert json.loads(final_text)["status"] == "completed"
+    time.sleep(1.5)
+    assert path.read_text(encoding="utf-8") == final_text
+
+
+@pytest.mark.parametrize('failure_point', ['_report', '_write_preview'])
+def test_unexpected_failure_finalizes_and_stops_heartbeat(
+        workspace, model, run_main, monkeypatch, failure_point):
+    workspace.write_configs(heartbeat__interval_sec=1, preflight__check_availability=False)
+
+    def fail(*args):
+        time.sleep(1.2)
+        raise RuntimeError('controlled unexpected failure')
+
+    monkeypatch.setattr(TargetRunner, failure_point, fail)
+    assert run_main(*RUN, '--stage', 'translate') == EXIT_INTERNAL_ERROR
+    path = _progress(workspace)
+    final = path.read_bytes()
+    snapshot = json.loads(final)
+    assert snapshot['status'] == 'completed'
+    assert snapshot['exit_code'] == EXIT_INTERNAL_ERROR
+    assert {'code': EXIT_INTERNAL_ERROR, 'reason': 'unexpected run failure'} in snapshot['problems']
+    time.sleep(1.2)
+    assert path.read_bytes() == final
+
+
+def test_interruption_with_preview_exception_stops_heartbeat(workspace, model, run_main, monkeypatch):
+    workspace.write_configs(heartbeat__interval_sec=1, preflight__check_availability=False)
+
+    def interrupt(count):
+        time.sleep(1.2)
+        shutdown.signal_handler(signal.SIGINT, None)
+
+    def fail_preview(*args):
+        raise RuntimeError('controlled preview failure')
+
+    model.on_model_call = interrupt
+    monkeypatch.setattr(TargetRunner, '_write_preview', fail_preview)
+    assert run_main(*RUN, '--stage', 'translate') == EXIT_INTERRUPTED
+    path = _progress(workspace)
+    final = path.read_bytes()
+    snapshot = json.loads(final)
+    assert snapshot['status'] == 'interrupted'
+    assert snapshot['exit_code'] == EXIT_INTERRUPTED
+    time.sleep(1.2)
+    assert path.read_bytes() == final
+
+
+@pytest.mark.parametrize('omitted_stage', ['translation', 'verification'])
+def test_preflight_preserves_independent_omissions_for_the_same_endpoint(
+        workspace, model, run_main, omitted_stage):
+    workspace.write_configs(**{f'{omitted_stage}__sampling__omit_parameters': ['num_predict']})
+    assert run_main(*RUN) == EXIT_SUCCESS
+    probes = [body for body in model.requests if body['messages'][-1]['content'] == 'test']
+    assert len(probes) == 2
+    for body, stage in zip(probes, ('translation', 'verification')):
+        assert ('num_predict' not in body['options']) == (stage == omitted_stage)
+
+
+def test_heartbeat_keeps_the_terminal_snapshot_after_a_failed_run(workspace, model, run_main):
+    workspace.write_configs(
+        preflight__check_availability=False,
+        heartbeat__interval_sec=1,
+    )
+    workspace.write_json("one.json", {"title": "Hello"})
+    model.fail_model_calls = True
+
+    code = run_main("run", "--target", "one.json", "--stage", "translate")
+
+    assert code == EXIT_FAILURE_RATIO_EXCEEDED
+    path = _progress(workspace)
+    text = path.read_text(encoding="utf-8")
+    snap = json.loads(text)
+    assert snap["status"] == "completed"
+    assert snap["exit_code"] == code
+    time.sleep(1.5)
+    assert path.read_text(encoding="utf-8") == text

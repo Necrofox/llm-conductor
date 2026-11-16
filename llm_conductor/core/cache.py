@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Set, Tuple
 
 from llm_conductor.constants import (
     CACHE_FINGERPRINT_LENGTH,
@@ -15,35 +15,87 @@ from llm_conductor.constants import (
     CACHE_SAMPLING_IDENTITY_FIELDS,
     DEFAULT_CONTENT_IDENTITY,
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
+    DEFAULT_MAX_TOKENS_PARAM,
+    OPENAI_SAMPLING_CACHE_NAMESPACE,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    RESOURCE_KEY_CACHE_NAMESPACE,
 )
 from llm_conductor.core.io import safe_read_file
+from llm_conductor.core.sampling import build_openai_sampling_payload
 from llm_conductor.exceptions import FileDurabilityError
 from llm_conductor.interfaces import CacheConfigProtocol
 
 
+def omitted_sampling_names(runtime_config: Mapping[str, Any]) -> FrozenSet[str]:
+    """
+    Logical sampling names the effective request must not send.
+
+    Args:
+        runtime_config: Flattened mode config. A missing ``omit_parameters``
+            key means nothing is excluded.
+
+    Returns:
+        The configured names. Unknown names are rejected earlier, at load.
+    """
+    raw = runtime_config.get('omit_parameters') or ()
+    return frozenset(name for name in raw if isinstance(name, str))
+
+
+def format_sampling_omission(runtime_config: Mapping[str, Any]) -> Optional[str]:
+    """
+    One diagnostic line naming each excluded parameter and its configured value.
+
+    Args:
+        runtime_config: Flattened mode config.
+
+    Returns:
+        The line, or None when the omission list is empty.
+    """
+    omitted = omitted_sampling_names(runtime_config)
+    if not omitted:
+        return None
+    parts = [
+        f"{name} (configured {runtime_config.get(runtime_key)!r})"
+        for name, runtime_key in CACHE_SAMPLING_IDENTITY_FIELDS
+        if name in omitted
+    ]
+    return "Not sending sampling parameters: " + ", ".join(parts)
+
+
 def build_sampling_identity(runtime_config: Mapping[str, Any]) -> str:
     """
-    Canonical JSON of generation-affecting sampling parameters.
+    Canonical JSON of generation-affecting sampling parameters that are sent.
 
     Used as one component of the cache key and as the ``sampling`` fingerprint.
-    Field list: ``CACHE_SAMPLING_IDENTITY_FIELDS`` in constants (see also
-    ``doc/pipeline.md``). ``stop`` order is preserved; outer keys are sorted.
+    Logical fields come from ``CACHE_SAMPLING_IDENTITY_FIELDS``. Explicit
+    omissions are applied first. OpenAI uses the HTTP sampling serializer,
+    including its reply-length field name and omission of unsupported or
+    empty fields, in a namespace isolated from legacy entries. Ollama keeps
+    the previous logical-field document. Stop order is preserved and JSON
+    object keys are sorted. See ``doc/pipeline.md`` for cache migration.
 
     Args:
         runtime_config: Flattened mode config from ConfigBuilder (``temp``,
-            ``top_p``, …, ``stop``).
+            ``top_p``, …, ``stop``, ``omit_parameters``, ``api_type``,
+            ``max_tokens_param``). Missing ``api_type`` means Ollama.
 
     Returns:
         Stable JSON string suitable for hashing.
     """
+    omitted = omitted_sampling_names(runtime_config)
     payload: Dict[str, Any] = {}
     for name, runtime_key in CACHE_SAMPLING_IDENTITY_FIELDS:
+        if name in omitted:
+            continue
         value = runtime_config[runtime_key]
         if name == 'stop':
             value = list(value) if value is not None else []
         payload[name] = value
+    if runtime_config.get('api_type') == 'openai':
+        payload['max_tokens_param'] = runtime_config.get('max_tokens_param', DEFAULT_MAX_TOKENS_PARAM)
+        wire = build_openai_sampling_payload(payload)
+        payload = {'transport': OPENAI_SAMPLING_CACHE_NAMESPACE, 'parameters': wire}
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -795,7 +847,8 @@ class CacheManager:
                           enhanced_prompt: str, mode: str, value: str,
                           sampling_identity: str, *, api_url: str = '',
                           allowed_scripts: Tuple[str, ...] = (),
-                          content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY) -> str:
+                          content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY,
+                          resource_key: Optional[str] = None) -> str:
         """
         Build an MD5 cache key from the full request sent to the model.
 
@@ -810,6 +863,8 @@ class CacheManager:
         the unmasked leaf source (pipeline invariant: cache stores unmasked
         results). ``sampling_identity`` is the canonical JSON from
         ``build_sampling_identity`` (no cross-parameter reuse).
+        Keyed requests append a versioned namespace and the substituted key;
+        ``None`` keeps the legacy unkeyed format, while ``""`` is a keyed request.
 
         Args:
             operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
@@ -823,6 +878,7 @@ class CacheManager:
             api_url: Endpoint that generates the reply.
             allowed_scripts: Writing systems allowed by the active profile.
             content_identity: Eligibility and masking expressions.
+            resource_key: Substituted resource key, or None when no marker was used.
 
         Returns:
             32-character MD5 hex digest.
@@ -832,6 +888,8 @@ class CacheManager:
             enhanced_prompt, mode, value, sampling_identity,
             api_url, sorted(set(allowed_scripts)), content_identity,
         ]
+        if resource_key is not None:
+            cache_key_data.append((RESOURCE_KEY_CACHE_NAMESPACE, resource_key))
         cache_key_str = json.dumps(cache_key_data, ensure_ascii=False)
         return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
 
@@ -839,7 +897,8 @@ class CacheManager:
                               prompt_template: str, hints_text: str, glossary_string: str,
                               mode: str, sampling_identity: str, *, api_url: str = '',
                               allowed_scripts: Tuple[str, ...] = (),
-                              content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY) -> dict:
+                              content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY,
+                              resource_key: Optional[str] = None) -> dict:
         """
         Build short component fingerprints for miss diagnostics.
 
@@ -847,7 +906,7 @@ class CacheManager:
         only the full key decides a hit. They are stored in entry metadata
         and used by diagnose_miss() to name which component changed (model,
         system prompt, prompt template, hints, glossary, mode, sampling,
-        endpoint, or allowed scripts)
+        endpoint, allowed scripts, content rules, or a substituted resource key)
         without logging the component contents.
 
         Args:
@@ -864,6 +923,7 @@ class CacheManager:
             api_url: Endpoint that generates the reply.
             allowed_scripts: Writing systems allowed by the active profile.
             content_identity: Eligibility and masking expressions.
+            resource_key: Substituted resource key, or None when no marker was used.
 
         Returns:
             Mapping of component name to truncated hex digest.
@@ -882,6 +942,10 @@ class CacheManager:
             'allowed_scripts': json.dumps(sorted(set(allowed_scripts))),
             'content_rules': json.dumps(content_identity, ensure_ascii=False),
         }
+        if resource_key is not None:
+            components['resource_key'] = json.dumps(
+                (RESOURCE_KEY_CACHE_NAMESPACE, resource_key), ensure_ascii=False,
+            )
         return {
             name: hashlib.md5(text.encode('utf-8')).hexdigest()[:CACHE_FINGERPRINT_LENGTH]
             for name, text in components.items()

@@ -58,6 +58,12 @@ def test_non_positive_token_limits_are_rejected(key):
         validate_runtime_config(_runtime(**{key: 0}), StubConfig(), "translation")
 
 
+def test_unknown_omit_parameters_are_rejected():
+    with pytest.raises(ConfigValidationError, match="omit_parameters"):
+        validate_runtime_config(
+            _runtime(omit_parameters=["messages", "top_p"]), StubConfig(), "translation")
+
+
 def test_invalid_max_tokens_param_is_rejected():
     with pytest.raises(ConfigValidationError, match="max_tokens_param"):
         validate_runtime_config(

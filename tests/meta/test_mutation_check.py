@@ -55,6 +55,7 @@ def test_runner_failure_restores_source(runner, tmp_path, monkeypatch, failure):
 def test_harness_failure_fails_summary_even_for_equivalent_mutant(runner, monkeypatch, capsys):
     monkeypatch.setattr(runner, "MUTANTS", [("example", "subject.py", "old", "new", "synthetic", True)])
     monkeypatch.setattr(runner, "_prepare_copy", lambda work: None)
+    monkeypatch.setattr(runner, "_run_pytest", lambda work: ("SURVIVED", ""))
     monkeypatch.setattr(runner, "_run_mutant", lambda *args: ("HARNESS_ERROR", "collection failed"))
     assert runner.main(set()) == 1
     output = capsys.readouterr().out
@@ -77,3 +78,15 @@ def test_missing_or_invalid_verdict_is_not_a_kill(runner, tmp_path, monkeypatch,
     assert status == "HARNESS_ERROR"
     assert "diagnostic" in detail
     assert source.read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_failing_baseline_prevents_false_kills(runner, monkeypatch, capsys):
+    monkeypatch.setattr(runner, "_prepare_copy", lambda work: None)
+    monkeypatch.setattr(runner, "_run_pytest", lambda work: ("KILLED", "unrelated assertion"))
+
+    def must_not_run(*args):
+        raise AssertionError("Mutations must not run after a baseline failure")
+
+    monkeypatch.setattr(runner, "_run_mutant", must_not_run)
+    assert runner.main(set()) == 1
+    assert "HARNESS_ERROR baseline" in capsys.readouterr().out

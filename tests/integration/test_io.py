@@ -5,6 +5,7 @@ atomic write, retry, fallback save, safe_read_file/safe_write_file.
 """
 import json
 import os
+import threading
 from unittest.mock import Mock
 
 import pytest
@@ -13,6 +14,8 @@ from llm_conductor.constants import BYTES_PER_MIB
 from llm_conductor.core import io as io_module
 from llm_conductor.core.io import FileOperations, safe_read_file, safe_write_file
 from llm_conductor.exceptions import FileDurabilityError, FileOperationError
+from llm_conductor.exceptions import TimeoutError as ConductorTimeoutError
+from llm_conductor.utils import ThreadPoolTimeoutStrategy
 from tests.support import RecordingLogger
 
 
@@ -380,3 +383,85 @@ def test_size_diagnostic_failure_does_not_retry_committed_file(tmp_path, file_op
     assert callback.call_count == 1
     assert no_sleep == []
     assert file_ops.logger.contains("Size diagnostics failed", level="WARNING")
+
+
+def test_timed_out_preparation_cannot_replace_a_newer_file(tmp_path, file_ops, monkeypatch):
+    target = tmp_path / 'state'
+    target.write_text('initial', encoding='utf-8')
+    release = threading.Event()
+    finished = threading.Event()
+
+    def timed(func, *args):
+        def worker():
+            try:
+                return func()
+            finally:
+                finished.set()
+        return ThreadPoolTimeoutStrategy().run(worker, 0.05)
+
+    def delayed_write(stream):
+        assert release.wait(5)
+        stream.write('stale')
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(io_module, 'run_with_timeout', timed)
+            with pytest.raises(ConductorTimeoutError):
+                file_ops._write_atomic(str(target), 'utf-8', delayed_write, sync=False)
+        file_ops.write_text_atomic(str(target), 'terminal', sync=False)
+        release.set()
+        assert finished.wait(5)
+        assert target.read_text(encoding='utf-8') == 'terminal'
+        assert _temp_leftovers(tmp_path) == []
+    finally:
+        release.set()
+        assert finished.wait(5)
+
+
+def test_timeout_waits_for_a_replacement_already_in_progress(tmp_path, file_ops, monkeypatch):
+    target = tmp_path / 'state'
+    replacing = threading.Event()
+    timeout = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    errors = []
+    real_replace = io_module.os.replace
+
+    def delayed_replace(src, dst):
+        replacing.set()
+        assert release.wait(5)
+        real_replace(src, dst)
+
+    def timed(func, *args):
+        try:
+            return ThreadPoolTimeoutStrategy().run(func, 0.05)
+        except ConductorTimeoutError:
+            timeout.set()
+            raise
+
+    def write():
+        try:
+            file_ops.write_text_atomic(str(target), 'running', sync=False)
+        except ConductorTimeoutError as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(io_module.os, 'replace', delayed_replace)
+    monkeypatch.setattr(io_module, 'run_with_timeout', timed)
+    caller = threading.Thread(target=write)
+    caller.start()
+    try:
+        assert replacing.wait(5)
+        assert timeout.wait(5)
+        assert not returned.wait(0.05)
+        release.set()
+        caller.join(timeout=5)
+        assert not caller.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], ConductorTimeoutError)
+        file_ops.write_text_atomic(str(target), 'completed', sync=False)
+        assert target.read_text(encoding='utf-8') == 'completed'
+        assert _temp_leftovers(tmp_path) == []
+    finally:
+        release.set()
+        caller.join(timeout=5)

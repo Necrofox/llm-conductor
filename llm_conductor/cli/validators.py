@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple, Type, Union
 
 import requests
 
@@ -12,6 +12,8 @@ from llm_conductor.constants import (
     HTTP_PAYMENT_REQUIRED,
     HTTP_TOO_MANY_REQUESTS,
     HTTP_UNAUTHORIZED,
+    SAMPLING_OMITTABLE_NAMES,
+    SAMPLING_OMITTABLE_PARAMETERS,
     USAGE_OUTCOME_FAILED,
     USAGE_OUTCOME_SUCCESS,
     USAGE_STAGE_PREFLIGHT,
@@ -78,6 +80,7 @@ def validate_runtime_config(runtime_config: Optional[dict], config: 'ConfigProto
         'mode': str,
         'keep_alive': str,
         'max_tokens_param': str,
+        'omit_parameters': (list, tuple),
     }
     
     for key, expected_type in validations.items():
@@ -125,6 +128,19 @@ def validate_runtime_config(runtime_config: Optional[dict], config: 'ConfigProto
             f"runtime_config['num_ctx'] must be positive, "
             f"got {runtime_config['num_ctx']}"
         )
+
+    if 'omit_parameters' in runtime_config:
+        omitted = runtime_config['omit_parameters']
+        if not isinstance(omitted, (list, tuple)) or any(not isinstance(name, str) for name in omitted):
+            raise ConfigValidationError(
+                "runtime_config['omit_parameters'] must be a list of sampling names"
+            )
+        unknown = [name for name in omitted if name not in SAMPLING_OMITTABLE_NAMES]
+        if unknown:
+            raise ConfigValidationError(
+                f"omit_parameters has unknown sampling names: {', '.join(unknown)}. "
+                f"Allowed: {', '.join(SAMPLING_OMITTABLE_PARAMETERS)}"
+            )
 
     if 'mode' in runtime_config and runtime_config['mode'] not in VALID_MODES:
         config.logger.warning(
@@ -202,6 +218,7 @@ def check_api_availability(
     api_key: Optional[str] = None,
     timeout: int = DEFAULT_PREFLIGHT_TIMEOUT,
     max_tokens_param: str = DEFAULT_MAX_TOKENS_PARAM,
+    omit_parameters: Sequence[str] = (),
 ) -> bool:
     """
     Check whether an API endpoint and model respond before the pipeline starts.
@@ -221,6 +238,7 @@ def check_api_availability(
         timeout: Request timeout in seconds.
         max_tokens_param: Reply-length field name for OpenAI-compatible
             preflight probes; ignored by Ollama.
+        omit_parameters: Logical sampling names excluded by the probed stage.
 
     Returns:
         True if the endpoint responded with 200, False otherwise.
@@ -228,7 +246,8 @@ def check_api_availability(
     try:
         api_client = create_api_client(api_type)
         test_data = api_client.build_test_payload(
-            model_name, max_tokens_param=max_tokens_param)
+            model_name, max_tokens_param=max_tokens_param,
+            omit_parameters=omit_parameters)
 
         headers = {"Content-Type": "application/json"}
         if api_type == 'openai' and isinstance(api_key, str) and api_key.strip():

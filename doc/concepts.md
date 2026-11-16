@@ -45,17 +45,28 @@ For non-Latin (or mixed) targets, set `[validation].allowed_scripts` in the
 **profile** (`llm.toml`) so the reply validator accepts the right scripts
 (see [configuration.md](configuration.md)).
 
-## Key-name conventions
+## Key context
 
-Hints come from the **last segment** of the JSON path (suffix match, not
+Hints come from `context.toml`, not from suffixes compiled into the program.
+`init` writes a catalog that matches the **last segment** (a regex, not a
 substring):
 
-| Key pattern | Hint |
+| Key pattern | Slot |
 |---|---|
 | `*_male`, `*_female`, `*_neutral` | grammatical gender |
 | `*_plural`, `*_singular`, `*_few`, `*_zero`, `count_*` | number / count form |
 | `*_formal`, `*_informal` | formality |
-| parent segment with a suffix (`npc_female.greeting`) | hint may inherit downward |
+| parent segment with a matching rule (`npc_female.greeting`) | hint may inherit downward |
+
+A file beside the target, or a manifest `context` field, replaces that
+catalog. Rules you delete are not restored. `match = "path"` applies the
+regex to the full key path, so a flat key such as
+`Dialog.Interpolation.Pronoun.Female.ObjectCase` can fill a slot. Exact `[[leaves]]` mappings can override regex slots for a structural path
+without inheriting to descendants. One text
+per slot; file order wins inside a slot. The resource path stays in logs and
+in the preview. It enters the cache key only as the value substituted for
+`{RESOURCE_KEY}` in the user prompt. See [configuration.md](configuration.md)
+and [prompts.md](prompts.md).
 
 ## Two ways to run
 

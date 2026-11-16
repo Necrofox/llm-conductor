@@ -16,16 +16,23 @@ from llm_conductor.cli.validators import check_api_availability
 from llm_conductor.constants import (
     DEFAULT_OPENAI_PREFLIGHT_MAX_TOKENS,
     MAX_RETRY_AFTER_SECONDS,
+    MODE_STRICT,
     MODE_STYLE,
+    MODE_VERIFICATION,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    SAMPLING_OMITTABLE_PARAMETERS,
 )
 from llm_conductor.core.api_client import (
     CallOutcome,
+    build_model_payload,
     call_model_api,
     translate_key,
     verify_key,
 )
+from llm_conductor.l10n.context import KeyPath, LinguisticContext
+from llm_conductor.l10n.preview import PreviewSelection
+from llm_conductor.l10n.processor import RecursiveProcessor
 from tests.support import OLLAMA_URL, OPENAI_URL, ollama_reply, openai_reply
 
 
@@ -46,6 +53,99 @@ def _sent_json(http, index=0):
 def _openai_config(make_config, **overrides):
     return make_config(translation__api__type="openai", translation__api__url=OPENAI_URL,
                        translation__api__key="sk-test", **overrides)
+
+
+@pytest.mark.parametrize('mode', [MODE_STRICT, MODE_STYLE, MODE_VERIFICATION])
+@pytest.mark.parametrize('field, before, after, before_omit, after_omit, calls', [
+    ('max_tokens_param', 'max_tokens', 'max_completion_tokens', (), (), 2),
+    ('top_k', 40, 60, (), (), 1),
+    ('repeat_penalty', 1.0, 1.2, (), (), 1),
+    ('num_ctx', 2048, 4096, (), (), 1),
+    ('max_tokens_param', 'max_tokens', 'max_completion_tokens', ('num_predict',), ('num_predict',), 1),
+    ('top_k', 40, 40, (), ('top_k',), 1),
+    ('stop', [], [], (), ('stop',), 1),
+    ('temperature', 0.3, 0.7, (), (), 2),
+])
+def test_openai_warm_cache_tracks_only_effective_sampling(
+        make_config, http, mode, field, before, after, before_omit, after_omit, calls):
+    stage = OPERATION_VERIFICATION if mode == MODE_VERIFICATION else OPERATION_TRANSLATION
+    operation = verify_key if mode == MODE_VERIFICATION else translate_key
+    if field == 'max_tokens_param':
+        setting = f'{stage}__api__{field}'
+    elif field == 'stop' or mode == MODE_VERIFICATION:
+        setting = f'{stage}__sampling__{field}'
+    else:
+        setting = f'{stage}__sampling__{mode}__{field}'
+
+    def configured(value, omitted):
+        return make_config(**{
+            f'{stage}__api__type': 'openai', f'{stage}__api__url': OPENAI_URL,
+            f'{stage}__api__key': 'test-key',
+            f'{stage}__sampling__omit_parameters': list(omitted),
+            setting: value, 'validation__enabled': False,
+        })
+
+    def process(config):
+        preview = PreviewSelection(output_path='preview.jsonl')
+        processor = RecursiveProcessor(config, LinguisticContext(config, ()), preview=preview)
+        runtime = (config.get_verification_config() if mode == MODE_VERIFICATION
+                   else config.get_translation_config_for_mode(mode))
+        result = processor.traverse(
+            data={'title': 'Hello'}, current_path=KeyPath(()), process_func=operation,
+            glossary={}, runtime_config=runtime, mode=mode,
+            original_data={'title': 'Hello'} if mode == MODE_VERIFICATION else None,
+            is_verification=mode == MODE_VERIFICATION,
+        )
+        assert result == {'title': 'Привет'}
+        return json.loads(preview.jsonl_text())['payload']
+
+    http.post(OPENAI_URL, json=openai_reply('Привет'))
+    first = configured(before, before_omit)
+    first_payload = process(first)
+    assert len(http.calls) == 1
+    assert _sent_json(http) == first_payload
+    assert first.cache_manager.save(stage)
+
+    changed = configured(after, after_omit)
+    assert changed.cache_manager.load(stage)
+    changed_payload = process(changed)
+    assert len(http.calls) == calls
+    assert (first_payload == changed_payload) is (calls == 1)
+    assert _sent_json(http, -1) == changed_payload
+    assert changed.cache_manager.save(stage)
+
+    restored = configured(before, before_omit)
+    assert restored.cache_manager.load(stage)
+    assert process(restored) == first_payload
+    assert len(http.calls) == calls
+
+
+@pytest.mark.parametrize('mode', [MODE_STRICT, MODE_STYLE])
+@pytest.mark.parametrize('field, changed_value, omitted, calls', [
+    ('max_tokens_param', 'max_completion_tokens', False, 2),
+    ('top_k', 60, False, 1),
+    ('max_tokens_param', 'max_completion_tokens', True, 1),
+])
+def test_openai_in_run_dedup_uses_the_same_effective_sampling(
+        make_config, http, mode, field, changed_value, omitted, calls):
+    config = _openai_config(
+        make_config, cache__enabled=False, validation__enabled=False,
+        translation__sampling__omit_parameters=['num_predict'] if omitted else [],
+    )
+    processor = RecursiveProcessor(config, LinguisticContext(config, ()))
+    runtime = config.get_translation_config_for_mode(mode)
+    http.post(OPENAI_URL, json=openai_reply('Привет'))
+
+    def process(key, effective):
+        return processor.traverse(
+            data={key: 'Hello'}, current_path=KeyPath(()), process_func=translate_key,
+            glossary={}, runtime_config=effective, mode=mode,
+        )
+
+    assert process('first', runtime) == {'first': 'Привет'}
+    assert process('second', dict(runtime, **{field: changed_value})) == {'second': 'Привет'}
+    assert len(http.calls) == calls
+    assert processor.get_stats_summary()['deduplicated_leaves'] == (1 if calls == 1 else 0)
 
 
 # ============================================================================
@@ -81,6 +181,60 @@ def test_openai_request_carries_bearer_key(make_config, http):
     assert result.text == "Привет"
     assert http.calls[0].request.headers["Authorization"] == "Bearer sk-test"
     assert "max_tokens" in _sent_json(http)
+
+
+def test_claude_request_sends_temperature_and_omits_top_p(make_config, http):
+    """Claude-compatible endpoints reject top_p; the profile drops it itself."""
+    config = _openai_config(
+        make_config, logging__level="DEBUG",
+        translation__sampling__omit_parameters=["top_p"],
+    )
+    http.post(OPENAI_URL, json=openai_reply("Привет"))
+
+    assert translate_key("Hello", config, _runtime(config)).success is True
+    body = _sent_json(http)
+    assert body["temperature"] == _runtime(config)["temp"]
+    assert "top_p" not in body
+    assert config.logger.contains("top_p=omitted", level="DEBUG")
+    assert config.logger.contains(f"configured {_runtime(config)['top_p']!r}", level="DEBUG")
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+def test_omitted_num_predict_drops_the_transport_reply_limit(make_config, http, provider):
+    overrides = {"translation__sampling__omit_parameters": ["num_predict"]}
+    if provider == "openai":
+        config = _openai_config(
+            make_config, translation__api__max_tokens_param="max_completion_tokens", **overrides,
+        )
+        url, reply = OPENAI_URL, openai_reply("Привет")
+    else:
+        config = make_config(**overrides)
+        url, reply = OLLAMA_URL, ollama_reply("Привет")
+    http.post(url, json=reply)
+
+    assert translate_key(
+        "Hello", config, _runtime(config, api_type=provider, api_url=url, api_key="sk-test"),
+    ).success is True
+    body = _sent_json(http)
+    if provider == "ollama":
+        assert "num_predict" not in body["options"]
+        assert "temperature" in body["options"]
+    else:
+        assert "max_completion_tokens" not in body
+        assert "max_tokens" not in body
+        assert "temperature" in body
+        assert "top_p" in body
+
+
+def test_verification_omission_does_not_change_the_translation_request(make_config, http):
+    config = make_config(verification__sampling__omit_parameters=["top_p"])
+    http.post(OLLAMA_URL, json=ollama_reply("Привет"))
+
+    translate_key("Hello", config, _runtime(config))
+
+    assert "top_p" in _sent_json(http)["options"]
+    assert config.get_verification_config()["omit_parameters"] == ["top_p"]
+    assert _runtime(config)["omit_parameters"] == []
 
 
 def test_openai_request_uses_max_completion_tokens_from_api_section(make_config, http):
@@ -324,6 +478,36 @@ def test_preflight_openai_honours_max_tokens_param(make_config, http):
     assert "max_tokens" not in body
 
 
+@pytest.mark.parametrize('provider, tokens_key', [
+    ('ollama', 'num_predict'),
+    ('openai', 'max_tokens'),
+    ('openai', 'max_completion_tokens'),
+])
+def test_preflight_omits_reply_limit_for_a_server_that_rejects_it(
+        make_config, http, provider, tokens_key):
+    config = make_config()
+    url = OLLAMA_URL if provider == 'ollama' else OPENAI_URL
+
+    def endpoint(request):
+        payload = json.loads(request.body)
+        sampling = payload['options'] if provider == 'ollama' else payload
+        if tokens_key in sampling:
+            return 400, {}, json.dumps({'error': 'reply limit is not supported'})
+        assert payload['model'] == 'test-model'
+        assert payload['messages'] == [{'role': 'user', 'content': 'test'}]
+        if provider == 'openai':
+            assert request.headers['Authorization'] == 'Bearer test-key'
+        reply = ollama_reply('ok') if provider == 'ollama' else openai_reply('ok')
+        return 200, {}, json.dumps(reply)
+
+    http.add_callback('POST', url, callback=endpoint)
+    assert check_api_availability(
+        url, 'test-model', provider, config, api_key='test-key',
+        max_tokens_param=tokens_key, omit_parameters=['num_predict'],
+    )
+    assert len(http.calls) == 1
+
+
 @pytest.mark.parametrize("status", [401, 404, 500])
 def test_preflight_non_200_is_unavailable(make_config, http, status):
     config = make_config()
@@ -496,3 +680,118 @@ def test_non_string_api_key_degrades_instead_of_raising(make_config, http, bad_k
     assert translate_key("Hello", config, runtime).text in ("Hello", "Привет")
     for call in http.calls:
         assert "Authorization" not in call.request.headers
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+@pytest.mark.parametrize("verification", [False, True])
+def test_preview_payload_equals_the_submitted_request(make_config, http, capsys, provider, verification):
+    from llm_conductor.l10n.context import (
+        KeyPath,
+        LinguisticContext,
+        compile_leaf_context,
+    )
+    from llm_conductor.l10n.processor import RecursiveProcessor
+
+    config = make_config(cache__enabled=False, validation__enabled=False)
+    runtime = config.get_verification_config() if verification else _runtime(config)
+    runtime.update(api_type=provider, api_url=OPENAI_URL if provider == "openai" else OLLAMA_URL,
+                   api_key="fixture-secret", system_prompt="System instruction",
+                   prompt="Key {RESOURCE_KEY}\n{LINGUISTIC_CONTEXT}{GLOSSARY}Text to process:\n")
+    rules = compile_leaf_context(({"path": '["title"]', "slot": "role", "text": "Third-person referent"},))
+    data = {"title": "  Hello <b>world</b>  "}
+    original = {"title": "Hello <b>source</b>"} if verification else None
+    operation = verify_key if verification else translate_key
+    mode = "verification" if verification else MODE_STYLE
+    args = {"data": data, "current_path": KeyPath(()), "process_func": operation,
+                "glossary": {"Hello": "Bonjour"}, "runtime_config": runtime, "mode": mode,
+                "original_data": original, "is_verification": verification}
+    offline = RecursiveProcessor(config, LinguisticContext(config, rules),
+                                 preview_prompts=True, preview_only=True)
+    assert offline.traverse(**args) == data
+    offline_text = capsys.readouterr().out
+    assert "fixture-secret" not in offline_text
+    expected = json.loads(offline_text[offline_text.index("{\n"):])
+    assert expected["messages"][0]["content"] == "System instruction"
+    assert "Hello [T0]world[T1]" in expected["messages"][-1]["content"]
+    assert "Third-person referent" in expected["messages"][-1]["content"]
+    assert len(http.calls) == 0
+    reply = openai_reply("Bonjour [T0]world[T1]") if provider == "openai" else ollama_reply("Bonjour [T0]world[T1]")
+    http.post(runtime["api_url"], json=reply)
+    live = RecursiveProcessor(config, LinguisticContext(config, rules), preview_prompts=True)
+    live.traverse(**args)
+    live_text = capsys.readouterr().out
+    assert json.loads(live_text[live_text.index("{\n"):]) == expected == _sent_json(http)
+
+
+def test_preview_and_request_both_drop_an_omitted_parameter(make_config, http, capsys):
+    from llm_conductor.l10n.context import KeyPath, LinguisticContext
+    from llm_conductor.l10n.processor import RecursiveProcessor
+
+    config = make_config(
+        cache__enabled=False, validation__enabled=False,
+        translation__api__type="openai", translation__api__url=OPENAI_URL,
+        translation__api__key="sk-test",
+        translation__sampling__omit_parameters=["top_p"],
+    )
+    runtime = _runtime(config)
+    runtime.update(system_prompt="System instruction", prompt="Text to process:\n")
+    args = {
+        "data": {"title": "Hello"},
+        "current_path": KeyPath(()),
+        "process_func": translate_key,
+        "glossary": {},
+        "runtime_config": runtime,
+        "mode": MODE_STYLE,
+        "original_data": None,
+        "is_verification": False,
+    }
+    offline = RecursiveProcessor(
+        config, LinguisticContext(config), preview_prompts=True, preview_only=True,
+    )
+    assert offline.traverse(**args) == {"title": "Hello"}
+    offline_text = capsys.readouterr().out
+    expected = json.loads(offline_text[offline_text.index("{\n"):])
+    assert expected["temperature"] == runtime["temp"]
+    assert "top_p" not in expected
+    http.post(OPENAI_URL, json=openai_reply("Bonjour"))
+    live = RecursiveProcessor(config, LinguisticContext(config), preview_prompts=True)
+    live.traverse(**args)
+    live_text = capsys.readouterr().out
+    assert json.loads(live_text[live_text.index("{\n"):]) == expected == _sent_json(http)
+
+
+def test_ollama_request_drops_an_omitted_top_p(make_config, http):
+    config = make_config(translation__sampling__omit_parameters=["top_p"])
+    http.post(OLLAMA_URL, json=ollama_reply("Привет"))
+
+    assert translate_key("Hello", config, _runtime(config)).success is True
+    options = _sent_json(http)["options"]
+    assert "top_p" not in options
+    assert options["temperature"] == _runtime(config)["temp"]
+
+
+@pytest.mark.parametrize('provider', ['ollama', 'openai'])
+@pytest.mark.parametrize('mode', [MODE_STRICT, MODE_STYLE, MODE_VERIFICATION])
+@pytest.mark.parametrize('name', SAMPLING_OMITTABLE_PARAMETERS)
+def test_all_sampling_omissions_reach_both_transports_and_every_mode(
+        make_config, http, provider, mode, name):
+    stage = OPERATION_VERIFICATION if mode == MODE_VERIFICATION else OPERATION_TRANSLATION
+    url = OPENAI_URL if provider == 'openai' else OLLAMA_URL
+    config = make_config(**{
+        f'{stage}__api__type': provider, f'{stage}__api__url': url,
+        f'{stage}__api__key': 'test-key', f'{stage}__sampling__omit_parameters': [name],
+    })
+    runtime = (config.get_verification_config() if stage == OPERATION_VERIFICATION
+               else config.get_translation_config_for_mode(mode))
+    preview = build_model_payload('Hello', runtime)
+    reply = openai_reply('Привет') if provider == 'openai' else ollama_reply('Привет')
+    http.post(url, json=reply)
+    call = verify_key if stage == OPERATION_VERIFICATION else translate_key
+    assert call('Hello', config, runtime).success
+    body = _sent_json(http)
+    assert body == preview
+    sampling = body['options'] if provider == 'ollama' else body
+    transport_name = 'max_tokens' if provider == 'openai' and name == 'num_predict' else name
+    assert transport_name not in sampling
+    assert body['model'] == runtime['model']
+    assert body['messages']

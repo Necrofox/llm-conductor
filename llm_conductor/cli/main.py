@@ -19,9 +19,11 @@ import sys
 from typing import Dict, List, Tuple
 
 from llm_conductor import __version__
+from llm_conductor.cli.context_file import ContextResolver, load_contexts_for_target
 from llm_conductor.cli.dry_run import run_dry_run
 from llm_conductor.cli.init import create_config_files
 from llm_conductor.cli.locations import ConfigLocations, resolve_app_dir
+from llm_conductor.cli.paths import validate_preview_output
 from llm_conductor.cli.preflight import validate_target_inputs
 from llm_conductor.cli.run_manifest import is_legacy_list_path, is_run_manifest_path
 from llm_conductor.cli.runner import (
@@ -40,6 +42,8 @@ from llm_conductor.config import (
     RuntimeConfigFactory,
 )
 from llm_conductor.constants import (
+    CONTEXT_FILENAME,
+    CONTEXT_ORIGIN_PROGRAM,
     EXIT_CONFIG_ERROR,
     EXIT_INTERNAL_ERROR,
     EXIT_INTERRUPTED,
@@ -64,6 +68,7 @@ from llm_conductor.exceptions import (
     RunInterrupted,
     TargetError,
 )
+from llm_conductor.l10n.preview import PreviewSelection, parse_preview_path
 
 # Job flags forbidden with a TOML run manifest (precedence B). Session flags
 # (--verb, --no-cache, --dry-run) remain allowed.
@@ -72,9 +77,48 @@ _JOB_FLAG_ATTRS: Tuple[Tuple[str, str], ...] = (
     ('strict', '--strict'),
     ('llm_config', '--llm-config'),
     ('glossary', '--glossary'),
+    ('context', '--context'),
     ('result2target', '--result2target'),
     ('cache2target', '--cache2target'),
 )
+
+
+def _non_negative_int(text: str) -> int:
+    """argparse type: integer >= 0."""
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return value
+
+
+def _preview_selection_from_args(args: argparse.Namespace) -> PreviewSelection:
+    """
+    Build the run's preview filter.
+
+    Raises:
+        TargetError: If a path is not a structural JSON array, or a filter is
+            set without a preview sink.
+    """
+    raw_paths = args.preview_path or []
+    try:
+        paths = tuple(parse_preview_path(raw) for raw in raw_paths)
+    except ValueError as exc:
+        raise TargetError(f"--preview-path: {exc}") from exc
+    output = args.preview_output
+    stdout = bool(args.preview_prompts)
+    if (paths or args.preview_limit is not None) and not stdout and output is None:
+        raise TargetError(
+            "--preview-path and --preview-limit require --preview-prompts or --preview-output"
+        )
+    return PreviewSelection(
+        paths=frozenset(paths) if paths else None,
+        limit=args.preview_limit,
+        stdout=stdout,
+        output_path=os.path.abspath(output) if output else None,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -123,6 +167,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument('--llm-config', metavar='PATH', help=llm_config_help)
     run.add_argument(
+        '--context', metavar='PATH',
+        help='Key-context TOML (else context.toml beside the target, else beside the program, '
+             'else no key context; JSON targets only; forbidden with a '
+             f'{MANIFEST_EXTENSION} manifest)',
+    )
+    run.add_argument(
+        '--preview-prompts', action='store_true',
+        help='Print each shown leaf path, hint origins and the provider payload sent to the API. '
+             'With --dry-run, print only (no API). Without it, the run still calls the API.',
+    )
+    run.add_argument(
+        '--preview-path', action='append', default=None, metavar='JSON',
+        help='Exact structural path as a JSON array, such as ["flat.key"] or ["flat","key"]. '
+             'Repeat to select several paths. Filters the preview only '
+             '(session flag; allowed with a run manifest).',
+    )
+    run.add_argument(
+        '--preview-limit', type=_non_negative_int, default=None, metavar='N',
+        help='Maximum number of preview requests to show across the whole run. '
+             'Does not limit processing or API calls '
+             '(session flag; allowed with a run manifest).',
+    )
+    run.add_argument(
+        '--preview-output', metavar='PATH',
+        help='Write the preview as JSONL. Does not by itself print to stdout '
+             '(session flag; allowed with a run manifest).',
+    )
+    run.add_argument(
         '--glossary', metavar='PATH',
         help='Glossary JSON; default: glossary.json next to the target, if present '
              f'(JSON targets only; forbidden with a {MANIFEST_EXTENSION} manifest)',
@@ -142,7 +214,10 @@ def _build_parser() -> argparse.ArgumentParser:
              f'(JSON targets only; forbidden with a {MANIFEST_EXTENSION} manifest)',
     )
 
-    subcommands.add_parser('init', help='Create conductor.toml and llm.toml templates and exit')
+    subcommands.add_parser(
+        'init',
+        help='Create any missing conductor.toml, llm.toml and context.toml templates and exit',
+    )
 
     check = subcommands.add_parser('check', help='Validate conductor.toml and the model profile and exit')
     check.add_argument('--llm-config', metavar='PATH', help=llm_config_help)
@@ -161,15 +236,22 @@ def _command_init(locations: ConfigLocations) -> int:
 
 
 def _command_check(locations: ConfigLocations) -> int:
-    """Validate both configuration files without creating logs or caches; returns the exit code."""
+    """Validate configuration files without creating logs or caches; returns the exit code."""
     try:
         data = ConfigFileLoader().load(locations.conductor_path, locations.llm_path)
-    except (FileOperationError, ConfigValidationError) as e:
+        context_path = os.path.join(os.path.dirname(locations.conductor_path), CONTEXT_FILENAME)
+        if os.path.isfile(context_path):
+            ContextResolver(FileOperations(), ConfigLogger.create(log_to_file=False)).load_path(
+                context_path, CONTEXT_ORIGIN_PROGRAM,
+            )
+    except (FileOperationError, ConfigValidationError, TargetError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
     print(f"OK: {locations.conductor_path}")
     print(f"OK: {locations.llm_path} (profile: {data.profile_name})")
+    if os.path.isfile(os.path.join(os.path.dirname(locations.conductor_path), CONTEXT_FILENAME)):
+        print(f"OK: {os.path.join(os.path.dirname(locations.conductor_path), CONTEXT_FILENAME)}")
     return EXIT_SUCCESS
 
 
@@ -235,7 +317,8 @@ def _load_profiles(conductor_path: str, llm_paths: List[str],
 def _execute_run(config: Config, args: argparse.Namespace,
                  locations: ConfigLocations, target,
                  profiles: Dict[str, ConfigData],
-                 result2target: bool) -> int:
+                 result2target: bool,
+                 preview: PreviewSelection) -> int:
     """
     Resolve glossary and layout, then run the pipeline.
 
@@ -254,10 +337,27 @@ def _execute_run(config: Config, args: argparse.Namespace,
     glossaries = load_glossaries_for_target(
         target, config.file_ops, config.logger, cli_glossary=args.glossary,
     )
+    program_dir = os.path.dirname(locations.conductor_path)
+    contexts = load_contexts_for_target(
+        target, config.file_ops, config.logger,
+        cli_context=getattr(args, "context", None),
+        program_dir=program_dir,
+    )
     layout = ResultLayout.for_target(
         target, os.path.dirname(locations.conductor_path), result2target,
     )
     layout.check_disjoint(target)
+    protected_paths = [target.path, locations.conductor_path, *profiles]
+    for entry in target.entries:
+        protected_paths.append(entry.source_path)
+        if entry.draft_path is not None:
+            protected_paths.append(entry.draft_path)
+    protected_paths.extend(source.path for source in glossaries.values() if source.path is not None)
+    protected_paths.extend(source.path for source in contexts.values() if source.path is not None)
+    validate_preview_output(
+        preview.output_path, input_paths=protected_paths,
+        reserved_dirs=(layout.root, config.cache_dir, config.log_dir),
+    )
 
     stage = args.stage if args.stage is not None else RUN_STAGE_ALL
     options = RunOptions(stage=stage, strict=args.strict)
@@ -271,10 +371,28 @@ def _execute_run(config: Config, args: argparse.Namespace,
                 for entry in target.entries
             },
         )
-        return run_dry_run(
-            config, target, layout, profiles, glossaries,
+        code = run_dry_run(
+            config, target, layout, profiles, glossaries, contexts,
             default_options=options, bootstrap_llm=locations.llm_path,
         )
+        wants_preview = args.preview_prompts or args.preview_output
+        if code != EXIT_SUCCESS or not wants_preview:
+            return code
+        factories = {
+            path: RuntimeConfigFactory(data) for path, data in profiles.items()
+        }
+        endpoints = {
+            path: ProfileEndpoints(
+                translation=data.translation_api,
+                verification=data.verification_api,
+            )
+            for path, data in profiles.items()
+        }
+        return TargetRunner(
+            config, target, layout, factories, endpoints, glossaries, contexts,
+            default_options=options, preview_prompts=args.preview_prompts,
+            preview_only=True, preview=preview,
+        ).preview()
 
     factories = {
         path: RuntimeConfigFactory(data) for path, data in profiles.items()
@@ -287,8 +405,10 @@ def _execute_run(config: Config, args: argparse.Namespace,
         for path, data in profiles.items()
     }
     return TargetRunner(
-        config, target, layout, factories, endpoints, glossaries,
+        config, target, layout, factories, endpoints, glossaries, contexts,
         default_options=options,
+        preview_prompts=args.preview_prompts,
+        preview=preview,
     ).run()
 
 
@@ -301,6 +421,12 @@ def _command_run(args: argparse.Namespace, app_dir: str) -> int:
         (or printed to stderr when the configuration itself failed to load).
     """
     target_path = os.path.abspath(args.target)
+
+    try:
+        preview = _preview_selection_from_args(args)
+    except TargetError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return EXIT_USAGE_ERROR
 
     # Early contract checks that do not need Config / logs.
     if is_legacy_list_path(target_path):
@@ -387,7 +513,9 @@ def _command_run(args: argparse.Namespace, app_dir: str) -> int:
 
     code = EXIT_INTERNAL_ERROR
     try:
-        code = _execute_run(config, args, locations, target, profiles, result2target)
+        code = _execute_run(
+            config, args, locations, target, profiles, result2target, preview,
+        )
     except TargetError as e:
         config.logger.error(f"{e}. Nothing was processed.")
         code = EXIT_USAGE_ERROR

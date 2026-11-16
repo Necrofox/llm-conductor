@@ -60,6 +60,8 @@ pytest -m unit         # or integration | system
 
 Live inference (`pytest -m live`) is opt-in — only with a prepared endpoint.
 Mutation shield (when touching critical paths): `python tools/mutation_check.py`.
+The unmutated copied suite must pass before mutations run; a failing baseline
+is a harness error. The copy includes `examples/` for template checks.
 `KILLED` means a test detected the changed behavior; `SURVIVED` means it passed.
 `HARNESS_ERROR` means pytest could not provide a valid verdict (collection,
 setup/teardown, import, timeout, or runner failure). Fix the harness before
@@ -80,7 +82,10 @@ Summarized from [AGENTS.md](AGENTS.md); full operator docs are in `doc/`.
 7. LLM calls only from `_process_leaf`
 8. `sys.exit` only in `cli/main.py`
 9. Do not import `llm_conductor.config` from `core` / `l10n` / most of `cli`
-10. Schema changes go through `llm_conductor/schema.py` (and `init` templates)
+10. Schema changes go through `llm_conductor/schema.py` (and `init` templates).
+    `context.toml` uses the same schema: `TableArray` for `[[rules]]` / `[[leaves]]` and
+    `TableMap` for `[templates.<name>]`, not a flat `Setting` list. `init_rows`
+    are render-only; loading a catalog does not refill deleted rules
 
 Do not commit secrets (`conductor.toml`, `llm.toml` with literal keys, caches,
 logs). Example profiles use `*.example.toml` / `key_env`.
