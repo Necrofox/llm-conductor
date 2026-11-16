@@ -99,6 +99,23 @@ def test_cache_key_is_deterministic_md5(manager):
     assert len(key) == 32 and int(key, 16) >= 0
 
 
+def test_unkeyed_cache_hash_keeps_the_legacy_format(manager):
+    assert manager.create_cache_key(**KEY_PARTS) == "da74cf4833137071cdbfba2578601a37"
+    assert manager.create_cache_key(**KEY_PARTS, resource_key=None) == manager.create_cache_key(**KEY_PARTS)
+
+
+@pytest.mark.parametrize("resource_key", ["", "a", "items[0].name"])
+def test_keyed_cache_namespace_separates_even_an_empty_key(manager, resource_key):
+    legacy = manager.create_cache_key(**KEY_PARTS)
+    keyed = manager.create_cache_key(**KEY_PARTS, resource_key=resource_key)
+    assert keyed != legacy
+    assert keyed == manager.create_cache_key(**KEY_PARTS, resource_key=resource_key)
+    assert keyed != manager.create_cache_key(**KEY_PARTS, resource_key=resource_key + "_other")
+    assert manager.compute_fingerprints(**FINGERPRINT_PARTS, resource_key=resource_key) != (
+        manager.compute_fingerprints(**FINGERPRINT_PARTS)
+    )
+
+
 @pytest.mark.parametrize("component", sorted(KEY_PARTS))
 def test_every_request_component_changes_the_key(manager, component):
     """Regression: model/prompts/hints/sampling used not to be part of the key."""

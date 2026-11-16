@@ -553,6 +553,50 @@ def test_analysis_cache_uses_structural_paths(segments):
     assert analyzer.analyze(KeyPath(("a", "b")), "Hello")[0].instruction == "nested"
 
 
+def test_hint_origin_names_exact_local_and_inherited_rules():
+    from llm_conductor.constants import (
+        HINT_ORIGIN_EXACT,
+        HINT_ORIGIN_INHERITED,
+        HINT_ORIGIN_RULE,
+    )
+    from llm_conductor.l10n.context import compile_leaf_context
+
+    exact = compile_leaf_context(({"path": '["flat.key"]', "slot": "role", "text": "Point"},))
+    rules = compile_context_rules((
+        {"name": "npc-female", "match": "last", "pattern": "^npc_female$", "slot": "gender",
+         "text": "Feminine speaker"},
+        {"name": "title-rule", "match": "last", "pattern": "^title$", "slot": "role",
+         "text": "Local title"},
+    ))
+    analyzer = LinguisticContext(StubConfig(), exact + rules)
+
+    point = analyzer.analyze(KeyPath(("flat.key",)), "A")[0]
+    assert (point.origin, point.rule_name, point.instruction) == (HINT_ORIGIN_EXACT, "leaf-0", "Point")
+    local = analyzer.analyze(KeyPath(("title",)), "B")[0]
+    assert (local.origin, local.rule_name, local.parent_path) == (HINT_ORIGIN_RULE, "title-rule", "")
+    inherited = analyzer.analyze(KeyPath(("npc_female", "line")), "C")[0]
+    assert inherited.origin == HINT_ORIGIN_INHERITED
+    assert inherited.rule_name == "npc-female"
+    assert inherited.parent_path == KeyPath(("npc_female",)).report_key()
+    assert inherited.instruction.startswith("(inherited from parent) ")
+    assert analyzer.analyze(KeyPath(("flat", "key")), "D") == []
+
+
+def test_registered_detector_is_reported_as_a_local_rule():
+    from llm_conductor.constants import HINT_ORIGIN_RULE
+
+    context = LinguisticContext(StubConfig())
+
+    def detect(path):
+        if path.matches_suffix("_dim"):
+            return LinguisticHint(HintType.CUSTOM, "diminutive")
+        return None
+
+    context.register_pattern("diminutive", detect)
+    hint = context.analyze(KeyPath(("cat_dim",)), "x")[0]
+    assert (hint.origin, hint.rule_name) == (HINT_ORIGIN_RULE, "diminutive")
+
+
 def test_exact_context_overrides_regex_without_inheriting():
     from llm_conductor.l10n.context import compile_leaf_context
 

@@ -478,9 +478,20 @@ GLOSSARY_MARKER = "{GLOSSARY}"
 # alignment reference. Empty for translation - never present.
 ORIGINAL_TEXT_MARKER = "{ORIGINAL_TEXT}"
 # Optional per-leaf path inserted into the user prompt sent to the API.
-# Stripped before the cache key is hashed so resource identity does not
-# split otherwise identical requests.
+# When the marker is present, the substituted path is part of the request
+# hashed for the cache and in-run dedup. When it is absent, the path stays
+# diagnostic and does not split otherwise identical requests.
 RESOURCE_KEY_MARKER = "{RESOURCE_KEY}"
+# How a winning context hint was chosen. Preview reports these; they do not
+# change slot resolution order.
+HINT_ORIGIN_EXACT = "exact"
+HINT_ORIGIN_RULE = "rule"
+HINT_ORIGIN_INHERITED = "inherited"
+# Offline verification preview while stage all still has no translation.
+PREVIEW_VERIFICATION_PRELIMINARY_NOTE = (
+    "Future translation is not yet known; this editor request is preliminary "
+    "and uses the original text as a placeholder."
+)
 TRANSLATION_TEXT_MARKER = "Text to translate:\n"
 VERIFICATION_TEXT_MARKER = "Text to proofread:\n"
 
@@ -503,6 +514,9 @@ ORIGINAL_TEXT_BLOCK_NOTE = (
 # v2: generation-affecting sampling parameters join the key identity.
 # v5: invalidate replies accepted before marker-origin fragment validation.
 CACHE_KEY_VERSION = 5
+# Separate keyed requests from legacy prompts hashed with the marker removed,
+# including the empty-string resource key. Unkeyed hashes stay compatible.
+RESOURCE_KEY_CACHE_NAMESPACE = "resource-key-v1"
 
 # Generation-affecting sampling fields in the cache key / fingerprints:
 # (canonical name in the identity JSON, runtime_config key). keep_alive and

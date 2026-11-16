@@ -52,11 +52,19 @@ immediately before the text label. Empty blocks are omitted.
 Hints come from `context.toml` ([concepts.md](concepts.md)). Same text
 with different hints does not share a cache entry.
 
-`{RESOURCE_KEY}` is optional and belongs in the **user** prompt only. It is
-replaced with the leaf path on the request the API sees. The cache and
-dedup hash see the same prompt with the marker removed, so two resources
-with the same text and the same hints share an entry. A system prompt that
-contains `{RESOURCE_KEY}` is rejected: that prompt is shared by every leaf.
+`{RESOURCE_KEY}` is optional and belongs in the **user** prompt only. When
+the marker is present, it is replaced with the leaf path (`str` of the key
+path, such as `items[0].name`) on the request the API sees, and that same
+substituted prompt is the one hashed for the cache and in-run dedup. Two
+resources that send different keys therefore do not share an entry, and a
+repeat of the same request still hits the cache. When the marker is absent,
+the path stays in logs and in the preview and does not by itself keep
+identical requests apart. A system prompt that contains `{RESOURCE_KEY}` is
+rejected: that prompt is shared by every leaf. Entries stored before this
+rule, with the marker removed from the hash, are not reused for a request
+that now sends the key, including a resource whose key is the empty string.
+Keyed requests use a separate cache namespace; requests without the marker
+keep their existing hash format. No manual cache wipe is required.
 
 ## Glossary
 

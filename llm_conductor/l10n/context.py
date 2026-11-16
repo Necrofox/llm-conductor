@@ -4,7 +4,7 @@ import re
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping as AbcMapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -24,6 +24,9 @@ from llm_conductor.constants import (
     CONTEXT_MATCHES,
     DEFAULT_CONTEXT_RULES,
     GLOSSARY_DEFINITIONS_BLOCK_TEMPLATE,
+    HINT_ORIGIN_EXACT,
+    HINT_ORIGIN_INHERITED,
+    HINT_ORIGIN_RULE,
 )
 
 if TYPE_CHECKING:
@@ -235,12 +238,20 @@ class LinguisticHint:
         confidence: Detector confidence in ``[0.0, 1.0]``.
         priority: Application priority (higher wins when ordering hints).
         slot: Context channel. Defaults to ``hint_type.value``. One text per slot.
+        origin: Why this text won the slot: ``exact``, ``rule``, or ``inherited``.
+            Empty on hints built outside the analyzer.
+        rule_name: Name of the matching rule or registered detector.
+        parent_path: ``KeyPath.report_key()`` of the ancestor that supplied an
+            inherited hint. Empty otherwise.
     """
     hint_type: HintType
     instruction: str
     confidence: float = 1.0
     priority: int = 0
     slot: str = ""
+    origin: str = ""
+    rule_name: str = ""
+    parent_path: str = ""
 
     def __post_init__(self):
         """Validate fields on construction."""
@@ -293,11 +304,14 @@ class ContextRule:
 
     def as_hint(self) -> LinguisticHint:
         """The hint this rule contributes when it matches."""
+        origin = HINT_ORIGIN_EXACT if self.exact_path is not None else HINT_ORIGIN_RULE
         return LinguisticHint(
             hint_type=hint_type_for_slot(self.slot),
             instruction=self.text,
             priority=self.priority,
             slot=self.slot,
+            origin=origin,
+            rule_name=self.name,
         )
 
 
@@ -383,8 +397,6 @@ def compile_leaf_context(
     Raises:
         ValueError: If a path, slot or context text is invalid or duplicated.
     """
-    from dataclasses import replace
-
     result = []
     seen = set()
     for index, row in enumerate(rows):
@@ -560,6 +572,11 @@ class LinguisticContext:
             try:
                 detected = detector(key_path)
                 if detected is not None and detected.slot not in seen_slots:
+                    detected = replace(
+                        detected,
+                        origin=detected.origin or HINT_ORIGIN_RULE,
+                        rule_name=detected.rule_name or rule_name,
+                    )
                     hints.append(detected)
                     seen_slots.add(detected.slot)
             except Exception as e:  # noqa: BLE001 - a broken detector must not abort analysis
@@ -604,6 +621,9 @@ class LinguisticContext:
                     confidence=hint.confidence * 0.8,
                     priority=max(hint.priority - 5, 1),
                     slot=hint.slot,
+                    origin=HINT_ORIGIN_INHERITED,
+                    rule_name=hint.rule_name,
+                    parent_path=ancestor_path.report_key(),
                 )
                 inherited_hints.append(inherited_hint)
                 if self.config.is_debug_mode:

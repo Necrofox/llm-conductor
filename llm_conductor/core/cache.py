@@ -17,6 +17,7 @@ from llm_conductor.constants import (
     DEFAULT_GLOSSARY_CACHE_MAX_SIZE,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    RESOURCE_KEY_CACHE_NAMESPACE,
 )
 from llm_conductor.core.io import safe_read_file
 from llm_conductor.exceptions import FileDurabilityError
@@ -795,7 +796,8 @@ class CacheManager:
                           enhanced_prompt: str, mode: str, value: str,
                           sampling_identity: str, *, api_url: str = '',
                           allowed_scripts: Tuple[str, ...] = (),
-                          content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY) -> str:
+                          content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY,
+                          resource_key: Optional[str] = None) -> str:
         """
         Build an MD5 cache key from the full request sent to the model.
 
@@ -810,6 +812,8 @@ class CacheManager:
         the unmasked leaf source (pipeline invariant: cache stores unmasked
         results). ``sampling_identity`` is the canonical JSON from
         ``build_sampling_identity`` (no cross-parameter reuse).
+        Keyed requests append a versioned namespace and the substituted key;
+        ``None`` keeps the legacy unkeyed format, while ``""`` is a keyed request.
 
         Args:
             operation_type: OPERATION_TRANSLATION or OPERATION_VERIFICATION.
@@ -823,6 +827,7 @@ class CacheManager:
             api_url: Endpoint that generates the reply.
             allowed_scripts: Writing systems allowed by the active profile.
             content_identity: Eligibility and masking expressions.
+            resource_key: Substituted resource key, or None when no marker was used.
 
         Returns:
             32-character MD5 hex digest.
@@ -832,6 +837,8 @@ class CacheManager:
             enhanced_prompt, mode, value, sampling_identity,
             api_url, sorted(set(allowed_scripts)), content_identity,
         ]
+        if resource_key is not None:
+            cache_key_data.append((RESOURCE_KEY_CACHE_NAMESPACE, resource_key))
         cache_key_str = json.dumps(cache_key_data, ensure_ascii=False)
         return hashlib.md5(cache_key_str.encode('utf-8')).hexdigest()
 
@@ -839,7 +846,8 @@ class CacheManager:
                               prompt_template: str, hints_text: str, glossary_string: str,
                               mode: str, sampling_identity: str, *, api_url: str = '',
                               allowed_scripts: Tuple[str, ...] = (),
-                              content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY) -> dict:
+                              content_identity: Tuple[str, str] = DEFAULT_CONTENT_IDENTITY,
+                              resource_key: Optional[str] = None) -> dict:
         """
         Build short component fingerprints for miss diagnostics.
 
@@ -847,7 +855,7 @@ class CacheManager:
         only the full key decides a hit. They are stored in entry metadata
         and used by diagnose_miss() to name which component changed (model,
         system prompt, prompt template, hints, glossary, mode, sampling,
-        endpoint, or allowed scripts)
+        endpoint, allowed scripts, content rules, or a substituted resource key)
         without logging the component contents.
 
         Args:
@@ -864,6 +872,7 @@ class CacheManager:
             api_url: Endpoint that generates the reply.
             allowed_scripts: Writing systems allowed by the active profile.
             content_identity: Eligibility and masking expressions.
+            resource_key: Substituted resource key, or None when no marker was used.
 
         Returns:
             Mapping of component name to truncated hex digest.
@@ -882,6 +891,10 @@ class CacheManager:
             'allowed_scripts': json.dumps(sorted(set(allowed_scripts))),
             'content_rules': json.dumps(content_identity, ensure_ascii=False),
         }
+        if resource_key is not None:
+            components['resource_key'] = json.dumps(
+                (RESOURCE_KEY_CACHE_NAMESPACE, resource_key), ensure_ascii=False,
+            )
         return {
             name: hashlib.md5(text.encode('utf-8')).hexdigest()[:CACHE_FINGERPRINT_LENGTH]
             for name, text in components.items()

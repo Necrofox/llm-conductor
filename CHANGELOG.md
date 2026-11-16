@@ -13,16 +13,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved like a glossary with a fallback beside the program. Rules use
   `match` `last` or `path`, one text per `slot`, optional templates, and
   an exact structural-path sidecar map (`[[leaves]]`) that overrides regex slots.
-  `{RESOURCE_KEY}` fills the leaf path in the user prompt only; the cache
-  hash drops that marker. `--preview-prompts` prints the provider payload
-  (including masked leaf text and system/user messages) on a live run and,
-  with `--dry-run`, without calling the API (#8). Preview and HTTP submission
-  share payload construction; preview errors return a nonzero exit status.
-  Offline verification preview after translation warns that it uses original
-  text as a placeholder for the future translation.
+  `{RESOURCE_KEY}` fills the leaf path in the user prompt. When the marker is
+  used, that substituted value is part of the cache and dedup identity; when
+  it is absent, the path stays diagnostic and does not by itself split
+  identical requests. `--preview-prompts` prints the provider payload
+  (including masked leaf text, system/user messages, and where each final
+  hint came from) on a live run and, with `--dry-run`, without calling the
+  API (#8). `--preview-path` selects exact structural paths, `--preview-limit`
+  caps how many requests are shown, and `--preview-output` writes JSONL.
+  Those filters do not change processing, call counts, or input preflight.
+  Preview and HTTP submission share payload construction; preview errors
+  return a nonzero exit status. Offline verification preview in stage `all`
+  marks each editor request as preliminary because the future translation is
+  not yet known.
 
 ### Changed
 
+- Cache and in-run dedup hash the same user prompt that is sent. A
+  substituted `{RESOURCE_KEY}` therefore creates a distinct entry; records
+  hashed with that marker removed are not applied to new requests that send
+  the key, including an empty-string key. Keyed requests use a separate
+  namespace. `CACHE_KEY_VERSION` is unchanged, so requests that do not use
+  the marker still hit existing entries and no manual cache wipe is required.
 - Suffix and prefix hints are no longer applied as built-in runtime detectors.
   A run with no `context.toml` adds no key context. The `init` catalog keeps the
   previous gender, plural, and formality wording.
@@ -33,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preview JSONL export refuses paths that alias run inputs or loaded
+  configuration files, or enter the run's result, cache, or log directories,
+  before inference, including during dry-run. Parent-directory creation
+  failures produce a normal error outcome and preserve heartbeat finalization
+  and interruption exit codes.
 - Key-context analysis caches structural paths separately, preventing collisions
   between flat dotted keys and nested JSON paths.
 - Manifest context resolution does not load the program catalog when every

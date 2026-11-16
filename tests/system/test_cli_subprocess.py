@@ -115,6 +115,7 @@ def test_help_lists_subcommands_and_run_flags(tmp_path):
     for command in ("run", "init", "check"):
         assert command in top.stdout
     for flag in ("--target", "--stage", "--strict", "--no-cache", "--dry-run", "--preview-prompts",
+                 "--preview-path", "--preview-limit", "--preview-output",
                  "--llm-config", "--context", "--glossary", "--verb", "--result2target",
                  "--cache2target"):
         assert flag in run.stdout

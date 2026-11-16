@@ -4,6 +4,7 @@ System tests: main() of llm-conductor.py end to end, in-process, with the
 fake model (EchoModel) behind responses. They cover the run command
 contract and exit codes (doc/cli.md) without real inference.
 """
+import json
 import os
 import signal
 from pathlib import Path
@@ -104,6 +105,243 @@ def test_preview_with_dry_run_prints_prompts_and_skips_the_model(workspace, mode
     assert model.model_calls == []
     assert not workspace.exists(workspace.result("translated"))
     assert not workspace.exists(workspace.result("final"))
+
+
+def test_preview_filters_do_not_limit_a_real_run(workspace, model, run_main, capsys):
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-prompts", "--preview-limit", "1",
+        "--preview-path", '["ui","title"]',
+    ) == EXIT_SUCCESS
+
+    assert len(model.model_calls) == 7
+    printed = capsys.readouterr().out
+    assert printed.count("--- translation:") == 1
+    assert '["ui","title"]' in printed
+    final = workspace.read_json(workspace.result("final"))
+    assert final["ui"]["title"].startswith("RU(")
+    assert final["ui"]["warning"].startswith("RU(")
+    assert final["options"][0].startswith("RU(")
+
+
+def test_preview_output_distinguishes_paths_and_names_the_manifest_file(
+        workspace, model, run_main, capsys):
+    workspace.write_json("dialogs/ui.json", {
+        "flat.key": "Literal.",
+        "flat": {"key": "Nested."},
+        "items": ["Indexed."],
+    })
+    workspace.write_text(
+        "job.toml",
+        'stage = "translate"\n[[targets]]\noriginal = "dialogs/ui.json"\n',
+    )
+
+    assert run_main(
+        "run", "--target", "job.toml", "--dry-run",
+        "--preview-prompts", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+
+    assert model.model_calls == []
+    printed = capsys.readouterr().out
+    assert '["flat.key"]' in printed
+    assert '["flat","key"]' in printed
+    assert '["items",0]' in printed
+    rows = [
+        json.loads(line)
+        for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["path"] for row in rows] == [["flat.key"], ["flat", "key"], ["items", 0]]
+    assert {row["source"] for row in rows} == {"dialogs/ui.json"}
+
+
+def test_offline_all_verification_preview_is_marked_preliminary(workspace, model, run_main):
+    assert run_main(*RUN, "--dry-run", "--preview-output", "preview.jsonl") == EXIT_SUCCESS
+
+    assert model.model_calls == []
+    rows = [
+        json.loads(line)
+        for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    verification = [row for row in rows if row["operation"] == "verification"]
+    translation = [row for row in rows if row["operation"] == "translation"]
+    assert translation and verification
+    assert all(not row["preliminary"] and row["note"] == "" for row in translation)
+    assert all(row["preliminary"] for row in verification)
+    assert "not yet known" in verification[0]["note"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("destination", ["sample.json", "unused/../sample.json"])
+def test_preview_output_cannot_overwrite_original(workspace, model, run_main, destination, dry_run):
+    original = (workspace.root / "sample.json").read_bytes()
+    flags = ["--dry-run"] if dry_run else []
+    assert run_main(*RUN, *flags, "--preview-output", destination) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert (workspace.root / "sample.json").read_bytes() == original
+    assert not workspace.exists(workspace.result("final"))
+
+
+@pytest.mark.parametrize("destination", [
+    "job.toml", "draft.json", "conductor.toml", "llm.toml", "alternate.toml",
+    "context.toml", "glossary.json", "sample.json",
+])
+def test_manifest_preview_preserves_inputs_and_loaded_configs(workspace, model, run_main, destination):
+    workspace.write_json("draft.json", SAMPLE)
+    workspace.write_json("glossary.json", {"Guild": "Гильдия"})
+    profile = 'llm_config = "alternate.toml"\n' if destination == "alternate.toml" else ""
+    if profile:
+        workspace.write_text("alternate.toml", (workspace.root / "llm.toml").read_text(encoding="utf-8"))
+    workspace.write_text("job.toml", profile + '[[targets]]\noriginal = "sample.json"\ndraft = "draft.json"\n')
+    original = (workspace.root / destination).read_bytes()
+    assert run_main(
+        "run", "--target", "job.toml", "--dry-run", "--preview-output", destination,
+    ) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert (workspace.root / destination).read_bytes() == original
+
+
+@pytest.mark.parametrize("destination", [
+    "result/sample.json/translated/sample.json", "result/sample.json/leaves/sample.json",
+    "cache/translation_cache.json", "cache/progress_state.json", "logs/preview.jsonl",
+])
+def test_preview_output_cannot_enter_reserved_directories(workspace, model, run_main, destination):
+    workspace.write_text(destination, "Keep this file.")
+    assert run_main(*RUN, "--preview-output", destination) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert (workspace.root / destination).read_text(encoding="utf-8") == "Keep this file."
+
+
+def test_preview_output_rejects_a_hard_link_to_an_input(workspace, model, run_main):
+    alias = workspace.root / "preview.jsonl"
+    os.link(workspace.root / "sample.json", alias)
+    original = alias.read_bytes()
+    assert run_main(*RUN, "--dry-run", "--preview-output", str(alias)) == EXIT_USAGE_ERROR
+    assert model.requests == []
+    assert alias.read_bytes() == original
+
+
+def test_preview_output_parent_error_finalizes_heartbeat(workspace, model, run_main):
+    workspace.write_text("blocked", "Existing file.")
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-output", "blocked/preview.jsonl",
+    ) == EXIT_INTERNAL_ERROR
+    assert len(model.model_calls) == 7
+    heartbeat = workspace.read_json("cache/progress_state.json")
+    assert heartbeat["status"] == "completed"
+    assert heartbeat["exit_code"] == EXIT_INTERNAL_ERROR
+    assert workspace.read_json(workspace.result("final")) == TRANSLATED
+
+
+def test_preview_output_failure_does_not_hide_interruption(workspace, model, run_main):
+    workspace.write_text("blocked", "Existing file.")
+
+    def interrupt(call_number):
+        if call_number == 2:
+            shutdown.signal_handler(signal.SIGINT, None)
+
+    model.on_model_call = interrupt
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-output", "blocked/preview.jsonl",
+    ) == EXIT_INTERRUPTED
+    heartbeat = workspace.read_json("cache/progress_state.json")
+    assert heartbeat["status"] == "interrupted"
+    assert heartbeat["exit_code"] == EXIT_INTERRUPTED
+
+
+def test_preview_limit_is_shared_across_files_and_stages(workspace, model, run_main):
+    workspace.write_json("a.json", {"title": "Hello"})
+    workspace.write_json("b.json", {"title": "World"})
+    workspace.write_text("job.toml", '[[targets]]\noriginal="a.json"\n[[targets]]\noriginal="b.json"\n')
+    assert run_main(
+        "run", "--target", "job.toml", "--preview-limit", "3", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+    rows = [json.loads(line) for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 3
+    assert [row["source"] for row in rows] == ["a.json", "a.json", "b.json"]
+    assert len(model.model_calls) == 4
+    assert all(not row["preliminary"] for row in rows)
+
+
+def test_zero_preview_limit_replaces_export_without_limiting_processing(workspace, model, run_main):
+    workspace.write_text("preview.jsonl", "Previous export.\n")
+    assert run_main(
+        *RUN, "--stage", "translate", "--preview-limit", "0", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+    assert len(model.model_calls) == 7
+    assert (workspace.root / "preview.jsonl").read_bytes() == b""
+
+
+@pytest.mark.parametrize("selection", [("--preview-path", '["title"]'), ("--preview-limit", "0")])
+def test_preview_selection_does_not_skip_preflight_of_other_files(workspace, model, run_main, capsys, selection):
+    workspace.write_json("good.json", {"title": "Hello"})
+    workspace.write_text("bad.json", "{")
+    workspace.write_text(
+        "job.toml",
+        '[[targets]]\noriginal = "good.json"\n\n[[targets]]\noriginal = "bad.json"\n',
+    )
+
+    assert run_main(
+        "run", "--target", "job.toml", "--dry-run", "--preview-prompts",
+        *selection,
+    ) == EXIT_USAGE_ERROR
+    assert model.model_calls == []
+    captured = capsys.readouterr()
+    assert "bad.json" in captured.err + captured.out
+
+
+def test_preview_filter_without_a_sink_is_a_usage_error(workspace, run_main, capsys):
+    assert run_main(*RUN, "--preview-limit", "1") == EXIT_USAGE_ERROR
+    assert "--preview-prompts or --preview-output" in capsys.readouterr().err
+
+
+def test_preview_path_must_be_a_structural_json_array(workspace, run_main, capsys):
+    assert run_main(
+        *RUN, "--dry-run", "--preview-prompts", "--preview-path", "ui.title",
+    ) == EXIT_USAGE_ERROR
+    assert "JSON array" in capsys.readouterr().err
+
+
+def test_preview_explains_where_each_hint_came_from(workspace, model, run_main):
+    workspace.write_json("sample.json", {
+        "flat.key": "A",
+        "title": "B",
+        "npc_female": {"line": "C"},
+    })
+    workspace.write_text("context.toml", """
+[[leaves]]
+path = '["flat.key"]'
+slot = "role"
+text = "Point record."
+[[rules]]
+name = "title-rule"
+match = "last"
+pattern = '^title$'
+slot = "role"
+text = "Local title."
+[[rules]]
+name = "npc-female"
+match = "last"
+pattern = '^npc_female$'
+slot = "gender"
+text = "Feminine speaker."
+""")
+
+    assert run_main(
+        *RUN, "--stage", "translate", "--dry-run", "--preview-output", "preview.jsonl",
+    ) == EXIT_SUCCESS
+    assert model.model_calls == []
+    rows = [
+        json.loads(line)
+        for line in (workspace.root / "preview.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    by_path = {tuple(row["path"]): row["hints"] for row in rows}
+    exact = by_path[("flat.key",)][0]
+    assert (exact["origin"], exact["rule"], exact["text"]) == ("exact", "leaf-0", "Point record.")
+    local = by_path[("title",)][0]
+    assert (local["origin"], local["rule"]) == ("rule", "title-rule")
+    inherited = by_path[("npc_female", "line")][0]
+    assert (inherited["origin"], inherited["rule"], inherited["parent"]) == (
+        "inherited", "npc-female", ["npc_female"],
+    )
 
 
 def test_preview_prompts_on_a_real_run_still_calls_the_model(workspace, model, run_main, capsys):

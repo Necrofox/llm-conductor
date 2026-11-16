@@ -108,7 +108,8 @@ via immutable `RunOverrides` on a copy of the loaded data.
 **Run manifest `.toml`:** job fields (`stage`, `strict`, `llm_config`,
 `glossary`, `context`, `result2target`, `cache2target`) come only from the manifest;
 passed job CLI flags → exit 2. Session flags `--verb` / `--no-cache` /
-`--dry-run` / `--preview-prompts` still apply (`--verb` overrides manifest `verb`). Per-target
+`--dry-run` / `--preview-prompts` / `--preview-path` / `--preview-limit` /
+`--preview-output` still apply (`--verb` overrides manifest `verb`). Per-target
 fields win over run-level defaults (`target ?? run ?? default`).
 Each entry's effective `llm_config` supplies its allowed writing systems for
 both translation and verification.
@@ -183,3 +184,5 @@ These patterns cover `.Male`, `.Noun_Male.134`, and
 `Dialog.Interpolation.Pronoun.Female.ObjectCase`. A different project may use
 speaker hints instead; role labels are authored text, not inferred semantics.
 The final context texts affect cache/dedup identity; exact map paths do not.
+A resource path joins that identity only when `{RESOURCE_KEY}` substitutes it
+into the user prompt.

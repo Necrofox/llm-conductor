@@ -66,6 +66,7 @@ from llm_conductor.interfaces import (
     HeartbeatProgressProtocol,
     RuntimeConfigFactoryProtocol,
 )
+from llm_conductor.l10n.preview import PreviewSelection
 from llm_conductor.l10n.processor import process_stage_recursive
 
 
@@ -147,20 +148,23 @@ class FilePipeline:
                  heartbeat: Optional[HeartbeatProgressProtocol] = None,
                  *,
                  preview_prompts: bool = False,
-                 preview_only: bool = False):
+                 preview_only: bool = False,
+                 preview: Optional[PreviewSelection] = None):
         """
         Args:
             config: Configuration of the run (logger, caches, resilience).
             layout: Where results are written.
             heartbeat: Optional progress ticks for process_stage_recursive.
-            preview_prompts: Print the effective user prompt of each processed leaf.
+            preview_prompts: Print the effective user prompt of each shown leaf.
             preview_only: Print prompts and skip the model, the cache and result writes.
+            preview: Shared path filter, limit, and JSONL sink. Emission only.
         """
         self._config = config
         self._layout = layout
         self._heartbeat = heartbeat
         self._preview_prompts = preview_prompts
         self._preview_only = preview_only
+        self._preview = preview
 
     def process(self, entry: TargetEntry, options: RunOptions,
                 glossary: Dict[str, str],
@@ -228,7 +232,8 @@ class FilePipeline:
                     self._load_leaves_sidecar(entry)
             data = self._run_stage(
                 entry, STAGE_REDACTED, data, source, verify_key,
-                OPERATION_VERIFICATION, glossary, runtime_configs, context_rules)
+                OPERATION_VERIFICATION, glossary, runtime_configs, context_rules,
+                verification_preliminary=self._preview_only and options.translates)
             if not self._preview_only and (
                 options.translates or self._config.leaf_outcomes.sidecar_was_merged()
             ):
@@ -247,7 +252,9 @@ class FilePipeline:
                    process_func: StageFunction, operation_type: str,
                    glossary: Dict[str, str],
                    runtime_configs: Dict[str, dict],
-                   context_rules: Tuple = ()) -> Any:
+                   context_rules: Tuple = (),
+                   *,
+                   verification_preliminary: bool = False) -> Any:
         """Run one stage over the tree and write its stage result."""
         output_path = "" if self._preview_only else self._layout.prepare(stage, entry)
         return process_stage_recursive(
@@ -262,8 +269,10 @@ class FilePipeline:
             operation_type,
             runtime_config=dict(runtime_configs[operation_type]),
             context_rules=context_rules,
-            preview_prompts=self._preview_prompts or self._preview_only,
+            preview_prompts=self._preview_prompts,
             preview_only=self._preview_only,
+            preview=self._preview,
+            verification_preliminary=verification_preliminary,
             heartbeat=self._heartbeat,
         )
 
@@ -392,7 +401,8 @@ class TargetRunner:
                  default_options: Optional[RunOptions] = None,
                  *,
                  preview_prompts: bool = False,
-                 preview_only: bool = False):
+                 preview_only: bool = False,
+                 preview: Optional[PreviewSelection] = None):
         """
         Args:
             config: Bootstrap configuration (logger, caches, resilience).
@@ -414,11 +424,20 @@ class TargetRunner:
         self._default_options = default_options or RunOptions()
         self._preview_prompts = preview_prompts
         self._preview_only = preview_only
+        self._preview = preview
+
+    def _write_preview(self) -> bool:
+        """Write the preview JSONL when one was requested."""
+        if self._preview is None:
+            return True
+        return self._preview.write(self._config.file_ops, self._config.logger)
 
     def preview(self) -> int:
         """Print effective prompts for every selected stage. No locks, API or result writes."""
+        show_stdout = True if self._preview is None else self._preview.stdout
         pipeline = FilePipeline(
-            self._config, self._layout, preview_prompts=True, preview_only=True,
+            self._config, self._layout,
+            preview_prompts=show_stdout, preview_only=True, preview=self._preview,
         )
         failed = False
         for entry in self._target.entries:
@@ -433,6 +452,8 @@ class TargetRunner:
             runtime_configs = self._runtime_configs_for(entry, options)
             outcome = pipeline.process(entry, options, glossary.terms, runtime_configs, context.rules)
             failed = failed or outcome.status != FileStatus.DONE
+        if not self._write_preview():
+            failed = True
         return EXIT_INTERNAL_ERROR if failed else EXIT_SUCCESS
 
     def run(self) -> int:
@@ -465,6 +486,7 @@ class TargetRunner:
                 self._acquire_locks(locks)
                 self._execute(status, heartbeat)
         except RunInterrupted:
+            self._write_preview()
             heartbeat.set_problems(status.records)
             heartbeat.finalize(HEARTBEAT_STATUS_INTERRUPTED, EXIT_INTERRUPTED)
             raise
@@ -475,6 +497,8 @@ class TargetRunner:
             self._config.logger.error(f"Runtime configuration is invalid: {e}")
             status.record(EXIT_CONFIG_ERROR, str(e))
 
+        if not self._write_preview():
+            status.record(EXIT_INTERNAL_ERROR, "failed to write the preview JSONL")
         code = status.code
         if heartbeat.started and not heartbeat.finalized:
             heartbeat.set_problems(status.records)
@@ -671,6 +695,7 @@ class TargetRunner:
             self._config, self._layout, heartbeat=heartbeat,
             preview_prompts=self._preview_prompts,
             preview_only=self._preview_only,
+            preview=self._preview,
         )
         entries = self._target.entries
         outcomes: List[FileOutcome] = []

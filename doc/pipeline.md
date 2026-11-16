@@ -14,10 +14,13 @@ rationale kept locally, see `history/` on a maintainer checkout.
 3. Peel leading/trailing whitespace from the leaf (restore after accept).
 4. Build glossary snippet (on verify: match terms in the **original**).
 5. Key-context hints from the loaded `context.toml` (empty when no catalog is found).
-6. Assemble enhanced prompt ([prompts.md](prompts.md)). `{RESOURCE_KEY}` is
-   filled for the API copy and removed before the cache hash.
+6. Assemble enhanced prompt ([prompts.md](prompts.md)). When `{RESOURCE_KEY}`
+   is present it is filled before both the API call and the cache hash.
+   When it is absent the path is not inserted.
 7. Full cache key + component fingerprints (on the **full** leaf, including
-   outer whitespace). The resource path is not part of that hash.
+   outer whitespace). The hashed user prompt is the effective request. A
+   substituted `{RESOURCE_KEY}` is part of that string; a path that was
+   never substituted is not.
 8. Persistent cache lookup; in-run dedup (translation only) on the same key.
 9. Mask formatting tags on the peeled core → call translate/verify → unmask.
 10. Transport/parse/truncation/refusal failures → degrade to original; not
@@ -42,7 +45,8 @@ client (not trusted to the model or reply `strip()`); the cache stores the
 
 Full-request identity (see `CACHE_KEY_VERSION` / `CACHE_SAMPLING_IDENTITY_FIELDS`
 in `llm_conductor/constants.py`) includes the operation type, API URL, model name,
-system prompt, assembled user prompt (hints/glossary/original), mode, leaf value,
+system prompt, assembled user prompt (hints/glossary/original, and
+`{RESOURCE_KEY}` when that marker is used), mode, leaf value,
 the active profile's allowed writing systems, both content-rule expressions,
 and generation-affecting sampling
 (`temperature`, `top_p`, `top_k`,
@@ -50,6 +54,10 @@ and generation-affecting sampling
 `num_ctx`, `stop`). Changing any of these components
 misses the cache. Transport-only fields (`keep_alive`, `max_tokens_param`) are
 not part of identity. A key-schema bump drops stale disk entries on load.
+Requests that substitute `{RESOURCE_KEY}` also include a versioned namespace
+and the substituted value, including an empty string. This isolates them from
+legacy entries hashed with the marker removed. Requests without the marker
+keep the previous key format and can reuse existing entries.
 
 `--no-cache` / `[cache].enabled = false`: no disk read/write; in-memory dedup
 still runs. Cache dir may still be created for `progress_state.json`.

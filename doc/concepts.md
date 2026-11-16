@@ -63,10 +63,10 @@ catalog. Rules you delete are not restored. `match = "path"` applies the
 regex to the full key path, so a flat key such as
 `Dialog.Interpolation.Pronoun.Female.ObjectCase` can fill a slot. Exact `[[leaves]]` mappings can override regex slots for a structural path
 without inheriting to descendants. One text
-per slot; file order wins inside a slot. The resource path itself stays in
-logs and can be placed in the user prompt with `{RESOURCE_KEY}`; it is not
-part of the cache key. See [configuration.md](configuration.md) and
-[prompts.md](prompts.md).
+per slot; file order wins inside a slot. The resource path stays in logs and
+in the preview. It enters the cache key only as the value substituted for
+`{RESOURCE_KEY}` in the user prompt. See [configuration.md](configuration.md)
+and [prompts.md](prompts.md).
 
 ## Two ways to run
 

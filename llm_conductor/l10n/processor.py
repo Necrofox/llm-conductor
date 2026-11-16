@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import json
 import os
 import threading
 import time
@@ -50,6 +49,11 @@ from llm_conductor.l10n.context import (
     LinguisticHint,
     build_glossary_string,
 )
+from llm_conductor.l10n.preview import (
+    PreviewSelection,
+    build_preview_record,
+    format_prompt_preview,
+)
 from llm_conductor.l10n.validation import ReplyValidationResult, validate_model_reply
 from llm_conductor.utils import (
     mask_tags,
@@ -96,12 +100,6 @@ def count_string_leaves(data: Any, max_depth: int, current_depth: int = 0) -> in
     return 0
 
 
-def format_prompt_preview(path_label: str, hints: List[LinguisticHint], payload: dict) -> str:
-    """Render a leaf label, context hints and the provider payload as JSON."""
-    hint_text = "; ".join(hint.instruction for hint in hints) if hints else "(none)"
-    return f"--- {path_label} ---\nhints: {hint_text}\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
-
-
 class RecursiveProcessor:
     """
     Thread-safe recursive traversal of a JSON tree.
@@ -116,18 +114,25 @@ class RecursiveProcessor:
                  heartbeat: Optional['HeartbeatProgressProtocol'] = None,
                  *,
                  preview_prompts: bool = False,
-                 preview_only: bool = False):
+                 preview_only: bool = False,
+                 preview: Optional[PreviewSelection] = None,
+                 verification_preliminary: bool = False):
         """
         Args:
             config: Processor-facing configuration.
             context_analyzer: Linguistic analyzer of key paths.
             heartbeat: Optional progress ticks (begin_stage / note_leaf).
-            preview_prompts: Print the effective user prompt for each processed leaf.
+            preview_prompts: Print the effective user prompt for each shown leaf.
             preview_only: Print and return the original text. No cache and no model call.
+            preview: Optional path filter, limit, and JSONL sink. Filters emission only.
+            verification_preliminary: Mark offline verification requests whose
+                translation is not yet known.
         """
         self.config = config
         self.preview_prompts = preview_prompts
         self.preview_only = preview_only
+        self._preview = preview
+        self._verification_preliminary = verification_preliminary
 
         self.logger = config.logger
         self.is_debug = config.is_debug_mode
@@ -543,18 +548,22 @@ class RecursiveProcessor:
             operation_type=operation_type,
             original_text_block=original_text_block
         )
-        # {RESOURCE_KEY} is per leaf. The cache and dedup key see the prompt
-        # with the marker removed; the API sees the path filled in.
-        cache_prompt = enhanced_prompt.replace(RESOURCE_KEY_MARKER, "")
-        request_prompt = enhanced_prompt.replace(RESOURCE_KEY_MARKER, path_label)
+        # The cache, dedup, and the API share one prompt. A substituted
+        # {RESOURCE_KEY} is part of that string. Without the marker the path
+        # is not inserted, so identical requests still merge.
+        resource_key: Optional[str] = None
+        if RESOURCE_KEY_MARKER in enhanced_prompt:
+            resource_key = path_label
+            request_prompt = enhanced_prompt.replace(RESOURCE_KEY_MARKER, resource_key)
+        else:
+            request_prompt = enhanced_prompt
         masked_text, tag_map = mask_tags(core, rules)
         enhanced_config = runtime_config.copy()
         enhanced_config['prompt'] = request_prompt
-        if self.preview_prompts:
-            print(format_prompt_preview(
-                f"{operation_type}: {path_label}", linguistic_hints,
-                build_model_payload(masked_text, enhanced_config),
-            ))
+        self._emit_preview(
+            path, operation_type, linguistic_hints, masked_text, enhanced_config,
+            is_verification,
+        )
         if self.preview_only:
             return value
 
@@ -579,18 +588,20 @@ class RecursiveProcessor:
                 api_url=api_url,
                 allowed_scripts=allowed_scripts,
                 content_identity=rules.identity,
+                resource_key=resource_key,
             )
             cache_key = cache_manager.create_cache_key(
                 operation_type=operation_type,
                 model=runtime_config['model'],
                 system_prompt=runtime_config['system_prompt'],
-                enhanced_prompt=cache_prompt,
+                enhanced_prompt=request_prompt,
                 mode=mode,
                 value=value,
                 sampling_identity=sampling_identity,
                 api_url=api_url,
                 allowed_scripts=allowed_scripts,
                 content_identity=rules.identity,
+                resource_key=resource_key,
             )
 
         if self.cache_enabled and cache_manager is not None and cache_key is not None:
@@ -796,6 +807,34 @@ class RecursiveProcessor:
             )
             return value
     
+    def _emit_preview(
+            self,
+            path: KeyPath,
+            operation_type: str,
+            linguistic_hints: List[LinguisticHint],
+            masked_text: str,
+            enhanced_config: dict,
+            is_verification: bool,
+    ) -> None:
+        """Print and/or record one preview. A declined slot does not skip the leaf."""
+        selection = self._preview
+        captures = selection is not None and selection.captures
+        if not self.preview_prompts and not captures:
+            return
+        if selection is not None and selection.captures and not selection.reserve(path.report_key()):
+            return
+        source = self.config.leaf_outcomes.active_file() or ""
+        preliminary = is_verification and self._verification_preliminary
+        record = build_preview_record(
+            source, path, operation_type, linguistic_hints,
+            build_model_payload(masked_text, enhanced_config),
+            preliminary=preliminary,
+        )
+        if self.preview_prompts or (selection is not None and selection.stdout):
+            print(format_prompt_preview(record))
+        if selection is not None and selection.output_path:
+            selection.add(record)
+
     def _inject_original_text(self, prompt: str, original_text_block: str, operation_type: str) -> str:
         """
         Place the verification reference block, before any other marker is resolved.
@@ -1261,6 +1300,8 @@ def process_stage_recursive(
     *,
     preview_prompts: bool = False,
     preview_only: bool = False,
+    preview: Optional[PreviewSelection] = None,
+    verification_preliminary: bool = False,
     heartbeat: Optional['HeartbeatProgressProtocol'] = None,
 ) -> Any:
     """
@@ -1279,6 +1320,8 @@ def process_stage_recursive(
         config_prefix: Cache type whose statistics are printed
             (OPERATION_TRANSLATION / OPERATION_VERIFICATION).
         runtime_config: Flat API parameters, including 'mode'.
+        preview: Path filter, limit, and JSONL sink for this stage. Emission only.
+        verification_preliminary: Mark this stage's offline verification requests.
         heartbeat: Optional progress writer for begin_stage / note_leaf.
 
     Returns:
@@ -1292,6 +1335,7 @@ def process_stage_recursive(
     processor = RecursiveProcessor(
         config, context_analyzer, heartbeat=heartbeat,
         preview_prompts=preview_prompts, preview_only=preview_only,
+        preview=preview, verification_preliminary=verification_preliminary,
     )
 
     if config.value_deduplication_enabled and not is_verification:

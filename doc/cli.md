@@ -26,7 +26,10 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
 | `--strict` | Translation in strict mode (JSON targets only) |
 | `--no-cache` | Disable persistent cache for this run |
 | `--dry-run` | Validate inputs and print effective settings; no API, locks, or result writes (session flag) |
-| `--preview-prompts` | Print each eligible leaf path, hints, and provider JSON payload (model, system/user messages and sampling). With `--dry-run`, print only. Without it, the run still calls the API (session flag) |
+| `--preview-prompts` | Print each shown leaf: source file, structural path, operation, final hints with origin, and the provider JSON payload. With `--dry-run`, print only. Without it, the run still calls the API (session flag) |
+| `--preview-path JSON` | Exact structural path as a JSON array (`["flat.key"]`, `["flat","key"]`, `["items",0,"name"]`). Repeatable. Filters the preview only (session flag) |
+| `--preview-limit N` | Non-negative maximum number of preview requests across all files and stages. Default: unlimited; `0` emits none. Does not limit processing or API calls (session flag) |
+| `--preview-output PATH` | Write the same preview as JSONL. Does not by itself print to stdout (session flag) |
 | `--llm-config PATH` | Alternate profile, cwd-relative (JSON targets only) |
 | `--context PATH` | Key-context TOML (else `context.toml` beside the target, else beside the program, else none; JSON targets only) |
 | `--glossary PATH` | Glossary JSON (else `glossary.json` beside target, else empty; JSON targets only) |
@@ -41,7 +44,13 @@ errors, exit `3` when a resolved profile/config fails to load (same as a real
 `run`). On success it prints an effective-settings table (index, original,
 draft, stage, strict, llm_config, glossary, context, result paths).
 `--preview-prompts` with `--dry-run` then prints the provider JSON payload of
-every eligible leaf and still makes no API call and writes no results.
+every shown leaf and still makes no API call and writes no results.
+`--preview-path` and `--preview-limit` choose which of those requests are
+shown; they do not change the set of processed resources, the number of real
+calls, or input preflight. Using either without `--preview-prompts` or
+`--preview-output` is exit 2. `--preview-output` writes one JSON object per
+shown request and does not print that preview to stdout unless
+`--preview-prompts` is also set.
 During dry-run, duplicate object keys in originals and drafts emit one WARNING per file
 (last value wins) and do **not** fail the plan. Dry-run does not acquire locks
 or report lock contention. There is no `plan` / `inspect` command and no
@@ -109,7 +118,8 @@ Job fields come **only** from the manifest: `stage`, `strict`, `llm_config`,
 `glossary`, `context`, `result2target`, `cache2target`, plus per-target `original` /
 `draft` / overrides. Any **passed** job CLI flag with a `.toml` target →
 **exit 2** (not quiet ignore). Session flags still apply: `--verb`,
-`--no-cache`, `--dry-run`, `--preview-prompts`.
+`--no-cache`, `--dry-run`, `--preview-prompts`, `--preview-path`,
+`--preview-limit`, `--preview-output`.
 
 Effective settings per target: `target ?? run ?? default`. Paths
 (`original`, `draft`, manifest-relative `llm_config` / `glossary` / `context`) are
@@ -250,18 +260,42 @@ the process exit authority.
 
 ```bash
 llm-conductor run --target strings.json --stage translate --dry-run --preview-prompts
-llm-conductor run --target review.toml --dry-run --preview-prompts
+llm-conductor run --target review.toml --dry-run --preview-prompts \
+  --preview-path '["flat.key"]' --preview-limit 20 --preview-output preview.jsonl
 ```
 
 Preview and HTTP submission use the same payload builder, including masked
 leaf text, system message, context, glossary and provider-specific sampling.
-Each preview is labelled with its operation and resource path. Authentication
-headers are never printed. Preview does not contact or probe the endpoint.
-File-processing errors return a nonzero status (currently exit 1).
+Each shown request names the source file, the operation, and the structural
+path as a JSON array, so a flat key `["flat.key"]` is distinct from a nested
+path `["flat","key"]` and from an array index. Final hints are listed per
+slot with where that text won: `exact` (a `[[leaves]]` row, named `leaf-<index>`),
+`rule` (a local `[[rules]]` entry or registered detector, by name), or
+`inherited` (the same rule on an ancestor, plus that parent's structural path).
+The listing explains the hint that was already chosen; it does not change
+which text wins a slot. Authentication headers are never printed. Preview
+does not contact or probe the endpoint. File-processing errors return a
+nonzero status (currently exit 1).
+
+`--preview-output` writes the same records as JSONL. Each line has `source`,
+`path` (segment array), `operation`, `hints` (`slot`, `text`, `origin`,
+`rule`, and `parent` when inherited), `payload`, `preliminary`, and `note`.
+A manifest run puts the source file's portable relative path in `source`.
+The destination is relative to the working directory. An existing export is
+replaced, not appended to; no matches or `--preview-limit 0` produces an empty
+file. Parent directories are created when the export is written. Export paths
+that alias an original, draft, manifest, or loaded configuration/glossary/context
+file, or lie inside this run's result, cache, or log directories, are rejected
+with exit 2 before any API calls. This also applies to dry-run. Write failures
+return a nonzero status and a real run's heartbeat records its final status.
 
 With `stage = "all"`, offline preview cannot know the future translation:
-the verification payload uses the original string as a placeholder and emits
-a warning. Use verify with an existing translated result or a manifest `draft`
-for an exact verification payload. On a real run, verification previews use
-the actual translation. Previews are printed before cache/dedup lookup, so a
-printed candidate payload does not imply that an HTTP call will be needed.
+the verification payload uses the original string as a placeholder, the log
+emits a warning, and each verification record sets `preliminary` with a note
+that the future translation is not yet known and the editor request is
+preliminary. Use verify with an existing translated result or a manifest
+`draft` for an exact verification payload. On a real run, verification
+previews use the actual translation and are not marked preliminary. Previews
+are printed before cache/dedup lookup, so a printed candidate payload does
+not imply that an HTTP call will be needed. A path filter or limit stops
+only this output.
