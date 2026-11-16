@@ -153,6 +153,43 @@ original = "a.json"
     assert settings.targets[0].glossary == gloss
 
 
+def test_implicit_context_beside_manifest(base, conductor_dir, parser_deps):
+    file_ops, logger = parser_deps
+    catalog = os.path.join(base, "context.toml")
+    with open(catalog, "w", encoding="utf-8") as fh:
+        fh.write("")
+    settings = _parse(base, conductor_dir, """
+[[targets]]
+original = "a.json"
+""", file_ops, logger)
+    assert settings.targets[0].context == catalog
+
+
+def test_target_context_replaces_the_manifest_file(base, conductor_dir, parser_deps):
+    file_ops, logger = parser_deps
+    settings = _parse(base, conductor_dir, """
+context = "shared.toml"
+
+[[targets]]
+original = "a.json"
+context = "dialogs.toml"
+
+[[targets]]
+original = "b.json"
+""", file_ops, logger)
+    assert settings.targets[0].context == os.path.join(base, "dialogs.toml")
+    assert settings.targets[1].context == os.path.join(base, "shared.toml")
+
+
+def test_no_implicit_context_when_missing(base, conductor_dir, parser_deps):
+    file_ops, logger = parser_deps
+    settings = _parse(base, conductor_dir, """
+[[targets]]
+original = "a.json"
+""", file_ops, logger)
+    assert settings.targets[0].context is None
+
+
 def test_no_implicit_glossary_when_missing(base, conductor_dir, parser_deps):
     file_ops, logger = parser_deps
     settings = _parse(base, conductor_dir, """

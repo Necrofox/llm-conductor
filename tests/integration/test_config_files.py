@@ -30,7 +30,7 @@ from llm_conductor.constants import (
     MODE_STYLE,
 )
 from llm_conductor.exceptions import ConfigValidationError, FileOperationError
-from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA, ValueKind
+from llm_conductor.schema import CONDUCTOR_SCHEMA, CONTEXT_SCHEMA, LLM_SCHEMA, ValueKind
 from tests.support import base_llm_doc, deep_merge, split_overrides, write_configs
 
 SCHEMAS = [LLM_SCHEMA, CONDUCTOR_SCHEMA]
@@ -128,6 +128,18 @@ def test_multiline_falls_back_to_a_basic_string_when_a_literal_cannot_hold_the_t
 
     assert not rendered.startswith("'''")
     assert tomllib.loads(f"v = {rendered}")["v"] == text
+
+
+def test_example_context_matches_the_init_render():
+    from pathlib import Path
+
+    rendered = TomlTemplateRenderer(CONTEXT_SCHEMA).render()
+    example = Path("examples/context.example.toml").read_text(encoding="utf-8")
+
+    assert example == rendered
+    document = tomllib.loads(rendered)
+    assert document["rules"][0]["name"] == "speaker-male"
+    assert "templates" not in document
 
 
 def test_init_writes_both_templates_that_load_into_a_valid_config(tmp_path, capsys):
@@ -441,3 +453,25 @@ def test_max_tokens_param_from_llm_toml_reaches_runtime_config(tmp_path):
     assert (config.get_translation_config_for_mode(MODE_STYLE)['max_tokens_param']
             == "max_completion_tokens")
     assert config.get_verification_config()['max_tokens_param'] == "max_tokens"
+
+
+@pytest.mark.parametrize("catalog", [
+    "[[leaves]]\npath = '[]'\nslot = 'role'\ntext = 'x'\nnope = true",
+    "[templates.role]\ntext = 'x'\nnope = true",
+    "[[rules]]\nname = 'x'\nmatch = 'path'\nslot = 'role'\ntext = 'x'\nnope = true",
+    "[[leaves]]\npath = true\nslot = 'role'\ntext = 'x'",
+    "[[leaves]]\npath = '[true]'\nslot = 'role'\ntext = 'x'",
+    "[[leaves]]\npath = '[]'\nslot = 'role'\ntemplate = 'missing'",
+    "[[rules]]\nname = 'bad'\nmatch = 'path'\npattern = '['\nslot = 'role'\ntext = 'x'",
+    "[[rules]]\nname = 'bad'\nmatch = 'unknown'\nslot = 'role'\ntext = 'x'",
+])
+def test_invalid_context_catalog_fails_before_inference(tmp_path, catalog):
+    from llm_conductor.cli.context_file import ContextResolver
+    from llm_conductor.core.io import FileOperations
+    from llm_conductor.exceptions import TargetError
+    from tests.support import RecordingLogger
+
+    path = tmp_path / "context.toml"
+    path.write_text(catalog, encoding="utf-8")
+    with pytest.raises(TargetError, match="Invalid"):
+        ContextResolver(FileOperations(), RecordingLogger()).load_path(str(path))

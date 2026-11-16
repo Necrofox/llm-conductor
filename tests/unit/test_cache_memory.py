@@ -192,3 +192,23 @@ def test_evict_oldest_maintains_value_index():
     op.evict_oldest()
     assert op.value_index == {}
     assert op.evict_oldest() is None
+
+
+@pytest.mark.parametrize("durability_failure", [False, True])
+def test_coordinator_rejects_a_version_already_replaced(durability_failure):
+    coordinator = _CacheWriteCoordinator()
+    version = coordinator.next_version()
+    writes = []
+
+    def replace_file():
+        writes.append(version)
+        if durability_failure:
+            raise FileDurabilityError("replacement completed, directory sync failed")
+
+    if durability_failure:
+        with pytest.raises(FileDurabilityError):
+            coordinator.attempt_write(version, replace_file)
+    else:
+        assert coordinator.attempt_write(version, replace_file)
+    assert coordinator.attempt_write(version, lambda: writes.append(version)) is False
+    assert writes == [version]

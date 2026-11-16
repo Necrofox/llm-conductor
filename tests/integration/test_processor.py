@@ -30,8 +30,8 @@ from llm_conductor.core import shutdown
 from llm_conductor.core.api_client import CallOutcome
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.leaf_report import make_degraded, make_ok
-from llm_conductor.exceptions import FileOperationError
-from llm_conductor.l10n.context import KeyPath, LinguisticContext
+from llm_conductor.exceptions import ConfigValidationError, FileOperationError
+from llm_conductor.l10n.context import KeyPath, LinguisticContext, default_context_rules
 from llm_conductor.l10n.processor import RecursiveProcessor, process_stage_recursive
 
 SAMPLE = {
@@ -113,7 +113,7 @@ class BadReplyModel:
 
 
 def _run(config, data, model, mode=MODE_STYLE, glossary=None, original=None, verification=False):
-    processor = RecursiveProcessor(config, LinguisticContext(config))
+    processor = RecursiveProcessor(config, LinguisticContext(config, default_context_rules()))
     runtime = config.get_verification_config() if verification else config.get_translation_config_for_mode(mode)
     result = processor.traverse(
         data=data,
@@ -647,7 +647,7 @@ def test_cached_value_is_unmasked_original_text(make_config):
 
 def _key_for_leaf(config, value, path=("t",), mode=MODE_STYLE):
     """Replay the key computation from _process_leaf for a leaf with no hints/glossary."""
-    processor = RecursiveProcessor(config, LinguisticContext(config))
+    processor = RecursiveProcessor(config, LinguisticContext(config, default_context_rules()))
     runtime = config.get_translation_config_for_mode(mode)
     prompt = processor._build_enhanced_prompt(runtime['prompt'], [], "", OPERATION_TRANSLATION)
     return config.cache_manager.create_cache_key(
@@ -1007,3 +1007,62 @@ def test_process_stage_recursive_writes_stage_file_and_reports(make_config, tmp_
         assert json.load(f) == result
     assert config.logger.contains("Translated stage completed in", level='INFO')
     assert config.logger.contains("Translation cache:", level='INFO')
+
+
+def test_resource_key_changes_the_request_and_not_the_cache_identity(make_config):
+    config = make_config(translation__prompts__style="Key {RESOURCE_KEY}\nText to translate:\n")
+    model = FakeModel()
+
+    result, _ = _run(config, {"a": "Hello", "b": "Hello"}, model)
+
+    assert result == {"a": "RU(Hello)", "b": "RU(Hello)"}
+    assert len(model.calls) == 1
+    assert "Key a\n" in model.calls[0]["prompt"]
+    assert "{RESOURCE_KEY}" not in model.calls[0]["prompt"]
+    assert "Key b" not in model.calls[0]["prompt"]
+
+
+def test_resource_key_in_the_system_prompt_is_rejected(make_config):
+    with pytest.raises(ConfigValidationError, match="user prompt"):
+        make_config(translation__prompts__system="Leaf {RESOURCE_KEY}")
+
+
+def test_preview_only_prints_the_prompt_and_skips_the_model(make_config, capsys):
+    config = make_config()
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, default_context_rules()),
+        preview_prompts=True, preview_only=True,
+    )
+    model = FakeModel()
+    data = {"greeting_female": "Welcome."}
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+
+    result = processor.traverse(
+        data=data, current_path=KeyPath(()), process_func=model, glossary={},
+        runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert result == data
+    assert model.calls == []
+    printed = capsys.readouterr().out
+    assert "greeting_female" in printed
+    assert "FEMININE" in printed
+
+
+def test_preview_prompts_on_a_live_leaf_still_calls_the_model(make_config, capsys):
+    config = make_config()
+    processor = RecursiveProcessor(
+        config, LinguisticContext(config, default_context_rules()),
+        preview_prompts=True,
+    )
+    model = FakeModel()
+    runtime = config.get_translation_config_for_mode(MODE_STYLE)
+
+    result = processor.traverse(
+        data={"greeting_male": "Welcome."}, current_path=KeyPath(()), process_func=model,
+        glossary={}, runtime_config=runtime, mode=MODE_STYLE,
+    )
+
+    assert result == {"greeting_male": "RU(Welcome.)"}
+    assert len(model.calls) == 1
+    assert "greeting_male" in capsys.readouterr().out

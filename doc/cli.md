@@ -3,8 +3,8 @@
 ## Commands
 
 ```text
-llm-conductor init                          # write conductor.toml + llm.toml (no overwrite)
-llm-conductor check                         # strict validate both TOML files
+llm-conductor init                          # write conductor.toml, llm.toml, context.toml (no overwrite)
+llm-conductor check                         # strict validate the TOML files that exist
 llm-conductor run --target PATH [options]   # pipeline
 llm-conductor run --target PATH --dry-run   # preflight plan (no API / result writes)
 llm-conductor --version
@@ -26,7 +26,9 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
 | `--strict` | Translation in strict mode (JSON targets only) |
 | `--no-cache` | Disable persistent cache for this run |
 | `--dry-run` | Validate inputs and print effective settings; no API, locks, or result writes (session flag) |
+| `--preview-prompts` | Print each eligible leaf path, hints, and provider JSON payload (model, system/user messages and sampling). With `--dry-run`, print only. Without it, the run still calls the API (session flag) |
 | `--llm-config PATH` | Alternate profile, cwd-relative (JSON targets only) |
+| `--context PATH` | Key-context TOML (else `context.toml` beside the target, else beside the program, else none; JSON targets only) |
 | `--glossary PATH` | Glossary JSON (else `glossary.json` beside target, else empty; JSON targets only) |
 | `--verb LEVEL` | Log level override (session flag; also overrides manifest `verb`) |
 | `--result2target` | Write `result/` next to the target (JSON targets only) |
@@ -37,8 +39,10 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
 `run`, exit `0` on a clean plan, exit `2` on contract/path/JSON/glossary/draft
 errors, exit `3` when a resolved profile/config fails to load (same as a real
 `run`). On success it prints an effective-settings table (index, original,
-draft, stage, strict, llm_config, glossary, result paths). During dry-run,
-duplicate object keys in originals and drafts emit one WARNING per file
+draft, stage, strict, llm_config, glossary, context, result paths).
+`--preview-prompts` with `--dry-run` then prints the provider JSON payload of
+every eligible leaf and still makes no API call and writes no results.
+During dry-run, duplicate object keys in originals and drafts emit one WARNING per file
 (last value wins) and do **not** fail the plan. Dry-run does not acquire locks
 or report lock contention. There is no `plan` / `inspect` command and no
 `dry_run` field in the manifest (unknown key → exit 2).
@@ -54,7 +58,7 @@ writes no results.
 
 | Fault | Stages | Dry-run | Real run |
 |---|---|---|---|
-| Manifest / path / glossary / result-ownership contract | any | exit `2` | exit `2` |
+| Manifest / path / glossary / context / result-ownership contract | any | exit `2` | exit `2` |
 | Unreadable or invalid original JSON | any | exit `2` | exit `2` |
 | Root JSON `null` (original) | any | exit `2` | exit `2` |
 | Draft missing / unreadable / structure or marker mismatch | verify via `draft` | exit `2` | exit `2` |
@@ -84,12 +88,14 @@ stage = "all"          # all | translate | verify
 strict = false
 llm_config = "llm.toml"
 glossary = "glossary.json"
+context = "context.toml"
 
 [[targets]]
 original = "dialogs/ui.json"
 # draft = "drafts/ui.ru.json"   # implies verify; do not set stage here
 # llm_config = "profiles/editor-a.toml"
 # glossary = "glossaries/matrix.json"
+# context = "contexts/dialog.toml"
 # strict = true
 
 [[targets]]
@@ -100,13 +106,13 @@ llm_config = "profiles/mechanics.toml"
 ### Precedence B (manifest target)
 
 Job fields come **only** from the manifest: `stage`, `strict`, `llm_config`,
-`glossary`, `result2target`, `cache2target`, plus per-target `original` /
+`glossary`, `context`, `result2target`, `cache2target`, plus per-target `original` /
 `draft` / overrides. Any **passed** job CLI flag with a `.toml` target →
 **exit 2** (not quiet ignore). Session flags still apply: `--verb`,
-`--no-cache`, `--dry-run`.
+`--no-cache`, `--dry-run`, `--preview-prompts`.
 
 Effective settings per target: `target ?? run ?? default`. Paths
-(`original`, `draft`, manifest-relative `llm_config` / `glossary`) are
+(`original`, `draft`, manifest-relative `llm_config` / `glossary` / `context`) are
 relative to the manifest directory, must not use `..` to escape it, and are
 validated for the whole manifest before inference (1-based `[[targets]]`
 index in errors). Duplicate `original` after normpath/normcase and
@@ -152,6 +158,21 @@ unset everywhere → `glossary.json` beside the manifest, else empty. CLI
 `--glossary` is forbidden (precedence B).
 
 A found but invalid file is an error. Source is always logged at INFO.
+
+## Key-context resolution
+
+**JSON target:** `--context PATH` (missing → exit 2) → else `context.toml`
+beside the target → else `context.toml` beside the program (`init`) → else
+no key context.
+
+**Run manifest:** `context` on the target or run (manifest-relative); if
+unset everywhere → `context.toml` beside the manifest when that file exists,
+else the program file. CLI `--context` is forbidden (precedence B).
+
+A found but invalid file exits 2. The selected file is the whole catalog:
+it is not merged with the program file, and omitted `[[rules]]` are not
+filled back in. Source is logged at INFO. `check` validates the program
+file when it exists (invalid → exit 3); absence is success.
 
 ## Result layout
 
@@ -223,3 +244,24 @@ OS-level non-blocking locks on the target, cache dir (when cache enabled),
 and shared result root. Heartbeat JSON: `{cache_dir}/progress_state.json`
 (written even with `--no-cache`) for external monitors — report only, not
 the process exit authority.
+
+
+## Prompt preview accuracy
+
+```bash
+llm-conductor run --target strings.json --stage translate --dry-run --preview-prompts
+llm-conductor run --target review.toml --dry-run --preview-prompts
+```
+
+Preview and HTTP submission use the same payload builder, including masked
+leaf text, system message, context, glossary and provider-specific sampling.
+Each preview is labelled with its operation and resource path. Authentication
+headers are never printed. Preview does not contact or probe the endpoint.
+File-processing errors return a nonzero status (currently exit 1).
+
+With `stage = "all"`, offline preview cannot know the future translation:
+the verification payload uses the original string as a placeholder and emits
+a warning. Use verify with an existing translated result or a manifest `draft`
+for an exact verification payload. On a real run, verification previews use
+the actual translation. Previews are printed before cache/dedup lookup, so a
+printed candidate payload does not imply that an HTTP call will be needed.

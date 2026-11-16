@@ -39,9 +39,10 @@ original = "dialogs/npc/guard.json"
     ("--strict",),
     ("--llm-config", "llm.toml"),
     ("--glossary", "glossary.json"),
+    ("--context", "context.toml"),
     ("--result2target",),
     ("--cache2target",),
-], ids=["stage", "strict", "llm-config", "glossary", "result2target", "cache2target"])
+], ids=["stage", "strict", "llm-config", "glossary", "context", "result2target", "cache2target"])
 def test_job_cli_flag_with_manifest_exits_2(project, model, run_main, flag_args, capsys):
     code = run_main("run", "--target", "project/ui.toml", *flag_args)
     assert code == EXIT_USAGE_ERROR

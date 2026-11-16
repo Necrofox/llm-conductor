@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
+from llm_conductor.cli.context_file import ContextSource
 from llm_conductor.cli.draft_validate import compare_json_structure
 from llm_conductor.cli.exit_status import ExitStatus
 from llm_conductor.cli.glossary import GlossaryResolver, GlossarySource
@@ -143,20 +144,28 @@ class FilePipeline:
     """
 
     def __init__(self, config: ConfigProtocol, layout: ResultLayout,
-                 heartbeat: Optional[HeartbeatProgressProtocol] = None):
+                 heartbeat: Optional[HeartbeatProgressProtocol] = None,
+                 *,
+                 preview_prompts: bool = False,
+                 preview_only: bool = False):
         """
         Args:
             config: Configuration of the run (logger, caches, resilience).
             layout: Where results are written.
             heartbeat: Optional progress ticks for process_stage_recursive.
+            preview_prompts: Print the effective user prompt of each processed leaf.
+            preview_only: Print prompts and skip the model, the cache and result writes.
         """
         self._config = config
         self._layout = layout
         self._heartbeat = heartbeat
+        self._preview_prompts = preview_prompts
+        self._preview_only = preview_only
 
     def process(self, entry: TargetEntry, options: RunOptions,
                 glossary: Dict[str, str],
-                runtime_configs: Dict[str, dict]) -> FileOutcome:
+                runtime_configs: Dict[str, dict],
+                context_rules: Tuple = ()) -> FileOutcome:
         """
         Process one file; never raises for a problem of this file alone.
 
@@ -171,7 +180,7 @@ class FilePipeline:
         """
         logger = self._config.logger
         try:
-            return self._process(entry, options, glossary, runtime_configs)
+            return self._process(entry, options, glossary, runtime_configs, context_rules)
         except (FileOperationError, OSError) as e:
             logger.error(f"{entry.relative_path}: {e}")
             return FileOutcome(entry, FileStatus.FAILED)
@@ -181,7 +190,8 @@ class FilePipeline:
 
     def _process(self, entry: TargetEntry, options: RunOptions,
                  glossary: Dict[str, str],
-                 runtime_configs: Dict[str, dict]) -> FileOutcome:
+                 runtime_configs: Dict[str, dict],
+                 context_rules: Tuple = ()) -> FileOutcome:
         """
         The stages of one file.
 
@@ -199,8 +209,9 @@ class FilePipeline:
         if options.translates:
             data = self._run_stage(
                 entry, STAGE_TRANSLATED, data, source, translate_key,
-                OPERATION_TRANSLATION, glossary, runtime_configs)
-            self._write_leaves_sidecar(entry)
+                OPERATION_TRANSLATION, glossary, runtime_configs, context_rules)
+            if not self._preview_only:
+                self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_TRANSLATION):
                 return self._abort(entry, data, OPERATION_TRANSLATION)
 
@@ -217,11 +228,16 @@ class FilePipeline:
                     self._load_leaves_sidecar(entry)
             data = self._run_stage(
                 entry, STAGE_REDACTED, data, source, verify_key,
-                OPERATION_VERIFICATION, glossary, runtime_configs)
-            if options.translates or self._config.leaf_outcomes.sidecar_was_merged():
+                OPERATION_VERIFICATION, glossary, runtime_configs, context_rules)
+            if not self._preview_only and (
+                options.translates or self._config.leaf_outcomes.sidecar_was_merged()
+            ):
                 self._write_leaves_sidecar(entry)
             if self._config.circuit_breaker.is_tripped(OPERATION_VERIFICATION):
                 return self._abort(entry, data, OPERATION_VERIFICATION)
+
+        if self._preview_only:
+            return FileOutcome(entry, FileStatus.DONE)
 
         final_path = self._write_final(entry, data)
         self._config.logger.info(f"Final output saved to {final_path}")
@@ -230,10 +246,12 @@ class FilePipeline:
     def _run_stage(self, entry: TargetEntry, stage: str, data: Any, source: Any,
                    process_func: StageFunction, operation_type: str,
                    glossary: Dict[str, str],
-                   runtime_configs: Dict[str, dict]) -> Any:
+                   runtime_configs: Dict[str, dict],
+                   context_rules: Tuple = ()) -> Any:
         """Run one stage over the tree and write its stage result."""
+        output_path = "" if self._preview_only else self._layout.prepare(stage, entry)
         return process_stage_recursive(
-            self._layout.prepare(stage, entry),
+            output_path,
             stage,
             data,
             source,  # the English source: glossary terms are matched against it
@@ -243,6 +261,9 @@ class FilePipeline:
             glossary,
             operation_type,
             runtime_config=dict(runtime_configs[operation_type]),
+            context_rules=context_rules,
+            preview_prompts=self._preview_prompts or self._preview_only,
+            preview_only=self._preview_only,
             heartbeat=self._heartbeat,
         )
 
@@ -367,7 +388,11 @@ class TargetRunner:
                  factories: Mapping[str, RuntimeConfigFactoryProtocol],
                  endpoints: Mapping[str, ProfileEndpoints],
                  glossaries: Dict[Optional[str], GlossarySource],
-                 default_options: Optional[RunOptions] = None):
+                 contexts: Optional[Dict[Optional[str], ContextSource]] = None,
+                 default_options: Optional[RunOptions] = None,
+                 *,
+                 preview_prompts: bool = False,
+                 preview_only: bool = False):
         """
         Args:
             config: Bootstrap configuration (logger, caches, resilience).
@@ -385,7 +410,30 @@ class TargetRunner:
         self._factories = factories
         self._endpoints = endpoints
         self._glossaries = glossaries
+        self._contexts = contexts or {}
         self._default_options = default_options or RunOptions()
+        self._preview_prompts = preview_prompts
+        self._preview_only = preview_only
+
+    def preview(self) -> int:
+        """Print effective prompts for every selected stage. No locks, API or result writes."""
+        pipeline = FilePipeline(
+            self._config, self._layout, preview_prompts=True, preview_only=True,
+        )
+        failed = False
+        for entry in self._target.entries:
+            options = self._options_for(entry)
+            if options.translates and options.verifies:
+                self._config.logger.warning(
+                    "Offline verification preview uses original text as a placeholder; "
+                    "use a translated draft for an exact verification request."
+                )
+            glossary = self._glossary_for(entry)
+            context = self._context_for(entry)
+            runtime_configs = self._runtime_configs_for(entry, options)
+            outcome = pipeline.process(entry, options, glossary.terms, runtime_configs, context.rules)
+            failed = failed or outcome.status != FileStatus.DONE
+        return EXIT_INTERNAL_ERROR if failed else EXIT_SUCCESS
 
     def run(self) -> int:
         """
@@ -452,6 +500,12 @@ class TargetRunner:
         """Glossary source for one entry."""
         return self._glossaries.get(entry.glossary_path, GlossarySource())
 
+    def _context_for(self, entry: TargetEntry) -> ContextSource:
+        """Context catalog for one entry."""
+        if entry.context_path is not None and entry.context_path in self._contexts:
+            return self._contexts[entry.context_path]
+        return self._contexts.get(None, ContextSource())
+
     def _union_operations(self) -> Tuple[str, ...]:
         """Union of operation types across all entries, in pipeline order."""
         need_translate = False
@@ -484,10 +538,13 @@ class TargetRunner:
         logger.info(f"  - Cache: {cache}")
         if self._target.is_manifest:
             logger.info("  - Glossary: per-target")
+            logger.info("  - Context: per-target")
         else:
             entry = self._target.entries[0] if self._target.entries else None
             glossary = self._glossary_for(entry) if entry else GlossarySource()
+            context = self._context_for(entry) if entry else ContextSource()
             logger.info(f"  - {glossary.describe()}")
+            logger.info(f"  - {context.describe()}")
         logger.info(f"  - Log level: {self._config.log_level}")
 
     def _acquire_locks(self, locks: ExitStack) -> None:
@@ -610,13 +667,18 @@ class TargetRunner:
         Returns:
             The outcomes of the processed files.
         """
-        pipeline = FilePipeline(self._config, self._layout, heartbeat=heartbeat)
+        pipeline = FilePipeline(
+            self._config, self._layout, heartbeat=heartbeat,
+            preview_prompts=self._preview_prompts,
+            preview_only=self._preview_only,
+        )
         entries = self._target.entries
         outcomes: List[FileOutcome] = []
 
         for index, entry in enumerate(entries, 1):
             options = self._options_for(entry)
             glossary = self._glossary_for(entry)
+            context = self._context_for(entry)
             runtime_configs = self._runtime_configs_for(entry, options)
 
             if self._target.is_manifest:
@@ -625,13 +687,16 @@ class TargetRunner:
                 self._config.logger.info(
                     f"  stage={options.stage} strict={options.strict} "
                     f"llm_config={entry.llm_config_path or '(bootstrap)'} "
-                    f"glossary={glossary.path or '(none)'}"
+                    f"glossary={glossary.path or '(none)'} "
+                    f"context={context.path or '(none)'}"
                     + (f" draft={entry.draft_path}" if entry.draft_path else "")
                 )
                 self._config.logger.info("=" * 70)
 
             heartbeat.on_file_start(entry, index)
-            outcome = pipeline.process(entry, options, glossary.terms, runtime_configs)
+            outcome = pipeline.process(
+                entry, options, glossary.terms, runtime_configs, context.rules,
+            )
             outcomes.append(outcome)
             heartbeat.on_file_done(entry.relative_path, outcome.status.value)
 

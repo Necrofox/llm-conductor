@@ -19,6 +19,7 @@ from llm_conductor.cli.paths import (
     resolve_under_base,
 )
 from llm_conductor.constants import (
+    CONTEXT_FILENAME,
     GLOSSARY_FILENAME,
     LEGACY_LIST_EXTENSION,
     LLM_CONFIG_FILENAME,
@@ -49,6 +50,7 @@ class ResolvedTarget:
     strict: bool
     llm_config: str
     glossary: Optional[str]
+    context: Optional[str]
 
     def as_entry(self):
         """Convert to the runner's ``TargetEntry``."""
@@ -62,6 +64,7 @@ class ResolvedTarget:
             strict=self.strict,
             llm_config_path=self.llm_config,
             glossary_path=self.glossary,
+            context_path=self.context,
         )
 
 
@@ -97,6 +100,7 @@ class _RawTarget:
     strict: Optional[Any]
     llm_config: Optional[Any]
     glossary: Optional[Any]
+    context: Optional[Any]
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,7 @@ class _RawManifest:
     strict: Optional[Any]
     llm_config: Optional[Any]
     glossary: Optional[Any]
+    context: Optional[Any]
     targets: Tuple[_RawTarget, ...]
 
 
@@ -240,6 +245,7 @@ class RunManifestParser:
                     strict=item.get('strict'),
                     llm_config=item.get('llm_config'),
                     glossary=item.get('glossary'),
+                    context=item.get('context'),
                 ))
 
         return _RawManifest(
@@ -250,6 +256,7 @@ class RunManifestParser:
             strict=document.get('strict'),
             llm_config=document.get('llm_config'),
             glossary=document.get('glossary'),
+            context=document.get('context'),
             targets=tuple(raw_targets),
         )
 
@@ -270,6 +277,10 @@ class RunManifestParser:
         run_glossary_path = (
             self._resolve_optional_path(run_glossary, 'glossary') if run_glossary else None
         )
+        run_context = self._optional_string(raw.context, 'context')
+        run_context_path = (
+            self._resolve_optional_path(run_context, 'context') if run_context else None
+        )
 
         resolved: List[ResolvedTarget] = []
         first_original: Dict[str, int] = {}
@@ -282,6 +293,7 @@ class RunManifestParser:
                 run_strict=run_strict,
                 run_llm_path=run_llm_path,
                 run_glossary_path=run_glossary_path,
+                run_context_path=run_context_path,
                 default_llm=default_llm,
             )
             if target is None:
@@ -347,6 +359,7 @@ class RunManifestParser:
             run_strict: Optional[bool],
             run_llm_path: Optional[str],
             run_glossary_path: Optional[str],
+            run_context_path: Optional[str],
             default_llm: str,
     ) -> Optional[ResolvedTarget]:
         """Resolve one target; return None when original is unusable."""
@@ -377,6 +390,7 @@ class RunManifestParser:
         target_strict = self._optional_bool(raw.strict, 'strict', target_index=index)
         target_llm = self._optional_string(raw.llm_config, 'llm_config', target_index=index)
         target_glossary = self._optional_string(raw.glossary, 'glossary', target_index=index)
+        target_context = self._optional_string(raw.context, 'context', target_index=index)
 
         if has_draft_field and target_stage is not None:
             self._violations.append(ManifestViolation(
@@ -412,6 +426,15 @@ class RunManifestParser:
             candidate = os.path.join(self.base_dir, GLOSSARY_FILENAME)
             glossary = candidate if os.path.isfile(candidate) else None
 
+        if target_context is not None:
+            context = self._resolve_optional_path(
+                target_context, 'context', target_index=index)
+        elif run_context_path is not None:
+            context = run_context_path
+        else:
+            candidate = os.path.join(self.base_dir, CONTEXT_FILENAME)
+            context = candidate if os.path.isfile(candidate) else None
+
         return ResolvedTarget(
             index=index,
             original=original,
@@ -421,6 +444,7 @@ class RunManifestParser:
             strict=strict,
             llm_config=llm_config,
             glossary=glossary,
+            context=context,
         )
 
     def _resolve_optional_path(

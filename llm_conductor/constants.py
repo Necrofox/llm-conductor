@@ -371,10 +371,10 @@ MANIFEST_DRIVE_PATTERN = re.compile(r'^[A-Za-z]:')
 # Allowed top-level keys of a run manifest (unknown → exit 2).
 RUN_MANIFEST_RUN_KEYS = frozenset({
     'verb', 'result2target', 'cache2target', 'stage', 'strict',
-    'llm_config', 'glossary', 'targets',
+    'llm_config', 'glossary', 'context', 'targets',
 })
 RUN_MANIFEST_TARGET_KEYS = frozenset({
-    'original', 'draft', 'stage', 'strict', 'llm_config', 'glossary',
+    'original', 'draft', 'stage', 'strict', 'llm_config', 'glossary', 'context',
 })
 
 # Results go to <root>/result/{translated,redacted,final}/<relative path>.
@@ -416,6 +416,43 @@ TARGET_CACHE_DIR_NAME = 'cache'
 GLOSSARY_FILENAME = 'glossary.json'
 GLOSSARY_ORIGIN_OPTION = '--glossary'
 GLOSSARY_ORIGIN_TARGET = 'next to the target'
+# Key-context catalog. init writes it beside the profile; a file next to the
+# target or a manifest field replaces that catalog entirely.
+CONTEXT_FILENAME = 'context.toml'
+CONTEXT_ORIGIN_OPTION = '--context'
+CONTEXT_ORIGIN_TARGET = 'next to the target'
+CONTEXT_ORIGIN_PROGRAM = 'next to the program'
+CONTEXT_MATCH_LAST = 'last'
+CONTEXT_MATCH_PATH = 'path'
+CONTEXT_MATCHES = (CONTEXT_MATCH_LAST, CONTEXT_MATCH_PATH)
+# One rule of the init catalog: name, match, pattern, slot, priority, text.
+# Speaker rules precede the generic suffix of the same slot.
+DEFAULT_CONTEXT_RULES = (
+    ("speaker-male", CONTEXT_MATCH_LAST, r"(?i)^speaker_(?:.*_)?male$", "gender", 10,
+     "Speaker is MALE - use masculine verb endings and pronouns if the target language marks gender there"),
+    ("speaker-female", CONTEXT_MATCH_LAST, r"(?i)^speaker_(?:.*_)?female$", "gender", 10,
+     "Speaker is FEMALE - use feminine verb endings and pronouns if the target language marks gender there"),
+    ("suffix-masculine", CONTEXT_MATCH_LAST, r"(?i)(?:_male|_m|_masculine)$", "gender", 10,
+     "Use MASCULINE grammatical forms if the target language has grammatical gender (male speaker/subject)"),
+    ("suffix-feminine", CONTEXT_MATCH_LAST, r"(?i)(?:_female|_f|_feminine)$", "gender", 10,
+     "Use FEMININE grammatical forms if the target language has grammatical gender (female speaker/subject)"),
+    ("suffix-neuter", CONTEXT_MATCH_LAST, r"(?i)(?:_neutral|_n|_neuter)$", "gender", 10,
+     "Use NEUTER grammatical forms if the target language has grammatical gender"),
+    ("suffix-plural", CONTEXT_MATCH_LAST, r"(?i)(?:_plural|_many|_multiple)$", "plural", 5,
+     "Translate in PLURAL form (many items) if the target language distinguishes number"),
+    ("suffix-singular", CONTEXT_MATCH_LAST, r"(?i)(?:_single|_one|_singular)$", "plural", 5,
+     "Translate in SINGULAR form (one item) if the target language distinguishes number"),
+    ("suffix-few", CONTEXT_MATCH_LAST, r"(?i)_few$", "plural", 5,
+     "Translate for FEW items (a small count, e.g. 2-4) if the target language has a dedicated form for it"),
+    ("suffix-zero", CONTEXT_MATCH_LAST, r"(?i)(?:_zero|_none|_empty)$", "plural", 5,
+     "Translate for ZERO items (no items) if the target language has a distinct form for it"),
+    ("prefix-count", CONTEXT_MATCH_LAST, r"(?i)^count_", "plural", 3,
+     "Translate as a COUNTABLE noun"),
+    ("suffix-formal", CONTEXT_MATCH_LAST, r"(?i)(?:_formal|_polite|_respectful)$", "formality", 7,
+     "Use FORMAL address forms if the target language distinguishes formal/informal address (formal tone)"),
+    ("suffix-informal", CONTEXT_MATCH_LAST, r"(?i)(?:_informal|_casual|_friendly)$", "formality", 7,
+     "Use INFORMAL address forms if the target language distinguishes formal/informal address (casual tone)"),
+)
 
 # Log file name: conductor_<target name>_<start time>.log
 LOG_FILE_PREFIX = 'conductor'
@@ -440,6 +477,10 @@ GLOSSARY_MARKER = "{GLOSSARY}"
 # Verification-only marker: the masked English source, inserted for
 # alignment reference. Empty for translation - never present.
 ORIGINAL_TEXT_MARKER = "{ORIGINAL_TEXT}"
+# Optional per-leaf path inserted into the user prompt sent to the API.
+# Stripped before the cache key is hashed so resource identity does not
+# split otherwise identical requests.
+RESOURCE_KEY_MARKER = "{RESOURCE_KEY}"
 TRANSLATION_TEXT_MARKER = "Text to translate:\n"
 VERIFICATION_TEXT_MARKER = "Text to proofread:\n"
 

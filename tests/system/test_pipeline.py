@@ -95,6 +95,24 @@ def test_model_never_sees_raw_tags(workspace, model, run_main):
         assert "<b>" not in content and "{0}" not in content and "\n" not in content.split("the text: ")[-1]
 
 
+def test_preview_with_dry_run_prints_prompts_and_skips_the_model(workspace, model, run_main, capsys):
+    assert run_main(*RUN, "--dry-run", "--preview-prompts") == EXIT_SUCCESS
+
+    printed = capsys.readouterr().out
+    assert "greeting_male" in printed
+    assert "MASCULINE" in printed
+    assert model.model_calls == []
+    assert not workspace.exists(workspace.result("translated"))
+    assert not workspace.exists(workspace.result("final"))
+
+
+def test_preview_prompts_on_a_real_run_still_calls_the_model(workspace, model, run_main, capsys):
+    assert run_main(*RUN, "--stage", "translate", "--preview-prompts") == EXIT_SUCCESS
+
+    assert "greeting_female" in capsys.readouterr().out
+    assert model.calls_with("FEMININE")
+
+
 def test_gender_hints_reach_the_model(workspace, model, run_main):
     run_main(*RUN, "--stage", "translate")
 
@@ -1249,3 +1267,41 @@ def test_verify_rejects_stale_translated_structure(
     combined = "".join(capsys.readouterr())
     assert "translated structure does not match original" in combined
     assert fragment in combined
+
+
+def test_preview_reports_sidecar_failure(workspace, run_main):
+    workspace.write_json(workspace.result("translated"), SAMPLE)
+    workspace.write_json("result/sample.json/leaves/sample.json", {"schema_version": 1})
+    assert run_main(*RUN, "--stage", "verify", "--dry-run", "--preview-prompts") != EXIT_SUCCESS
+
+
+def test_manifest_ignores_unselected_program_context(workspace, run_main):
+    workspace.write_text("context.toml", "invalid = true")
+    workspace.write_text("selected.toml", "")
+    workspace.write_text("job.toml", 'context = "selected.toml"\nstage = "translate"\n'
+                         '[[targets]]\noriginal = "sample.json"\n')
+    assert run_main("run", "--target", "job.toml", "--dry-run") == EXIT_SUCCESS
+
+
+def test_exact_sidecar_map_reaches_preview_and_model(workspace, model, run_main, capsys):
+    workspace.write_json("sample.json", {"a.b": "Hello", "a": {"b": "Hello"}})
+    workspace.write_text("context.toml", """
+[templates.role]
+text = "Referent: {value}"
+[[leaves]]
+path = '["a.b"]'
+slot = "gender"
+template = "role"
+value = "third-person feminine"
+[[leaves]]
+path = '["a","b"]'
+slot = "gender"
+text = "Speaker: masculine"
+""")
+    assert run_main(*RUN, "--stage", "translate", "--dry-run", "--preview-prompts") == EXIT_SUCCESS
+    preview = capsys.readouterr().out
+    assert "third-person feminine" in preview and "Speaker: masculine" in preview
+    assert model.model_calls == []
+    assert run_main(*RUN, "--stage", "translate") == EXIT_SUCCESS
+    assert len(model.calls_with("Referent: third-person feminine")) == 1
+    assert len(model.calls_with("Speaker: masculine")) == 1

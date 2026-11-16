@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `context.toml` key-context catalog, written by `init` from `schema.py` and
+  resolved like a glossary with a fallback beside the program. Rules use
+  `match` `last` or `path`, one text per `slot`, optional templates, and
+  an exact structural-path sidecar map (`[[leaves]]`) that overrides regex slots.
+  `{RESOURCE_KEY}` fills the leaf path in the user prompt only; the cache
+  hash drops that marker. `--preview-prompts` prints the provider payload
+  (including masked leaf text and system/user messages) on a live run and,
+  with `--dry-run`, without calling the API (#8). Preview and HTTP submission
+  share payload construction; preview errors return a nonzero exit status.
+  Offline verification preview after translation warns that it uses original
+  text as a placeholder for the future translation.
+
+### Changed
+
+- Suffix and prefix hints are no longer applied as built-in runtime detectors.
+  A run with no `context.toml` adds no key context. The `init` catalog keeps the
+  previous gender, plural, and formality wording.
+- Mutation checks require a passing unmutated baseline, include example files
+  in the test copy, and run unit tests before integration and system tests.
+  Rewriting an already replaced cache snapshot version is no longer treated
+  as an equivalent mutation; dedicated tests detect it.
+
+### Fixed
+
+- Key-context analysis caches structural paths separately, preventing collisions
+  between flat dotted keys and nested JSON paths.
+- Manifest context resolution does not load the program catalog when every
+  target selects another catalog; an invalid unused fallback cannot block a run.
+
 ## [1.1.2] - 2026-11-15
 
 ### Added

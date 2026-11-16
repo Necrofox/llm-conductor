@@ -62,6 +62,7 @@ class TargetEntry:
     strict: bool = False
     llm_config_path: Optional[str] = None  # absolute llm.toml; None → bootstrap Config
     glossary_path: Optional[str] = None    # absolute glossary; None → empty terms
+    context_path: Optional[str] = None     # absolute context.toml; None → program file or empty
 
     def __post_init__(self) -> None:
         """Reject unsafe result paths before configuration, inference or writes."""

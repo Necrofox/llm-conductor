@@ -17,7 +17,7 @@ working example (often English→another language), not a product limit.
 
 - Recursive JSON of any depth; non-strings left untouched
 - Per-string isolation (no batching unrelated keys into one prompt)
-- Key-name linguistic hints (`_male` / `_female` / `_plural` / …)
+- Key-context hints from `context.toml` (the `init` catalog covers `_male` / `_female` / `_plural` / …)
 - Glossary injection, formatting-tag masking, disk cache + in-run dedup
 - Reply validation, consecutive-failure breaker, OS locks, progress heartbeat
 - Independent transports for translation vs verification
@@ -46,7 +46,7 @@ Or download `llm-conductor.exe` from
 ### 2. Configs next to the program
 
 ```bash
-llm-conductor init               # conductor.toml + llm.toml
+llm-conductor init               # conductor.toml + llm.toml + context.toml
 # portable checkout:
 python llm-conductor.py init
 ```
@@ -99,9 +99,15 @@ Same English text, different key suffixes → separate requests and (usually)
 different grammatical forms in the target language. Full prompt rules:
 [doc/prompts.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/prompts.md).
 
-## Key-name conventions
+## Key context
 
-| Pattern | Hint |
+`init` writes `context.toml` with the suffix catalog below. A file beside the
+target, or a manifest `context` field, replaces that catalog entirely. Add
+`match = "path"` rules there for dotted keys, or `[[leaves]]` entries for exact
+structural paths and explicit speaker/referent roles. See
+[doc/concepts.md](https://github.com/Necrofox/llm-conductor/blob/main/doc/concepts.md).
+
+| Pattern | Slot |
 |---|---|
 | `*_male`, `*_female`, `*_neutral` | gender |
 | `*_plural`, `*_singular`, `*_few`, `*_zero`, `count_*` | number |

@@ -34,6 +34,7 @@ from llm_conductor.constants import (
     MODE_STRICT,
     OPERATION_TRANSLATION,
     OPERATION_VERIFICATION,
+    RESOURCE_KEY_MARKER,
     TRACE_LOG_FILE_PREFIX,
     TRACE_LOG_LEVEL,
     TRACE_LOG_LEVEL_NAME,
@@ -701,6 +702,11 @@ class ConfigData:
         """
         for endpoint in (self.translation_api, self.verification_api):
             endpoint.validate()
+            if RESOURCE_KEY_MARKER in endpoint.system_prompt:
+                raise ConfigValidationError(
+                    f"{RESOURCE_KEY_MARKER} belongs in the user prompt; "
+                    f"the system prompt is shared by every leaf"
+                )
 
         for mode in (self.translation_strict, self.translation_style, self.verification):
             mode.validate()

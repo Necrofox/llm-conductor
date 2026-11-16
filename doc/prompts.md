@@ -37,7 +37,7 @@ can be replaced or disabled with `[processing].mask_pattern` in
 - Markers may move with word order; lost or invented markers fail validation
   when the reply validator is enabled ([pipeline.md](pipeline.md)).
 
-## `{LINGUISTIC_CONTEXT}` and `{GLOSSARY}`
+## `{LINGUISTIC_CONTEXT}`, `{GLOSSARY}`, and `{RESOURCE_KEY}`
 
 The pipeline injects titled blocks. Prefer **both markers** explicitly,
 immediately before the text label. Empty blocks are omitted.
@@ -49,8 +49,14 @@ immediately before the text label. Empty blocks are omitted.
 | only `{GLOSSARY}` | context then glossary at the marker |
 | none | before the last sentence containing `translate` / `verify`, else appended |
 
-Hints come from key-name conventions ([concepts.md](concepts.md)). Same text
+Hints come from `context.toml` ([concepts.md](concepts.md)). Same text
 with different hints does not share a cache entry.
+
+`{RESOURCE_KEY}` is optional and belongs in the **user** prompt only. It is
+replaced with the leaf path on the request the API sees. The cache and
+dedup hash see the same prompt with the marker removed, so two resources
+with the same text and the same hints share an entry. A system prompt that
+contains `{RESOURCE_KEY}` is rejected: that prompt is shared by every leaf.
 
 ## Glossary
 
@@ -108,3 +114,12 @@ changes. Large files mean a full re-run after a prompt edit.
 - [ ] Verification forbids reverse translation; includes `{ORIGINAL_TEXT}`
 - [ ] `[validation].allowed_scripts` matches the target writing system
 - [ ] Spot-check with `examples/sample.json` on real inference
+
+
+## Inspecting the effective request
+
+`run --dry-run --preview-prompts` prints the actual provider payload built by
+the same function used for HTTP submission, including system/user messages,
+masked leaf text and sampling. See [cli.md](cli.md#prompt-preview-accuracy)
+for the offline verification limitation. Exact context exceptions can be
+specified in the [sidecar map](configuration.md#exact-sidecar-context-map).

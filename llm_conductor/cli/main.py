@@ -19,6 +19,7 @@ import sys
 from typing import Dict, List, Tuple
 
 from llm_conductor import __version__
+from llm_conductor.cli.context_file import ContextResolver, load_contexts_for_target
 from llm_conductor.cli.dry_run import run_dry_run
 from llm_conductor.cli.init import create_config_files
 from llm_conductor.cli.locations import ConfigLocations, resolve_app_dir
@@ -40,6 +41,8 @@ from llm_conductor.config import (
     RuntimeConfigFactory,
 )
 from llm_conductor.constants import (
+    CONTEXT_FILENAME,
+    CONTEXT_ORIGIN_PROGRAM,
     EXIT_CONFIG_ERROR,
     EXIT_INTERNAL_ERROR,
     EXIT_INTERRUPTED,
@@ -72,6 +75,7 @@ _JOB_FLAG_ATTRS: Tuple[Tuple[str, str], ...] = (
     ('strict', '--strict'),
     ('llm_config', '--llm-config'),
     ('glossary', '--glossary'),
+    ('context', '--context'),
     ('result2target', '--result2target'),
     ('cache2target', '--cache2target'),
 )
@@ -123,6 +127,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument('--llm-config', metavar='PATH', help=llm_config_help)
     run.add_argument(
+        '--context', metavar='PATH',
+        help='Key-context TOML (else context.toml beside the target, else beside the program, '
+             'else no key context; JSON targets only; forbidden with a '
+             f'{MANIFEST_EXTENSION} manifest)',
+    )
+    run.add_argument(
+        '--preview-prompts', action='store_true',
+        help='Print each leaf path, hints and the provider payload sent to the API. '
+             'With --dry-run, print only (no API). Without it, the run still calls the API.',
+    )
+    run.add_argument(
         '--glossary', metavar='PATH',
         help='Glossary JSON; default: glossary.json next to the target, if present '
              f'(JSON targets only; forbidden with a {MANIFEST_EXTENSION} manifest)',
@@ -161,15 +176,22 @@ def _command_init(locations: ConfigLocations) -> int:
 
 
 def _command_check(locations: ConfigLocations) -> int:
-    """Validate both configuration files without creating logs or caches; returns the exit code."""
+    """Validate configuration files without creating logs or caches; returns the exit code."""
     try:
         data = ConfigFileLoader().load(locations.conductor_path, locations.llm_path)
-    except (FileOperationError, ConfigValidationError) as e:
+        context_path = os.path.join(os.path.dirname(locations.conductor_path), CONTEXT_FILENAME)
+        if os.path.isfile(context_path):
+            ContextResolver(FileOperations(), ConfigLogger.create(log_to_file=False)).load_path(
+                context_path, CONTEXT_ORIGIN_PROGRAM,
+            )
+    except (FileOperationError, ConfigValidationError, TargetError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
     print(f"OK: {locations.conductor_path}")
     print(f"OK: {locations.llm_path} (profile: {data.profile_name})")
+    if os.path.isfile(os.path.join(os.path.dirname(locations.conductor_path), CONTEXT_FILENAME)):
+        print(f"OK: {os.path.join(os.path.dirname(locations.conductor_path), CONTEXT_FILENAME)}")
     return EXIT_SUCCESS
 
 
@@ -254,6 +276,12 @@ def _execute_run(config: Config, args: argparse.Namespace,
     glossaries = load_glossaries_for_target(
         target, config.file_ops, config.logger, cli_glossary=args.glossary,
     )
+    program_dir = os.path.dirname(locations.conductor_path)
+    contexts = load_contexts_for_target(
+        target, config.file_ops, config.logger,
+        cli_context=getattr(args, "context", None),
+        program_dir=program_dir,
+    )
     layout = ResultLayout.for_target(
         target, os.path.dirname(locations.conductor_path), result2target,
     )
@@ -271,10 +299,26 @@ def _execute_run(config: Config, args: argparse.Namespace,
                 for entry in target.entries
             },
         )
-        return run_dry_run(
-            config, target, layout, profiles, glossaries,
+        code = run_dry_run(
+            config, target, layout, profiles, glossaries, contexts,
             default_options=options, bootstrap_llm=locations.llm_path,
         )
+        if code != EXIT_SUCCESS or not args.preview_prompts:
+            return code
+        factories = {
+            path: RuntimeConfigFactory(data) for path, data in profiles.items()
+        }
+        endpoints = {
+            path: ProfileEndpoints(
+                translation=data.translation_api,
+                verification=data.verification_api,
+            )
+            for path, data in profiles.items()
+        }
+        return TargetRunner(
+            config, target, layout, factories, endpoints, glossaries, contexts,
+            default_options=options, preview_only=True,
+        ).preview()
 
     factories = {
         path: RuntimeConfigFactory(data) for path, data in profiles.items()
@@ -287,8 +331,9 @@ def _execute_run(config: Config, args: argparse.Namespace,
         for path, data in profiles.items()
     }
     return TargetRunner(
-        config, target, layout, factories, endpoints, glossaries,
+        config, target, layout, factories, endpoints, glossaries, contexts,
         default_options=options,
+        preview_prompts=args.preview_prompts,
     ).run()
 
 

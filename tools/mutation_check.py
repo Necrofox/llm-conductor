@@ -25,7 +25,6 @@ Equivalent mutations (5th tuple element = True) do not change behaviour
 and are expected to survive; the list is for the history of findings:
   - unmask_order: [T1] is not a prefix of [T10] (closing bracket), so
     replacement order in unmask_tags() has no effect — doc/pipeline.md;
-  - coord_lt: snapshot version numbers are unique, equality is unreachable.
 """
 import shutil
 import subprocess
@@ -38,7 +37,7 @@ from llm_conductor.core.io import FileOperations, safe_read_file
 from llm_conductor.exceptions import FileOperationError
 
 REPO = Path(__file__).resolve().parents[1]
-COPIED_DIRS = ("llm_conductor", "tests", "doc")
+COPIED_DIRS = ("llm_conductor", "tests", "doc", "examples")
 COPIED_FILES = (
     "llm-conductor.py", "llm-conductor.spec", "pytest.ini", "pyproject.toml",
     "README.md", "LICENSE", ".gitignore", ".gitattributes",
@@ -75,7 +74,7 @@ MUTANTS = [
     ("no_version_check", "llm_conductor/core/cache.py", "if entry.get('cache_key_version') != CACHE_KEY_VERSION:", "if False:", "load: old key format is accepted"),
     ("no_deepcopy", "llm_conductor/core/cache.py", "return copy.deepcopy(value)", "return value", "get: without deepcopy"),
     ("deindex_skip", "llm_conductor/core/cache.py", "        self.deindex_key(cache_key, value_hash)\n        return cache_key", "        return cache_key", "eviction does not clean value_index"),
-    ("coord_lt", "llm_conductor/core/cache.py", "if version <= self._last_written_version:", "if version < self._last_written_version:", "coordinator: rewrite of the same version", True),
+    ("coord_lt", "llm_conductor/core/cache.py", "if version <= self._last_written_version:", "if version < self._last_written_version:", "coordinator: rewrite of the same version"),
     ("glossary_lru_off", "llm_conductor/core/cache.py", "                self._cache.move_to_end(cache_key)\n                self._hits += 1", "                self._hits += 1", "glossary LRU becomes FIFO"),
     ("inherit_priority", "llm_conductor/l10n/context.py", "priority=max(hint.priority - 5, 1)", "priority=hint.priority", "inherited hint without priority demotion"),
     ("hints_sort_asc", "llm_conductor/l10n/context.py", "hints.sort(reverse=True)", "hints.sort()", "hints sorted by ascending priority"),
@@ -113,7 +112,9 @@ MUTANTS = [
     ("unmask_silent_debug", "llm_conductor/utils.py", "if missing_markers and config.is_debug_mode:", "if False:", "lost markers are not logged"),
     ("glossary_by_translation", "llm_conductor/l10n/processor.py", "glossary_string = build_glossary_string(original_data, glossary, self.config)", "glossary_string = build_glossary_string(value, glossary, self.config)", "verification glossary keyed off the translation"),
     # Configuration layer: strict TOML schema, key lookup, path anchoring, init.
-    ("schema_unknown_ignored", "llm_conductor/schema.py", "errors.append(f\"unknown key", "(f\"unknown key", "unknown TOML keys are silently accepted"),
+    ('schema_unknown_ignored', 'llm_conductor/schema.py', 'errors.append(f"unknown key \'{key}\' in {location}{self._suggestion(key, known)}")', '(f"unknown key \'{key}\' in {location}{self._suggestion(key, known)}")', 'unknown TOML keys are silently accepted'),
+    ('context_array_unknown', 'llm_conductor/schema.py', '                setting = array.find(key)\n                if setting is None:\n                    errors.append(f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', '                setting = array.find(key)\n                if setting is None:\n                    (f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', 'unknown context fields are silently accepted'),
+    ('context_template_unknown', 'llm_conductor/schema.py', '                setting = table_map.find(key)\n                if setting is None:\n                    errors.append(f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', '                setting = table_map.find(key)\n                if setting is None:\n                    (f"unknown key \'{key}\' in {where}{self._suggestion(key, known)}")', 'unknown context fields are silently accepted'),
     ("schema_bool_as_int", "llm_conductor/schema.py", "        if isinstance(value, bool):\n            return False\n", "", "true/false accepted where a number is expected"),
     ("key_env_ignored", "llm_conductor/config.py", "api_key = env_key if env_key.strip() else api[\"key\"]", "api_key = api[\"key\"]", "key_env is never consulted"),
     ("dir_not_anchored", "llm_conductor/config.py", "return os.path.normpath(os.path.join(base_dir, path))", "return path", "cache/log dirs resolved from the cwd again"),
@@ -161,38 +162,46 @@ def _run_mutant(work: Path, rel: str, old: str, new: str):
         return "SKIP", f"pattern found {original.count(old)} time(s)"
     path.write_text(original.replace(old, new), encoding="utf-8")
     try:
-        with tempfile.TemporaryDirectory(prefix="llmc-pytest-") as report_dir:
-            report_path = Path(report_dir) / "results.xml"
-            try:
-                result = subprocess.run(
-                    [sys.executable, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider",
-                     "-m", "not live and not meta", "--junitxml", str(report_path)],
-                    cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=300, check=False,
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                return "HARNESS_ERROR", str(exc)
-            if result.returncode == 0:
-                return "SURVIVED", ""
-            diagnostics = f"pytest exit {result.returncode}:\n{result.stdout}\n{result.stderr}".strip()
-            if result.returncode != 1:
-                return "HARNESS_ERROR", diagnostics
-            try:
-                report = ET.fromstring(safe_read_file(
-                    str(report_path), "pytest report", FileOperations(), as_text=True,
-                ))
-            except (ET.ParseError, FileOperationError) as exc:
-                return "HARNESS_ERROR", f"{exc}\n{diagnostics}"
-            failures = report.findall(".//failure")
-            if (report.find(".//error") is not None or not failures
-                    or any(failure.get("message", "").startswith(("ImportError:", "ModuleNotFoundError:"))
-                           for failure in failures)):
-                return "HARNESS_ERROR", diagnostics
-            failed = next((ln[len("FAILED "):] for ln in result.stdout.splitlines()
-                           if ln.startswith("FAILED ")), failures[0].get("message", "test failure"))
-            return "KILLED", failed.split(" - ")[0]
+        return _run_pytest(work)
     finally:
         path.write_text(original, encoding="utf-8")
+
+
+def _run_pytest(work: Path):
+    """Run the copied suite and classify its verdict."""
+    with tempfile.TemporaryDirectory(prefix="llmc-pytest-", ignore_cleanup_errors=True) as report_dir:
+        report_path = Path(report_dir) / "results.xml"
+        # Fast unit checks run first; the complete non-live suite remains selected.
+        tiers = ["tests/unit", "tests/integration", "tests/system"] if (work / "tests/unit").is_dir() else []
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", *tiers, "-x", "-q", "-p", "no:cacheprovider",
+                 "-m", "not live and not meta", "--basetemp", str(Path(report_dir) / "tmp"),
+                 "--junitxml", str(report_path)],
+                cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=300, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return "HARNESS_ERROR", str(exc)
+        if result.returncode == 0:
+            return "SURVIVED", ""
+        diagnostics = f"pytest exit {result.returncode}:\n{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 1:
+            return "HARNESS_ERROR", diagnostics
+        try:
+            report = ET.fromstring(safe_read_file(
+                str(report_path), "pytest report", FileOperations(), as_text=True,
+            ))
+        except (ET.ParseError, FileOperationError) as exc:
+            return "HARNESS_ERROR", f"{exc}\n{diagnostics}"
+        failures = report.findall(".//failure")
+        if (report.find(".//error") is not None or not failures
+                or any(failure.get("message", "").startswith(("ImportError:", "ModuleNotFoundError:"))
+                       for failure in failures)):
+            return "HARNESS_ERROR", diagnostics
+        failed = next((ln[len("FAILED "):] for ln in result.stdout.splitlines()
+                       if ln.startswith("FAILED ")), failures[0].get("message", "test failure"))
+        return "KILLED", failed.split(" - ")[0]
 
 
 def main(selected) -> int:
@@ -201,6 +210,11 @@ def main(selected) -> int:
     with tempfile.TemporaryDirectory(prefix="llmc-mutants-") as tmp:
         work = Path(tmp)
         _prepare_copy(work)
+        baseline, detail = _run_pytest(work)
+        if baseline != "SURVIVED":
+            print(f"HARNESS_ERROR baseline: unmutated copy did not pass\n{detail}")
+            return 1
+        print("Baseline: unmutated copy passed")
         for mutant_id, rel, old, new, description, *rest in mutants:
             equivalent = bool(rest and rest[0])
             status, detail = _run_mutant(work, rel, old, new)

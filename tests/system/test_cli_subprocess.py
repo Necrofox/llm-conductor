@@ -52,6 +52,18 @@ def test_init_refuses_to_overwrite(tmp_path):
     assert "Refusing to overwrite" in result.stderr
 
 
+def test_check_rejects_an_unknown_context_key(tmp_path):
+    _run(tmp_path, "init")
+    catalog = tmp_path / "context.toml"
+    catalog.write_text(catalog.read_text(encoding="utf-8") + "\nnope = true\n", encoding="utf-8")
+
+    result = _run(tmp_path, "check")
+
+    assert result.returncode == EXIT_CONFIG_ERROR
+    assert "unknown key 'nope'" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_check_accepts_fresh_templates(tmp_path):
     _run(tmp_path, "init")
 
@@ -102,8 +114,9 @@ def test_help_lists_subcommands_and_run_flags(tmp_path):
     assert top.returncode == run.returncode == 0
     for command in ("run", "init", "check"):
         assert command in top.stdout
-    for flag in ("--target", "--stage", "--strict", "--no-cache", "--dry-run", "--llm-config",
-                 "--glossary", "--verb", "--result2target", "--cache2target"):
+    for flag in ("--target", "--stage", "--strict", "--no-cache", "--dry-run", "--preview-prompts",
+                 "--llm-config", "--context", "--glossary", "--verb", "--result2target",
+                 "--cache2target"):
         assert flag in run.stdout
 
 

@@ -10,10 +10,17 @@ import math
 import os
 from typing import Any, List, Optional, Tuple
 
+from llm_conductor.constants import CONTEXT_FILENAME
 from llm_conductor.core.io import FileOperations, safe_write_file
 from llm_conductor.exceptions import ConfigValidationError, FileOperationError
 from llm_conductor.interfaces import FileOperationsProtocol
-from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA, FileSchema, Setting
+from llm_conductor.schema import (
+    CONDUCTOR_SCHEMA,
+    CONTEXT_SCHEMA,
+    LLM_SCHEMA,
+    FileSchema,
+    Setting,
+)
 
 _LITERAL_DELIMITER = "'''"
 _DEL = "\x7f"
@@ -100,7 +107,34 @@ class TomlTemplateRenderer:
             lines.append(f"[{section.name}]")
             for setting in section.settings:
                 lines += self._render_setting(setting)
-        return "\n".join(lines) + "\n"
+        for table_map in self._schema.maps:
+            lines.append("")
+            lines += self._comment(table_map.description)
+            lines.append(f"# [{table_map.name}.<name>]")
+            for setting in table_map.entry:
+                lines += self._comment(setting.description)
+        for array in self._schema.arrays:
+            lines.append("")
+            lines += self._comment(array.description)
+            if not array.init_rows:
+                lines.append(f"# [[{array.name}]]")
+                for setting in array.row:
+                    lines += self._comment(setting.description)
+                    lines.append(f"# {setting.key} = {format_toml_value(setting.default)}")
+                continue
+            for row in array.init_rows:
+                lines.append(f"[[{array.name}]]")
+                for setting in array.row:
+                    if setting.key not in row:
+                        continue
+                    value = row[setting.key]
+                    if setting.multiline and isinstance(value, str):
+                        rendered = format_toml_multiline(value)
+                    else:
+                        rendered = format_toml_value(value)
+                    lines.append(f"{setting.key} = {rendered}")
+                lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
 
     def _render_setting(self, setting: Setting) -> List[str]:
         """Comment line(s) and the key line of one setting."""
@@ -121,9 +155,10 @@ class TomlTemplateRenderer:
 
 
 def create_config_files(conductor_path: str, llm_path: str,
+                        context_path: Optional[str] = None,
                         file_ops: Optional[FileOperationsProtocol] = None) -> None:
     """
-    Write fresh conductor.toml and llm.toml templates.
+    Write fresh conductor.toml, llm.toml and context.toml templates.
 
     Existing files are never overwritten: a configured profile may hold
     hand-tuned prompts and keys.
@@ -131,13 +166,20 @@ def create_config_files(conductor_path: str, llm_path: str,
     Args:
         conductor_path: Destination of conductor.toml.
         llm_path: Destination of llm.toml.
+        context_path: Destination of context.toml. Default: beside conductor.toml.
         file_ops: File operations for writing; default FileOperations.
 
     Raises:
-        ConfigValidationError: If either file already exists.
+        ConfigValidationError: If any of the files already exists.
         FileOperationError: If a file cannot be written.
     """
-    targets: Tuple[Tuple[str, FileSchema], ...] = ((conductor_path, CONDUCTOR_SCHEMA), (llm_path, LLM_SCHEMA))
+    if context_path is None:
+        context_path = os.path.join(os.path.dirname(os.path.abspath(conductor_path)), CONTEXT_FILENAME)
+    targets: Tuple[Tuple[str, FileSchema], ...] = (
+        (conductor_path, CONDUCTOR_SCHEMA),
+        (llm_path, LLM_SCHEMA),
+        (context_path, CONTEXT_SCHEMA),
+    )
     existing = [path for path, _ in targets if os.path.exists(path)]
     if existing:
         raise ConfigValidationError(

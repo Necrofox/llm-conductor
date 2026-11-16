@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import os
 import threading
 import time
@@ -23,12 +24,14 @@ from llm_conductor.constants import (
     REJECTED_REPLY_LOG_LENGTH,
     REJECTED_REPLY_META_SUFFIX,
     REJECTED_REPLY_NO_FILE_LABEL,
+    RESOURCE_KEY_MARKER,
     STATISTICS_LOG_LEVELS,
     TRANSLATION_TEXT_MARKER,
     USAGE_NON_API_CACHE_HIT,
     USAGE_NON_API_DEDUP,
     VERIFICATION_TEXT_MARKER,
 )
+from llm_conductor.core.api_client import build_model_payload
 from llm_conductor.core.cache import build_sampling_identity
 from llm_conductor.core.io import safe_write_file
 from llm_conductor.core.leaf_report import (
@@ -93,6 +96,12 @@ def count_string_leaves(data: Any, max_depth: int, current_depth: int = 0) -> in
     return 0
 
 
+def format_prompt_preview(path_label: str, hints: List[LinguisticHint], payload: dict) -> str:
+    """Render a leaf label, context hints and the provider payload as JSON."""
+    hint_text = "; ".join(hint.instruction for hint in hints) if hints else "(none)"
+    return f"--- {path_label} ---\nhints: {hint_text}\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+
+
 class RecursiveProcessor:
     """
     Thread-safe recursive traversal of a JSON tree.
@@ -104,14 +113,21 @@ class RecursiveProcessor:
 
     def __init__(self, config: 'ProcessorConfigProtocol',
                  context_analyzer: 'LinguisticContext',
-                 heartbeat: Optional['HeartbeatProgressProtocol'] = None):
+                 heartbeat: Optional['HeartbeatProgressProtocol'] = None,
+                 *,
+                 preview_prompts: bool = False,
+                 preview_only: bool = False):
         """
         Args:
             config: Processor-facing configuration.
             context_analyzer: Linguistic analyzer of key paths.
             heartbeat: Optional progress ticks (begin_stage / note_leaf).
+            preview_prompts: Print the effective user prompt for each processed leaf.
+            preview_only: Print and return the original text. No cache and no model call.
         """
         self.config = config
+        self.preview_prompts = preview_prompts
+        self.preview_only = preview_only
 
         self.logger = config.logger
         self.is_debug = config.is_debug_mode
@@ -527,6 +543,20 @@ class RecursiveProcessor:
             operation_type=operation_type,
             original_text_block=original_text_block
         )
+        # {RESOURCE_KEY} is per leaf. The cache and dedup key see the prompt
+        # with the marker removed; the API sees the path filled in.
+        cache_prompt = enhanced_prompt.replace(RESOURCE_KEY_MARKER, "")
+        request_prompt = enhanced_prompt.replace(RESOURCE_KEY_MARKER, path_label)
+        masked_text, tag_map = mask_tags(core, rules)
+        enhanced_config = runtime_config.copy()
+        enhanced_config['prompt'] = request_prompt
+        if self.preview_prompts:
+            print(format_prompt_preview(
+                f"{operation_type}: {path_label}", linguistic_hints,
+                build_model_payload(masked_text, enhanced_config),
+            ))
+        if self.preview_only:
+            return value
 
         # The key hashes the whole request, so identical text with different
         # hints (`_male` / `_female`) or sampling never shares a cache/dedup entry.
@@ -554,7 +584,7 @@ class RecursiveProcessor:
                 operation_type=operation_type,
                 model=runtime_config['model'],
                 system_prompt=runtime_config['system_prompt'],
-                enhanced_prompt=enhanced_prompt,
+                enhanced_prompt=cache_prompt,
                 mode=mode,
                 value=value,
                 sampling_identity=sampling_identity,
@@ -632,11 +662,6 @@ class RecursiveProcessor:
                         )
                         return translated
 
-        enhanced_config = runtime_config.copy()
-        enhanced_config['prompt'] = enhanced_prompt
-
-        # Model sees the peeled core; outer whitespace is restored after accept.
-        masked_text, tag_map = mask_tags(core, rules)
 
         try:
             outcome = process_func(
@@ -1232,6 +1257,10 @@ def process_stage_recursive(
     glossary: dict,
     config_prefix: str,
     runtime_config: dict,
+    context_rules: Tuple = (),
+    *,
+    preview_prompts: bool = False,
+    preview_only: bool = False,
     heartbeat: Optional['HeartbeatProgressProtocol'] = None,
 ) -> Any:
     """
@@ -1259,8 +1288,11 @@ def process_stage_recursive(
 
     config.logger.info(f"Starting {stage_name} stage (recursive mode)...")
 
-    context_analyzer = LinguisticContext(config)
-    processor = RecursiveProcessor(config, context_analyzer, heartbeat=heartbeat)
+    context_analyzer = LinguisticContext(config, tuple(context_rules))
+    processor = RecursiveProcessor(
+        config, context_analyzer, heartbeat=heartbeat,
+        preview_prompts=preview_prompts, preview_only=preview_only,
+    )
 
     if config.value_deduplication_enabled and not is_verification:
         processor.build_dedup_index(input_data)
@@ -1289,6 +1321,9 @@ def process_stage_recursive(
 
     end_time = time.time()
 
+    if preview_only:
+        return result_data
+
     if safe_write_file(output_path, result_data, f"{stage_name} output", config.file_ops, config.logger):
         config.logger.info(f"Saved {stage_name} results to {output_path}")
     else:
@@ -1308,7 +1343,7 @@ def process_stage_recursive(
     if unknown_patterns:
         config.logger.warning(
             f"Encountered {len(unknown_patterns)} unknown key pattern(s) during processing. "
-            f"Review WARNING logs for details and consider extending pattern detection."
+            f"Review WARNING logs for details and consider a [[rules]] entry in context.toml."
         )
 
         if config.is_debug_mode:

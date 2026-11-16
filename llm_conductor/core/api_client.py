@@ -623,6 +623,45 @@ def make_request_with_retry(
         original_exception=last_exception
     )
 
+def build_model_payload(value: str, runtime_config: dict, glossary_string: str = "") -> dict:
+    """Build the provider payload used by preview and HTTP submission.
+
+    Args:
+        value: Masked leaf text.
+        runtime_config: Effective endpoint, prompts and sampling parameters.
+        glossary_string: Optional glossary text appended before the leaf.
+
+    Returns:
+        Provider-specific JSON payload, without authentication headers.
+    """
+    try:
+        api_client = create_api_client(runtime_config.get('api_type', 'ollama'))
+    except ValueError:
+        api_client = create_api_client('ollama')
+    # value may already be tag-masked by the caller (_process_leaf)
+    user_prompt = runtime_config.get('prompt', '') + glossary_string + value
+    system_prompt = runtime_config.get('system_prompt', '')
+    model_name = runtime_config.get('model', '')
+
+    keep_alive = runtime_config.get('keep_alive') or None
+    sampling_params = {
+        'temperature': runtime_config.get('temp'),
+        'top_p': runtime_config.get('top_p'),
+        'top_k': runtime_config.get('top_k'),
+        'num_predict': runtime_config.get('num_predict'),
+        'num_ctx': runtime_config.get('num_ctx'),
+        'repeat_penalty': runtime_config.get('repeat_penalty'),
+        'frequency_penalty': runtime_config.get('frequency_penalty'),
+        'presence_penalty': runtime_config.get('presence_penalty'),
+        'stop': runtime_config.get('stop', []),
+        'keep_alive': keep_alive,
+        'max_tokens_param': runtime_config.get(
+            'max_tokens_param', DEFAULT_MAX_TOKENS_PARAM),
+    }
+
+    return api_client.build_request_payload(model_name, user_prompt, system_prompt, sampling_params)
+
+
 def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProtocol', runtime_config: dict,
                   glossary_string: str = "", mode: Optional[str] = None) -> CallOutcome:
     """
@@ -667,28 +706,16 @@ def call_model_api(value: str, operation_type: str, config: 'ProcessorConfigProt
         config.logger.warning(f"{e}. Falling back to 'ollama'")
         api_client = create_api_client('ollama')
 
-    # value may already be tag-masked by the caller (_process_leaf)
-    user_prompt = runtime_config.get('prompt', '') + glossary_string + value
+    json_data = build_model_payload(value, runtime_config, glossary_string)
+    user_prompt = json_data['messages'][-1]['content']
     system_prompt = runtime_config.get('system_prompt', '')
     model_name = runtime_config.get('model', '')
-
-    keep_alive = runtime_config.get('keep_alive') or None
     sampling_params = {
         'temperature': runtime_config.get('temp'),
-        'top_p': runtime_config.get('top_p'),
-        'top_k': runtime_config.get('top_k'),
-        'num_predict': runtime_config.get('num_predict'),
-        'num_ctx': runtime_config.get('num_ctx'),
-        'repeat_penalty': runtime_config.get('repeat_penalty'),
-        'frequency_penalty': runtime_config.get('frequency_penalty'),
-        'presence_penalty': runtime_config.get('presence_penalty'),
-        'stop': runtime_config.get('stop', []),
-        'keep_alive': keep_alive,
-        'max_tokens_param': runtime_config.get(
-            'max_tokens_param', DEFAULT_MAX_TOKENS_PARAM),
+        **{key: runtime_config.get(key) for key in (
+            'top_p', 'top_k', 'num_predict', 'num_ctx', 'repeat_penalty',
+            'frequency_penalty', 'presence_penalty', 'stop')},
     }
-
-    json_data = api_client.build_request_payload(model_name, user_prompt, system_prompt, sampling_params)
 
     headers = {"Content-Type": "application/json"}
 

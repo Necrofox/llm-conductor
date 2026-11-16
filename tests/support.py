@@ -9,10 +9,11 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from llm_conductor.cli.init import format_toml_value
+from llm_conductor.cli.init import TomlTemplateRenderer, format_toml_value
 from llm_conductor.config import ValidationConfig
 from llm_conductor.constants import (
     CONDUCTOR_CONFIG_FILENAME,
+    CONTEXT_FILENAME,
     DEFAULT_DEDUP_LOG_INTERVAL,
     DEFAULT_MAX_ERROR_DISPLAY,
     DEFAULT_MAX_RECURSION_DEPTH,
@@ -29,7 +30,13 @@ from llm_conductor.core.metrics import MetricsCollector
 from llm_conductor.core.usage import UsageLedger
 from llm_conductor.interfaces import Logger
 from llm_conductor.l10n.content import DEFAULT_CONTENT_RULES
-from llm_conductor.schema import CONDUCTOR_SCHEMA, LLM_SCHEMA, FileSchema, SectionPath
+from llm_conductor.schema import (
+    CONDUCTOR_SCHEMA,
+    CONTEXT_SCHEMA,
+    LLM_SCHEMA,
+    FileSchema,
+    SectionPath,
+)
 
 # Fake endpoints: the .test domain is reserved (RFC 2606) and never resolves,
 # so even a missed interception cannot reach the real network.
@@ -173,6 +180,8 @@ def write_configs(directory: Path, llm_doc: Mapping[str, Any], conductor_doc: Ma
     """
     directory.mkdir(parents=True, exist_ok=True)
     (directory / LLM_CONFIG_FILENAME).write_text(dump_toml(llm_doc), encoding="utf-8")
+    (directory / CONTEXT_FILENAME).write_text(
+        TomlTemplateRenderer(CONTEXT_SCHEMA).render(), encoding="utf-8")
     conductor_path = directory / CONDUCTOR_CONFIG_FILENAME
     conductor_path.write_text(dump_toml(conductor_doc), encoding="utf-8")
     return conductor_path

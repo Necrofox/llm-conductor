@@ -13,10 +13,11 @@ rationale kept locally, see `history/` on a maintainer checkout.
    for the contract and regex recipes, including numeric/date processing.
 3. Peel leading/trailing whitespace from the leaf (restore after accept).
 4. Build glossary snippet (on verify: match terms in the **original**).
-5. Linguistic hints from the key path.
-6. Assemble enhanced prompt ([prompts.md](prompts.md)).
+5. Key-context hints from the loaded `context.toml` (empty when no catalog is found).
+6. Assemble enhanced prompt ([prompts.md](prompts.md)). `{RESOURCE_KEY}` is
+   filled for the API copy and removed before the cache hash.
 7. Full cache key + component fingerprints (on the **full** leaf, including
-   outer whitespace).
+   outer whitespace). The resource path is not part of that hash.
 8. Persistent cache lookup; in-run dedup (translation only) on the same key.
 9. Mask formatting tags on the peeled core → call translate/verify → unmask.
 10. Transport/parse/truncation/refusal failures → degrade to original; not

@@ -20,12 +20,15 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from llm_conductor.constants import (
     CONDUCTOR_CONFIG_FILENAME,
     CONFIG_KEY_SUGGESTION_CUTOFF,
+    CONTEXT_FILENAME,
+    CONTEXT_MATCH_LAST,
     DEFAULT_API_KEEP_ALIVE,
     DEFAULT_CACHE_AUTO_SAVE_INTERVAL,
     DEFAULT_CACHE_DIR,
     DEFAULT_CACHE_ENABLED,
     DEFAULT_CACHE_EXPIRY_DAYS,
     DEFAULT_CACHE_MAX_SIZE,
+    DEFAULT_CONTEXT_RULES,
     DEFAULT_DEDUP_ENABLED,
     DEFAULT_DEDUP_LOG_INTERVAL,
     DEFAULT_FAIL_ON_ANY_ERROR,
@@ -229,6 +232,57 @@ class Section:
         return None
 
 
+@dataclass(frozen=True)
+class TableArray:
+    """
+    A TOML array of tables (``[[rules]]``) with a fixed row shape.
+
+    ``init_rows`` is what ``init`` writes. Loading a file does not fill a
+    missing or empty array from ``init_rows``: the rows in the file are the
+    whole catalog.
+    """
+
+    path: SectionPath
+    description: str
+    row: Tuple[Setting, ...]
+    init_rows: Tuple[Mapping[str, Any], ...] = ()
+
+    @property
+    def name(self) -> str:
+        """Dotted name of the array."""
+        return ".".join(self.path)
+
+    def find(self, key: str) -> Optional[Setting]:
+        """Look up a row key."""
+        for setting in self.row:
+            if setting.key == key:
+                return setting
+        return None
+
+
+@dataclass(frozen=True)
+class TableMap:
+    """
+    Open-named subtables (``[templates.<name>]``) that share one entry shape.
+    """
+
+    path: SectionPath
+    description: str
+    entry: Tuple[Setting, ...]
+
+    @property
+    def name(self) -> str:
+        """Dotted name of the map."""
+        return ".".join(self.path)
+
+    def find(self, key: str) -> Optional[Setting]:
+        """Look up an entry key."""
+        for setting in self.entry:
+            if setting.key == key:
+                return setting
+        return None
+
+
 class FileSchema:
     """
     Schema of one configuration file.
@@ -239,24 +293,39 @@ class FileSchema:
     construction and safe to share between threads.
     """
 
-    def __init__(self, file_name: str, header: str, sections: Tuple[Section, ...]):
+    def __init__(self, file_name: str, header: str, sections: Tuple[Section, ...] = (),
+                 *, arrays: Tuple[TableArray, ...] = (), maps: Tuple[TableMap, ...] = ()):
         """
         Args:
             file_name: Default file name, used in templates.
             header: Comment block rendered at the top of the template.
-            sections: Tables of the file, in template order.
+            sections: Fixed tables of the file, in template order.
+            arrays: Arrays of tables (``[[name]]``).
+            maps: Open-named subtables that share one entry shape.
 
         Raises:
-            ValueError: If two sections share a path.
+            ValueError: If two sections, arrays or maps share a path.
         """
         self.file_name = file_name
         self.header = header
         self.sections = sections
+        self.arrays = arrays
+        self.maps = maps
         self._by_path: Dict[SectionPath, Section] = {}
         for section in sections:
             if section.path in self._by_path:
                 raise ValueError(f"Duplicate section [{section.name}] in schema of {file_name}")
             self._by_path[section.path] = section
+        self._arrays: Dict[SectionPath, TableArray] = {}
+        for array in arrays:
+            if array.path in self._by_path or array.path in self._arrays:
+                raise ValueError(f"Duplicate table [[{array.name}]] in schema of {file_name}")
+            self._arrays[array.path] = array
+        self._maps: Dict[SectionPath, TableMap] = {}
+        for table_map in maps:
+            if table_map.path in self._by_path or table_map.path in self._arrays or table_map.path in self._maps:
+                raise ValueError(f"Duplicate table [{table_map.name}] in schema of {file_name}")
+            self._maps[table_map.path] = table_map
         self._children: Dict[SectionPath, Tuple[str, ...]] = self._build_children()
 
     def _build_children(self) -> Dict[SectionPath, Tuple[str, ...]]:
@@ -303,6 +372,61 @@ class FileSchema:
             resolved[section.name] = MappingProxyType(values)
         return MappingProxyType(resolved)
 
+    def resolve_catalog(self, document: Mapping[str, Any], source: Optional[str] = None
+                        ) -> Tuple[Tuple[Mapping[str, Any], ...], Mapping[str, Mapping[str, Any]]]:
+        """
+        Validate a context document and return its rules and templates.
+
+        Missing ``[[rules]]`` and ``[templates]`` stay empty. ``init_rows``
+        are not inserted: a file that omits the default catalog does not
+        get it back.
+
+        Args:
+            document: Result of tomllib.loads().
+            source: File name for error messages.
+
+        Returns:
+            Normalized rule rows, then templates keyed by entry name.
+
+        Raises:
+            ConfigValidationError: Listing every structural problem.
+        """
+        errors: List[str] = []
+        self._collect_errors(document, (), errors)
+        if errors:
+            details = "\n".join(f"  - {error}" for error in errors)
+            raise ConfigValidationError(f"Invalid {source or self.file_name}:\n{details}")
+
+        array = self._arrays.get(("rules",))
+        raw_rules = document.get("rules", [])
+        rows: List[Mapping[str, Any]] = []
+        if array is not None and isinstance(raw_rules, list):
+            for raw in raw_rules:
+                if isinstance(raw, dict):
+                    rows.append(self._normalize_row(array.row, raw))
+
+        table_map = self._maps.get(("templates",))
+        templates: Dict[str, Mapping[str, Any]] = {}
+        raw_templates = document.get("templates", {})
+        if table_map is not None and isinstance(raw_templates, dict):
+            for name, raw in raw_templates.items():
+                if isinstance(raw, dict):
+                    templates[str(name)] = self._normalize_row(table_map.entry, raw)
+        return tuple(rows), MappingProxyType(templates)
+
+    def resolve_leaves(self, document: Mapping[str, Any]) -> Tuple[Mapping[str, Any], ...]:
+        """Normalize exact leaf rows after ``resolve_catalog`` validates the document."""
+        array = self._arrays[("leaves",)]
+        return tuple(self._normalize_row(array.row, row) for row in document.get("leaves", []))
+
+    @staticmethod
+    def _normalize_row(settings: Tuple[Setting, ...], raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Fill absent row keys with their defaults and normalize types."""
+        return MappingProxyType({
+            setting.key: setting.kind.normalize(raw.get(setting.key, setting.default))
+            for setting in settings
+        })
+
     @staticmethod
     def _table_at(document: Mapping[str, Any], path: SectionPath) -> Mapping[str, Any]:
         """Return the table at path, or an empty mapping if the document omits it."""
@@ -318,6 +442,16 @@ class FileSchema:
         location = f"[{'.'.join(path)}]" if path else "the top level"
 
         for key, value in table.items():
+            child_path = path + (key,)
+            array = self._arrays.get(child_path)
+            if array is not None:
+                self._collect_array_errors(array, value, location, errors)
+                continue
+            table_map = self._maps.get(child_path)
+            if table_map is not None:
+                self._collect_map_errors(table_map, value, location, errors)
+                continue
+
             if key in children:
                 if isinstance(value, dict):
                     self._collect_errors(value, path + (key,), errors)
@@ -334,6 +468,52 @@ class FileSchema:
                     f"'{key}' in {location}: expected {setting.kind.value}, "
                     f"got {type(value).__name__} {value!r}"
                 )
+
+    def _collect_array_errors(self, array: TableArray, value: Any, location: str,
+                              errors: List[str]) -> None:
+        """Validate one ``[[array]]`` value: a list of tables with the row keys."""
+        header = f"[[{array.name}]]"
+        if not isinstance(value, list):
+            errors.append(f"'{array.name}' in {location} must be an array of tables {header}")
+            return
+        known = [setting.key for setting in array.row]
+        for index, row in enumerate(value):
+            where = f"{header}[{index}]"
+            if not isinstance(row, dict):
+                errors.append(f"{where} must be a table")
+                continue
+            for key, item in row.items():
+                setting = array.find(key)
+                if setting is None:
+                    errors.append(f"unknown key '{key}' in {where}{self._suggestion(key, known)}")
+                elif not setting.kind.accepts(item):
+                    errors.append(
+                        f"'{key}' in {where}: expected {setting.kind.value}, "
+                        f"got {type(item).__name__} {item!r}"
+                    )
+
+    def _collect_map_errors(self, table_map: TableMap, value: Any, location: str,
+                            errors: List[str]) -> None:
+        """Validate ``[map.<name>]`` entries."""
+        header = f"[{table_map.name}]"
+        if not isinstance(value, dict):
+            errors.append(f"'{table_map.name}' in {location} must be a table {header}")
+            return
+        known = [setting.key for setting in table_map.entry]
+        for name, entry in value.items():
+            where = f"[{table_map.name}.{name}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{where} must be a table")
+                continue
+            for key, item in entry.items():
+                setting = table_map.find(key)
+                if setting is None:
+                    errors.append(f"unknown key '{key}' in {where}{self._suggestion(key, known)}")
+                elif not setting.kind.accepts(item):
+                    errors.append(
+                        f"'{key}' in {where}: expected {setting.kind.value}, "
+                        f"got {type(item).__name__} {item!r}"
+                    )
 
     @staticmethod
     def _suggestion(key: str, known: List[str]) -> str:
@@ -575,5 +755,66 @@ CONDUCTOR_SCHEMA = FileSchema(
                     "[logging].dir/rejected/<operation>/ with a unique name and "
                     ".meta.json attribution (opt-in diagnostics)."),
         )),
+    ),
+)
+
+
+def _context_rule_row() -> Tuple[Setting, ...]:
+    """Keys of one ``[[rules]]`` table. Absent keys stay empty; init writes the catalog."""
+    return (
+        Setting("name", ValueKind.STRING, "", "Unique rule name."),
+        Setting("match", ValueKind.STRING, "",
+                f"Which string the pattern sees: {CONTEXT_MATCH_LAST} (last path segment) or path."),
+        Setting("pattern", ValueKind.STRING, "", "Python regex. First match in file order fills the slot."),
+    ) + _context_text_fields()
+
+
+def _context_text_fields() -> Tuple[Setting, ...]:
+    """Shared slot, priority and text/template fields for regex and exact entries."""
+    return (
+        Setting("slot", ValueKind.STRING, "", "Context channel. At most one text per slot per leaf."),
+        Setting("priority", ValueKind.INTEGER, 0, "Orders texts of different slots in the prompt (higher first)."),
+        Setting("text", ValueKind.STRING, "", "Context text. Set this or template, not both.", multiline=True),
+        Setting("template", ValueKind.STRING, "", "Name of a [templates.<name>] entry."),
+        Setting("value", ValueKind.STRING, "", "Replaces {value} in the template text."),
+    )
+
+
+def _context_init_rows() -> Tuple[Mapping[str, Any], ...]:
+    """The gender / plural / formality catalog ``init`` writes. Not applied at load."""
+    keys = ("name", "match", "pattern", "slot", "priority", "text")
+    return tuple(
+        {key: value for key, value in zip(keys, row)}
+        for row in DEFAULT_CONTEXT_RULES
+    )
+
+
+CONTEXT_SCHEMA = FileSchema(
+    CONTEXT_FILENAME,
+    "Key-context catalog: rules that add text to a leaf from its JSON path.\n"
+    "A file next to the target, or a manifest context field, replaces this file entirely.\n"
+    "Omitting [[rules]] does not restore the catalog below.",
+    arrays=(
+        TableArray(
+            ("rules",),
+            "Rules, first match per slot wins. Speaker patterns are listed before generic suffixes.",
+            _context_rule_row(),
+            init_rows=_context_init_rows(),
+        ),
+        TableArray(
+            ("leaves",),
+            "Exact sidecar map. path is a JSON array of keys/indices; these slots override regex rules. "
+            "Leaf mappings never inherit to descendants.",
+            (Setting("path", ValueKind.STRING, "", "Structural JSON-array path, e.g. '[\"dialogs\",0,\"text\"]'."),)
+            + _context_text_fields(),
+        ),
+    ),
+    maps=(
+        TableMap(
+            ("templates",),
+            "Reusable context texts. A rule selects one by template and may pass value.",
+            (Setting("text", ValueKind.STRING, "", "Template body. {value} is replaced from the rule.",
+                     multiline=True),),
+        ),
     ),
 )

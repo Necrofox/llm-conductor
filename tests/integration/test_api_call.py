@@ -496,3 +496,44 @@ def test_non_string_api_key_degrades_instead_of_raising(make_config, http, bad_k
     assert translate_key("Hello", config, runtime).text in ("Hello", "Привет")
     for call in http.calls:
         assert "Authorization" not in call.request.headers
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+@pytest.mark.parametrize("verification", [False, True])
+def test_preview_payload_equals_the_submitted_request(make_config, http, capsys, provider, verification):
+    from llm_conductor.l10n.context import (
+        KeyPath,
+        LinguisticContext,
+        compile_leaf_context,
+    )
+    from llm_conductor.l10n.processor import RecursiveProcessor
+
+    config = make_config(cache__enabled=False, validation__enabled=False)
+    runtime = config.get_verification_config() if verification else _runtime(config)
+    runtime.update(api_type=provider, api_url=OPENAI_URL if provider == "openai" else OLLAMA_URL,
+                   api_key="fixture-secret", system_prompt="System instruction",
+                   prompt="Key {RESOURCE_KEY}\n{LINGUISTIC_CONTEXT}{GLOSSARY}Text to process:\n")
+    rules = compile_leaf_context(({"path": '["title"]', "slot": "role", "text": "Third-person referent"},))
+    data = {"title": "  Hello <b>world</b>  "}
+    original = {"title": "Hello <b>source</b>"} if verification else None
+    operation = verify_key if verification else translate_key
+    mode = "verification" if verification else MODE_STYLE
+    args = {"data": data, "current_path": KeyPath(()), "process_func": operation,
+                "glossary": {"Hello": "Bonjour"}, "runtime_config": runtime, "mode": mode,
+                "original_data": original, "is_verification": verification}
+    offline = RecursiveProcessor(config, LinguisticContext(config, rules),
+                                 preview_prompts=True, preview_only=True)
+    assert offline.traverse(**args) == data
+    offline_text = capsys.readouterr().out
+    assert "fixture-secret" not in offline_text
+    expected = json.loads(offline_text[offline_text.index("{\n"):])
+    assert expected["messages"][0]["content"] == "System instruction"
+    assert "Hello [T0]world[T1]" in expected["messages"][-1]["content"]
+    assert "Third-person referent" in expected["messages"][-1]["content"]
+    assert len(http.calls) == 0
+    reply = openai_reply("Bonjour [T0]world[T1]") if provider == "openai" else ollama_reply("Bonjour [T0]world[T1]")
+    http.post(runtime["api_url"], json=reply)
+    live = RecursiveProcessor(config, LinguisticContext(config, rules), preview_prompts=True)
+    live.traverse(**args)
+    live_text = capsys.readouterr().out
+    assert json.loads(live_text[live_text.index("{\n"):]) == expected == _sent_json(http)
