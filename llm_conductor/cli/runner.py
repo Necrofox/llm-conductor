@@ -152,7 +152,8 @@ class FilePipeline:
                  *,
                  preview_prompts: bool = False,
                  preview_only: bool = False,
-                 preview: Optional[PreviewSelection] = None):
+                 preview: Optional[PreviewSelection] = None,
+                 continue_stage: bool = False):
         """
         Args:
             config: Configuration of the run (logger, caches, resilience).
@@ -161,6 +162,7 @@ class FilePipeline:
             preview_prompts: Print the effective user prompt of each shown leaf.
             preview_only: Print prompts and skip the model, the cache and result writes.
             preview: Shared path filter, limit, and JSONL sink. Emission only.
+            continue_stage: Reuse matching leaves from the stage-local resume index.
         """
         self._config = config
         self._layout = layout
@@ -168,6 +170,7 @@ class FilePipeline:
         self._preview_prompts = preview_prompts
         self._preview_only = preview_only
         self._preview = preview
+        self._continue_stage = continue_stage
 
     def process(self, entry: TargetEntry, options: RunOptions,
                 glossary: Dict[str, str],
@@ -260,6 +263,9 @@ class FilePipeline:
                    verification_preliminary: bool = False) -> Any:
         """Run one stage over the tree and write its stage result."""
         output_path = "" if self._preview_only else self._layout.prepare(stage, entry)
+        resume_path = (
+            "" if self._preview_only else self._layout.prepare_resume(stage, entry)
+        )
         return process_stage_recursive(
             output_path,
             stage,
@@ -277,6 +283,9 @@ class FilePipeline:
             preview=self._preview,
             verification_preliminary=verification_preliminary,
             heartbeat=self._heartbeat,
+            continue_stage=self._continue_stage,
+            resume_index_path=resume_path,
+            relative_path=entry.relative_path,
         )
 
     def _write_leaves_sidecar(self, entry: TargetEntry) -> None:
@@ -405,7 +414,8 @@ class TargetRunner:
                  *,
                  preview_prompts: bool = False,
                  preview_only: bool = False,
-                 preview: Optional[PreviewSelection] = None):
+                 preview: Optional[PreviewSelection] = None,
+                 continue_stage: bool = False):
         """
         Args:
             config: Bootstrap configuration (logger, caches, resilience).
@@ -416,6 +426,7 @@ class TargetRunner:
             glossaries: Glossary sources keyed by absolute path (``None`` → empty).
             default_options: Fallback stage/strict when an entry has no overrides
                 (lone JSON path); unused when every entry carries its own settings.
+            continue_stage: Reuse matching leaves from the stage-local resume index.
         """
         self._config = config
         self._target = target
@@ -428,6 +439,7 @@ class TargetRunner:
         self._preview_prompts = preview_prompts
         self._preview_only = preview_only
         self._preview = preview
+        self._continue_stage = continue_stage
         self._sampling_omission_logged: set[Tuple[str, str]] = set()
 
     def _write_preview(self) -> bool:
@@ -577,6 +589,8 @@ class TargetRunner:
         logger.info(f"  - Results: {self._layout.root}")
         cache = self._config.cache_dir if self._config.cache_enabled else "disabled"
         logger.info(f"  - Cache: {cache}")
+        if self._continue_stage:
+            logger.info("  - Stage resume: --continue (reuse matching accepted leaves)")
         if self._target.is_manifest:
             logger.info("  - Glossary: per-target")
             logger.info("  - Context: per-target")
@@ -735,6 +749,7 @@ class TargetRunner:
             preview_prompts=self._preview_prompts,
             preview_only=self._preview_only,
             preview=self._preview,
+            continue_stage=self._continue_stage,
         )
         entries = self._target.entries
         outcomes: List[FileOutcome] = []

@@ -172,8 +172,16 @@ Diagnostic write failures are logged and never interrupt leaf fallback.
 - **`fail_on_any_error`:** when `[resilience].fail_on_any_error = true`, any
   degraded leaf forces exit `5` even if the ratio stays under threshold
   (default `false`).
-- **Shutdown:** first SIGINT/SIGTERM saves caches and exits `130`; results may
-  be incomplete.
+- **Shutdown:** first SIGINT/SIGTERM saves caches and flushes stage-local
+  resume progress (partial `translated/` or `redacted/` plus
+  `resume/<stage>/`), then exits `130`. A second signal forces exit without
+  saving. Resume is **not** applied on the next run unless `--continue` is
+  passed; degraded / rejected leaves are never stored as done.
+- **Stage-local resume (MVP):** orthogonal to the LLM disk cache. Accepted
+  leaves (`ok` / cache hit / dedup / resume hit) are journaled with the full
+  `cache_key`. `--continue` reuses a leaf only when that key still matches;
+  a file-level fingerprint mismatch (prompt, model, sampling, content rules,
+  or source) fails the file with a clear error. Useful with `--no-cache`.
 
 ## Reports
 

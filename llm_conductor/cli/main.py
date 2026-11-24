@@ -71,7 +71,7 @@ from llm_conductor.exceptions import (
 from llm_conductor.l10n.preview import PreviewSelection, parse_preview_path
 
 # Job flags forbidden with a TOML run manifest (precedence B). Session flags
-# (--verb, --no-cache, --dry-run) remain allowed.
+# (--verb, --no-cache, --continue, --dry-run) remain allowed.
 _JOB_FLAG_ATTRS: Tuple[Tuple[str, str], ...] = (
     ('stage', '--stage'),
     ('strict', '--strict'),
@@ -159,6 +159,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         '--no-cache', action='store_true',
         help='Neither read nor write the disk cache (in-memory deduplication still works)',
+    )
+    run.add_argument(
+        '--continue', dest='continue_stage', action='store_true',
+        help='Resume a partial stage from result/.../resume/ (explicit; no silent auto-resume). '
+             'Reuse only leaves whose full cache_key still matches; fingerprint mismatch fails the file. '
+             'Session flag; allowed with a run manifest',
     )
     run.add_argument(
         '--dry-run', action='store_true',
@@ -281,7 +287,7 @@ def _reject_job_flags_for_manifest(args: argparse.Namespace) -> None:
     raise TargetError(
         f"Job flags {', '.join(passed)} are not allowed with a {MANIFEST_EXTENSION} "
         f"run manifest (set them in the manifest instead; session flags "
-        f"--verb / --no-cache / --dry-run still apply)"
+        f"--verb / --no-cache / --continue / --dry-run still apply)"
     )
 
 
@@ -392,6 +398,7 @@ def _execute_run(config: Config, args: argparse.Namespace,
             config, target, layout, factories, endpoints, glossaries, contexts,
             default_options=options, preview_prompts=args.preview_prompts,
             preview_only=True, preview=preview,
+            continue_stage=bool(args.continue_stage),
         ).preview()
 
     factories = {
@@ -409,6 +416,7 @@ def _execute_run(config: Config, args: argparse.Namespace,
         default_options=options,
         preview_prompts=args.preview_prompts,
         preview=preview,
+        continue_stage=bool(args.continue_stage),
     ).run()
 
 

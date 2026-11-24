@@ -2,15 +2,16 @@
 """
 Graceful shutdown on SIGINT/SIGTERM.
 
-The first signal saves both reply caches and raises RunInterrupted in the
-main thread; the entry point turns it into EXIT_INTERRUPTED. A repeated
-signal raises RunInterrupted at once, without saving.
+The first signal saves both reply caches (and any registered stage-resume
+flush), then raises RunInterrupted in the main thread; the entry point
+turns it into EXIT_INTERRUPTED. A repeated signal raises RunInterrupted
+at once, without saving.
 """
 import signal
 import sys
 import threading
 from contextlib import suppress
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from llm_conductor.constants import OPERATION_TRANSLATION, OPERATION_VERIFICATION
 from llm_conductor.exceptions import RunInterrupted
@@ -33,6 +34,7 @@ class ShutdownManager:
         self._shutdown_requested = False
         self._shutdown_in_progress = False
         self._config_instance: Optional['ConfigProtocol'] = None
+        self._progress_flush: Optional[Callable[[], None]] = None
 
     def register_config(self, config: Optional['ConfigProtocol']) -> None:
         """
@@ -43,6 +45,16 @@ class ShutdownManager:
         """
         with self._lock:
             self._config_instance = config
+
+    def register_progress_flush(self, callback: Optional[Callable[[], None]]) -> None:
+        """
+        Register a stage-resume flush invoked on the first graceful signal.
+
+        Args:
+            callback: Zero-arg callable that must not raise; None clears it.
+        """
+        with self._lock:
+            self._progress_flush = callback
 
     def notify(self, message: str) -> None:
         """
@@ -62,10 +74,10 @@ class ShutdownManager:
 
     def request_shutdown(self, force: bool = False, reason: Optional[str] = None) -> bool:
         """
-        Start the shutdown: set the flag and, unless forced, save both caches.
+        Start the shutdown: set the flag and, unless forced, save caches and progress.
 
         Args:
-            force: Skip saving the caches.
+            force: Skip saving the caches and progress flush.
             reason: What triggered the shutdown, e.g. 'SIGINT received';
                 reported at WARNING before saving.
 
@@ -83,7 +95,10 @@ class ShutdownManager:
                 return True
 
             if reason:
-                self.notify(f"{reason}: run interrupted, saving caches; the results are incomplete")
+                self.notify(
+                    f"{reason}: run interrupted, saving caches and stage progress; "
+                    f"the results are incomplete"
+                )
 
             if self._config_instance and self._config_instance.cache_manager:
                 try:
@@ -93,6 +108,16 @@ class ShutdownManager:
                     if self._config_instance:
                         self._config_instance.logger.warning(
                             f"Failed to save caches during shutdown: {e}"
+                        )
+
+            flush = self._progress_flush
+            if flush is not None:
+                try:
+                    flush()
+                except Exception as e:  # noqa: BLE001 - signal path must finish
+                    if self._config_instance:
+                        self._config_instance.logger.warning(
+                            f"Failed to flush stage progress during shutdown: {e}"
                         )
 
             return True
@@ -143,7 +168,9 @@ def signal_handler(signum, frame):
     signal_name = _signal_name(signum)
 
     if not _shutdown_manager.request_shutdown(force=False, reason=f"{signal_name} received"):
-        _shutdown_manager.notify(f"{signal_name} received again: forcing shutdown without saving caches")
+        _shutdown_manager.notify(
+            f"{signal_name} received again: forcing shutdown without saving caches"
+        )
         raise RunInterrupted(signal_name, forced=True)
 
     raise RunInterrupted(signal_name)
@@ -157,3 +184,8 @@ def cleanup_on_exit():
 def is_shutdown_requested() -> bool:
     """Whether a shutdown was requested; polled by the tree traversal."""
     return _shutdown_manager.is_shutdown_requested()
+
+
+def register_progress_flush(callback: Optional[Callable[[], None]]) -> None:
+    """Register or clear the stage-resume flush for the active run."""
+    _shutdown_manager.register_progress_flush(callback)

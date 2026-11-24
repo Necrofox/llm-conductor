@@ -24,6 +24,7 @@ from llm_conductor.constants import (
     MANIFEST_EXTENSION,
     RESULT_DIR_NAME,
     RESULT_OWNER_FILENAME,
+    RESUME_DIR_NAME,
     RUN_STAGE_ALL,
 )
 from llm_conductor.core.io import safe_read_file, safe_write_file
@@ -231,6 +232,29 @@ class ResultLayout:
             OSError: If the directory cannot be created.
         """
         path = self.leaves_path(entry)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def resume_path(self, stage: str, entry: TargetEntry) -> str:
+        """
+        Path of the stage-local resume index for one input file and stage.
+
+        Lives under ``resume/<stage>/`` next to ``leaves/`` — not the LLM cache.
+        Translate and verify keep separate indexes (different fingerprints/values).
+        """
+        return os.path.join(
+            self.root, RESUME_DIR_NAME, stage,
+            host_relative_path(entry.relative_path),
+        )
+
+    def prepare_resume(self, stage: str, entry: TargetEntry) -> str:
+        """
+        Resume-index path with its directory created.
+
+        Raises:
+            OSError: If the directory cannot be created.
+        """
+        path = self.resume_path(stage, entry)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return path
 

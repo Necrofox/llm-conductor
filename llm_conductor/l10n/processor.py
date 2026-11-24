@@ -5,6 +5,8 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from llm_conductor.constants import (
+    DEFAULT_CONTENT_IDENTITY,
+    DEFAULT_RESUME_FLUSH_INTERVAL,
     FAILURE_KIND_REJECTED,
     GLOSSARY_MARKER,
     HEARTBEAT_ACTIVITY_PROCESSING,
@@ -30,6 +32,7 @@ from llm_conductor.constants import (
     TRANSLATION_TEXT_MARKER,
     USAGE_NON_API_CACHE_HIT,
     USAGE_NON_API_DEDUP,
+    USAGE_NON_API_RESUME,
     VERIFICATION_TEXT_MARKER,
 )
 from llm_conductor.core.api_client import build_model_payload
@@ -43,7 +46,13 @@ from llm_conductor.core.leaf_report import (
     make_source_stale,
     make_verify_skipped,
 )
-from llm_conductor.core.shutdown import is_shutdown_requested
+from llm_conductor.core.resume import (
+    StageResumeSession,
+    build_run_fingerprint,
+    load_resume_index,
+    source_fingerprint,
+)
+from llm_conductor.core.shutdown import is_shutdown_requested, register_progress_flush
 from llm_conductor.exceptions import FileOperationError
 from llm_conductor.l10n.context import (
     KeyPath,
@@ -118,7 +127,8 @@ class RecursiveProcessor:
                  preview_prompts: bool = False,
                  preview_only: bool = False,
                  preview: Optional[PreviewSelection] = None,
-                 verification_preliminary: bool = False):
+                 verification_preliminary: bool = False,
+                 resume: Optional[StageResumeSession] = None):
         """
         Args:
             config: Processor-facing configuration.
@@ -129,12 +139,14 @@ class RecursiveProcessor:
             preview: Optional path filter, limit, and JSONL sink. Filters emission only.
             verification_preliminary: Mark offline verification requests whose
                 translation is not yet known.
+            resume: Optional stage-local resume journal (Issue #4 MVP).
         """
         self.config = config
         self.preview_prompts = preview_prompts
         self.preview_only = preview_only
         self._preview = preview
         self._verification_preliminary = verification_preliminary
+        self._resume = resume
 
         self.logger = config.logger
         self.is_debug = config.is_debug_mode
@@ -170,6 +182,14 @@ class RecursiveProcessor:
             'max_depth_reached': 0
         }
         self._stats_lock = threading.Lock()
+
+    def _note_resume_accepted(
+        self, leaf_path: str, cache_key: Optional[str], value: str,
+    ) -> None:
+        """Record an accepted leaf in the stage-resume journal when active."""
+        if self._resume is None or cache_key is None:
+            return
+        self._resume.note_accepted(leaf_path, cache_key, value)
     
     def build_dedup_index(self, data: Any):
         """
@@ -606,6 +626,20 @@ class RecursiveProcessor:
                 resource_key=resource_key,
             )
 
+        if self._resume is not None and cache_key is not None:
+            resumed = self._resume.lookup(leaf_path, cache_key)
+            if resumed is not None:
+                if self.config.is_debug_mode:
+                    self.config.logger.debug(f"Stage resume hit for {path}")
+                with self._stats_lock:
+                    self.stats['processed_leaves'] += 1
+                outcomes.record(leaf_path, operation_type, make_ok(value, resumed))
+                self.config.usage_ledger.record_non_api(
+                    operation_type, USAGE_NON_API_RESUME
+                )
+                self._note_resume_accepted(leaf_path, cache_key, resumed)
+                return resumed
+
         if self.cache_enabled and cache_manager is not None and cache_key is not None:
             cached_result = cache_manager.get(operation_type, cache_key)
 
@@ -647,33 +681,36 @@ class RecursiveProcessor:
                     self.config.usage_ledger.record_non_api(
                         operation_type, USAGE_NON_API_CACHE_HIT
                     )
+                    self._note_resume_accepted(leaf_path, cache_key, sanitized_result)
                     return sanitized_result
             elif self.config.is_debug_mode:
                 # Explains the miss only; the full key has already decided it.
                 cache_manager.diagnose_miss(operation_type, value, fingerprints)
 
         if self.dedup_enabled and not is_verification and cache_key is not None:
+            translated: Optional[Any] = None
             with self._dedup_lock:
                 if cache_key in self._dedup_index:
                     _, translated = self._dedup_index[cache_key]
 
-                    if translated is not None:
-                        with self._stats_lock:
-                            self.stats['deduplicated_leaves'] += 1
+            if translated is not None:
+                with self._stats_lock:
+                    self.stats['deduplicated_leaves'] += 1
 
-                            if self.stats['deduplicated_leaves'] % self.dedup_log_interval == 0:
-                                self.config.logger.info(
-                                    f"Deduplication: {self.stats['deduplicated_leaves']} "
-                                    f"duplicate values reused"
-                                )
+                    if self.stats['deduplicated_leaves'] % self.dedup_log_interval == 0:
+                        self.config.logger.info(
+                            f"Deduplication: {self.stats['deduplicated_leaves']} "
+                            f"duplicate values reused"
+                        )
 
-                        outcomes.record(
-                            leaf_path, operation_type, make_ok(value, translated, dedup=True)
-                        )
-                        self.config.usage_ledger.record_non_api(
-                            operation_type, USAGE_NON_API_DEDUP
-                        )
-                        return translated
+                outcomes.record(
+                    leaf_path, operation_type, make_ok(value, translated, dedup=True)
+                )
+                self.config.usage_ledger.record_non_api(
+                    operation_type, USAGE_NON_API_DEDUP
+                )
+                self._note_resume_accepted(leaf_path, cache_key, translated)
+                return translated
 
 
         try:
@@ -794,6 +831,7 @@ class RecursiveProcessor:
                 return value
 
             outcomes.record(leaf_path, operation_type, make_ok(value, unmasked_result))
+            self._note_resume_accepted(leaf_path, cache_key, unmasked_result)
             return unmasked_result
 
         except Exception as e:  # noqa: BLE001 - leaf degrades to the original value (§4.3)
@@ -1311,6 +1349,9 @@ def process_stage_recursive(
     preview: Optional[PreviewSelection] = None,
     verification_preliminary: bool = False,
     heartbeat: Optional['HeartbeatProgressProtocol'] = None,
+    continue_stage: bool = False,
+    resume_index_path: str = '',
+    relative_path: str = '',
 ) -> Any:
     """
     Run one pipeline stage over a JSON tree and write the stage output file.
@@ -1331,6 +1372,9 @@ def process_stage_recursive(
         preview: Path filter, limit, and JSONL sink for this stage. Emission only.
         verification_preliminary: Mark this stage's offline verification requests.
         heartbeat: Optional progress writer for begin_stage / note_leaf.
+        continue_stage: When True, reuse matching leaves from the resume index.
+        resume_index_path: Path of the resume index JSON (created if needed).
+        relative_path: Portable file identity for the resume index header.
 
     Returns:
         The processed tree, with the structure of input_data.
@@ -1339,70 +1383,180 @@ def process_stage_recursive(
 
     config.logger.info(f"Starting {stage_name} stage (recursive mode)...")
 
+    resume_session: Optional[StageResumeSession] = None
+    if not preview_only and output_path and resume_index_path:
+        resume_session = _open_resume_session(
+            config=config,
+            stage_name=stage_name,
+            operation=config_prefix,
+            input_data=input_data,
+            original_data=original_data,
+            runtime_config=runtime_config,
+            mode=current_mode,
+            output_path=output_path,
+            resume_index_path=resume_index_path,
+            relative_path=relative_path or os.path.basename(output_path),
+            continue_stage=continue_stage,
+        )
+        register_progress_flush(resume_session.flush_for_shutdown)
+
     context_analyzer = LinguisticContext(config, tuple(context_rules))
     processor = RecursiveProcessor(
         config, context_analyzer, heartbeat=heartbeat,
         preview_prompts=preview_prompts, preview_only=preview_only,
         preview=preview, verification_preliminary=verification_preliminary,
+        resume=resume_session,
     )
 
-    if config.value_deduplication_enabled and not is_verification:
-        processor.build_dedup_index(input_data)
-    elif is_verification and config.is_debug_mode:
-        config.logger.debug("Deduplication disabled for verification stage")
+    try:
+        if config.value_deduplication_enabled and not is_verification:
+            processor.build_dedup_index(input_data)
+        elif is_verification and config.is_debug_mode:
+            config.logger.debug("Deduplication disabled for verification stage")
 
-    if heartbeat is not None:
-        heartbeat.begin_stage(
-            config_prefix,
-            count_string_leaves(input_data, config.max_recursion_depth),
+        if heartbeat is not None:
+            heartbeat.begin_stage(
+                config_prefix,
+                count_string_leaves(input_data, config.max_recursion_depth),
+            )
+
+        start_time = time.time()
+
+        result_data = processor.traverse(
+            data=input_data,
+            current_path=KeyPath(segments=()),
+            process_func=process_func,
+            glossary=glossary,
+            runtime_config=runtime_config,
+            mode=current_mode,
+            original_data=original_data,
+            is_verification=is_verification,
+            current_depth=0
         )
 
-    start_time = time.time()
+        end_time = time.time()
 
-    result_data = processor.traverse(
-        data=input_data,
-        current_path=KeyPath(segments=()),
-        process_func=process_func,
-        glossary=glossary,
-        runtime_config=runtime_config,
-        mode=current_mode,
-        original_data=original_data,
-        is_verification=is_verification,
-        current_depth=0
-    )
+        if preview_only:
+            return result_data
 
-    end_time = time.time()
+        if resume_session is not None:
+            # One durable write for stage + index (traverse result, not overlay).
+            if resume_session.flush(stage_tree=result_data):
+                config.logger.info(f"Saved {stage_name} results to {output_path}")
+            else:
+                config.logger.error(f"Failed to save {stage_name} results / resume index")
+        elif safe_write_file(output_path, result_data, f"{stage_name} output", config.file_ops, config.logger):
+            config.logger.info(f"Saved {stage_name} results to {output_path}")
+        else:
+            config.logger.error(f"Failed to save {stage_name} results")
 
-    if preview_only:
+        _print_recursive_statistics(
+            stage_name=stage_name,
+            stats=processor.get_stats_summary(),
+            start_time=start_time,
+            end_time=end_time,
+            config=config
+        )
+
+        config.cache_manager.print_stats(config_prefix)
+
+        unknown_patterns = context_analyzer.get_unknown_patterns()
+        if unknown_patterns:
+            config.logger.warning(
+                f"Encountered {len(unknown_patterns)} unknown key pattern(s) during processing. "
+                f"Review WARNING logs for details and consider a [[rules]] entry in context.toml."
+            )
+
+            if config.is_debug_mode:
+                config.logger.debug(
+                    f"Unknown patterns: {', '.join(list(unknown_patterns)[:config.max_error_display])}")
+
         return result_data
+    finally:
+        if resume_session is not None:
+            register_progress_flush(None)
 
-    if safe_write_file(output_path, result_data, f"{stage_name} output", config.file_ops, config.logger):
-        config.logger.info(f"Saved {stage_name} results to {output_path}")
-    else:
-        config.logger.error(f"Failed to save {stage_name} results")
 
-    _print_recursive_statistics(
-        stage_name=stage_name,
-        stats=processor.get_stats_summary(),
-        start_time=start_time,
-        end_time=end_time,
-        config=config
+def _open_resume_session(
+    *,
+    config: 'ProcessorConfigProtocol',
+    stage_name: str,
+    operation: str,
+    input_data: Any,
+    original_data: Any,
+    runtime_config: dict,
+    mode: str,
+    output_path: str,
+    resume_index_path: str,
+    relative_path: str,
+    continue_stage: bool,
+) -> StageResumeSession:
+    """
+    Build the stage-resume journal; hard-fail ``--continue`` on fingerprint mismatch.
+
+    Raises:
+        FileOperationError: Corrupt index or fingerprint / stage mismatch on continue.
+    """
+    rules = runtime_config.get('processing', config.processing)
+    content_identity = getattr(rules, 'identity', DEFAULT_CONTENT_IDENTITY)
+    allowed_scripts = runtime_config.get(
+        'allowed_scripts', config.validation.allowed_scripts,
+    )
+    sampling_identity = build_sampling_identity(runtime_config)
+    # Fingerprint the English source so a changed original invalidates continue.
+    fingerprint_source = original_data if original_data is not None else input_data
+    run_fp = build_run_fingerprint(
+        operation_type=operation,
+        model=runtime_config['model'],
+        system_prompt=runtime_config['system_prompt'],
+        prompt_template=runtime_config['prompt'],
+        mode=mode,
+        sampling_identity=sampling_identity,
+        api_url=runtime_config.get('api_url', ''),
+        allowed_scripts=tuple(allowed_scripts),
+        content_identity=tuple(content_identity),
+        source_digest=source_fingerprint(fingerprint_source),
     )
 
-    config.cache_manager.print_stats(config_prefix)
+    prior = None
+    if continue_stage:
+        prior = load_resume_index(resume_index_path, config.file_ops, config.logger)
+        if prior is None:
+            config.logger.warning(
+                f"--continue: no resume index at {resume_index_path}; starting stage fresh"
+            )
+        else:
+            if prior.stage != stage_name:
+                raise FileOperationError(
+                    f"--continue: resume index stage is {prior.stage!r}, "
+                    f"current stage is {stage_name!r}; delete the index or match stages"
+                )
+            if prior.run_fingerprint != run_fp:
+                raise FileOperationError(
+                    f"--continue: resume index fingerprint does not match the current "
+                    f"profile/source for {relative_path} (prompt, model, sampling, "
+                    f"content rules, or source changed). Re-run without --continue "
+                    f"or restore the previous profile."
+                )
+            config.logger.info(
+                f"--continue: reusing {len(prior.leaves)} accepted leaf(ves) "
+                f"from {resume_index_path}"
+            )
 
-    unknown_patterns = context_analyzer.get_unknown_patterns()
-    if unknown_patterns:
-        config.logger.warning(
-            f"Encountered {len(unknown_patterns)} unknown key pattern(s) during processing. "
-            f"Review WARNING logs for details and consider a [[rules]] entry in context.toml."
-        )
-
-        if config.is_debug_mode:
-            config.logger.debug(
-                f"Unknown patterns: {', '.join(list(unknown_patterns)[:config.max_error_display])}")
-
-    return result_data
+    return StageResumeSession(
+        source=input_data,
+        stage=stage_name,
+        operation=operation,
+        relative_path=relative_path,
+        run_fingerprint=run_fp,
+        stage_path=output_path,
+        index_path=resume_index_path,
+        file_ops=config.file_ops,
+        logger=config.logger,
+        continue_mode=continue_stage,
+        prior=prior,
+        flush_interval=DEFAULT_RESUME_FLUSH_INTERVAL,
+    )
 
 def _print_recursive_statistics(
     stage_name: str,

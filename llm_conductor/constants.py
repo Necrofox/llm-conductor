@@ -402,6 +402,11 @@ RUN_MANIFEST_TARGET_KEYS = frozenset({
 RESULT_DIR_NAME = 'result'
 # Per-leaf stage status sidecars live under <result_root>/leaves/<relative>.json
 LEAVES_DIR_NAME = 'leaves'
+# Stage-local resume index (Issue #4 MVP): sibling of leaves/, not the LLM cache.
+RESUME_DIR_NAME = 'resume'
+RESUME_SCHEMA_VERSION = 1
+# Rewrite partial stage + resume index every N newly accepted leaves (also on SIGINT).
+DEFAULT_RESUME_FLUSH_INTERVAL = 10
 RUN_REPORT_FILENAME = 'run_report.json'
 USAGE_REPORT_FILENAME = 'usage.json'
 LEAF_REPORT_SCHEMA_VERSION = 2
@@ -430,6 +435,7 @@ USAGE_OUTCOME_REJECTED = 'rejected'
 USAGE_STAGE_PREFLIGHT = 'preflight'
 USAGE_NON_API_CACHE_HIT = 'cache_hit'
 USAGE_NON_API_DEDUP = 'dedup'
+USAGE_NON_API_RESUME = 'resume'
 # Cache directory created next to the target by --cache2target.
 TARGET_CACHE_DIR_NAME = 'cache'
 # Glossary looked up next to the target when --glossary is not given; the

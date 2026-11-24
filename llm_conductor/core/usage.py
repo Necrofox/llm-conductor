@@ -21,6 +21,7 @@ from llm_conductor.constants import (
     OPERATION_VERIFICATION,
     USAGE_NON_API_CACHE_HIT,
     USAGE_NON_API_DEDUP,
+    USAGE_NON_API_RESUME,
     USAGE_OUTCOME_FAILED,
     USAGE_OUTCOME_REJECTED,
     USAGE_OUTCOME_SUCCESS,
@@ -70,8 +71,16 @@ class UsageLedger:
         self._attempts: Dict[int, UsageAttempt] = {}
         self._order: List[int] = []
         self._non_api: Dict[str, Dict[str, int]] = {
-            OPERATION_TRANSLATION: {USAGE_NON_API_CACHE_HIT: 0, USAGE_NON_API_DEDUP: 0},
-            OPERATION_VERIFICATION: {USAGE_NON_API_CACHE_HIT: 0, USAGE_NON_API_DEDUP: 0},
+            OPERATION_TRANSLATION: {
+                USAGE_NON_API_CACHE_HIT: 0,
+                USAGE_NON_API_DEDUP: 0,
+                USAGE_NON_API_RESUME: 0,
+            },
+            OPERATION_VERIFICATION: {
+                USAGE_NON_API_CACHE_HIT: 0,
+                USAGE_NON_API_DEDUP: 0,
+                USAGE_NON_API_RESUME: 0,
+            },
         }
 
     def record_attempt(

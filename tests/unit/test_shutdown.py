@@ -96,10 +96,46 @@ def test_reason_is_logged_as_a_warning_before_saving():
 
     manager.request_shutdown(reason="SIGTERM received")
 
-    assert config.logger.contains("SIGTERM received: run interrupted, saving caches", level='WARNING')
+    assert config.logger.contains(
+        "SIGTERM received: run interrupted, saving caches and stage progress",
+        level='WARNING',
+    )
 
 
 def test_notify_without_config_writes_to_stdout(capsys):
     ShutdownManager().notify("stopping")
 
     assert "stopping" in capsys.readouterr().out
+
+
+def test_progress_flush_runs_on_first_graceful_shutdown():
+    manager, config = _manager_with(FakeCacheManager())
+    calls = []
+    manager.register_progress_flush(lambda: calls.append("flushed"))
+
+    assert manager.request_shutdown(reason="SIGINT received") is True
+
+    assert calls == ["flushed"]
+    assert config.logger.contains("saving caches and stage progress", level='WARNING')
+
+
+def test_progress_flush_skipped_on_forced_shutdown():
+    manager, _ = _manager_with(FakeCacheManager())
+    calls = []
+    manager.register_progress_flush(lambda: calls.append("flushed"))
+
+    assert manager.request_shutdown(force=True) is True
+    assert calls == []
+
+
+def test_progress_flush_error_is_logged_not_raised():
+    manager, config = _manager_with(FakeCacheManager())
+
+    def boom():
+        raise RuntimeError("disk full")
+
+    manager.register_progress_flush(boom)
+    assert manager.request_shutdown() is True
+    assert config.logger.contains(
+        "Failed to flush stage progress during shutdown", level='WARNING',
+    )

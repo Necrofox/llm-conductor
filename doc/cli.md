@@ -31,6 +31,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#versions-and-builds) for dev builds.
 | `--stage {all,translate,verify}` | Default `all` (JSON targets only) |
 | `--strict` | Translation in strict mode (JSON targets only) |
 | `--no-cache` | Disable persistent cache for this run |
+| `--continue` | Resume a partial stage from `{result}/resume/<stage>/` (session flag; explicit only — no silent auto-resume). Reuses leaves whose full `cache_key` still matches; a file-level fingerprint mismatch fails that file |
 | `--dry-run` | Validate inputs and print effective settings; no API, locks, or result writes (session flag) |
 | `--preview-prompts` | Print each shown leaf: source file, structural path, operation, final hints with origin, and the provider JSON payload. With `--dry-run`, print only. Without it, the run still calls the API (session flag) |
 | `--preview-path JSON` | Exact structural path as a JSON array (`["flat.key"]`, `["flat","key"]`, `["items",0,"name"]`). Repeatable. Filters the preview only (session flag) |
@@ -198,12 +199,13 @@ target / manifest.
 
 | Path | When |
 |---|---|
-| `{result}/translated/{rel}` | After translation |
-| `{result}/redacted/{rel}` | After verification |
+| `{result}/translated/{rel}` | After translation (also partial on SIGINT flush) |
+| `{result}/redacted/{rel}` | After verification (also partial on SIGINT flush) |
 | `{result}/final/{rel}` | Always (also partial on circuit-breaker abort) |
 | `{result}/run_report.json` | Per-leaf stage status + aggregates |
 | `{result}/usage.json` | Token attempts by provider / model / stage |
 | `{result}/leaves/{rel}` | Translation sidecar used by later verify runs |
+| `{result}/resume/<stage>/{rel}` | Stage-local resume index (`cache_key` + value per accepted leaf); used only with `--continue` |
 
 Semantics of statuses and usage outcomes:
 [pipeline.md](pipeline.md#reports).
@@ -259,7 +261,9 @@ run exited `0`. Fix prompts/model or remeasure with `--no-cache`. See
 OS-level non-blocking locks on the target, cache dir (when cache enabled),
 and shared result root. Heartbeat JSON: `{cache_dir}/progress_state.json`
 (written even with `--no-cache`) for external monitors — report only, not
-the process exit authority.
+the process exit authority. Stage-local resume indexes under
+`{result}/resume/` are also written during a stage (and on first SIGINT);
+they are applied only when `--continue` is passed.
 
 Read `last_progress_at`, `progress.leaves_done`, and `activity` for work
 done. `updated_at` and `elapsed_sec` also move on

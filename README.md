@@ -137,7 +137,7 @@ Fix prompts/model or remeasure with `--no-cache`
 
 - Richer input formats (e.g. subtitle adapters)
 - Optional in-stage parallelism with single-flight on the full cache key
-- Stage-local resume orthogonal to the LLM cache (concept)
+- Stage-local resume orthogonal to the LLM cache (`--continue` MVP / pilot)
 
 ## License
 

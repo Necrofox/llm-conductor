@@ -1124,7 +1124,7 @@ def test_sigint_mid_run_exits_130_after_saving_caches(workspace, model, run_main
     assert snap["status"] == "interrupted"
     assert snap["exit_code"] == EXIT_INTERRUPTED
     log = workspace.log_text()
-    assert "WARNING - SIGINT received: run interrupted, saving caches" in log
+    assert "WARNING - SIGINT received: run interrupted, saving caches and stage progress" in log
     assert f"exiting with code {EXIT_INTERRUPTED}" in log
     with FileLock(str(workspace.root / "sample.json")):     # the lock was released on the way out
         pass

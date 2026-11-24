@@ -43,6 +43,7 @@ def reset_shutdown_manager():
             manager._shutdown_requested = False
             manager._shutdown_in_progress = False
             manager._config_instance = None
+            manager._progress_flush = None
 
     _reset()
     yield

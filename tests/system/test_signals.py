@@ -36,7 +36,10 @@ def test_first_sigint_saves_caches_and_raises_run_interrupted(registered):
     assert exc.value.signal_name == "SIGINT" and not exc.value.forced
     assert registered.cache_manager.saved == BOTH_CACHES
     assert shutdown.is_shutdown_requested()
-    assert registered.logger.contains("SIGINT received: run interrupted, saving caches", level='WARNING')
+    assert registered.logger.contains(
+        "SIGINT received: run interrupted, saving caches and stage progress",
+        level='WARNING',
+    )
 
 
 def test_run_interrupted_is_not_an_exception():
