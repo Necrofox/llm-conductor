@@ -52,8 +52,8 @@ from llm_conductor.core.resume import (
     load_resume_index,
     source_fingerprint,
 )
-from llm_conductor.core.shutdown import is_shutdown_requested, register_progress_flush
-from llm_conductor.exceptions import FileOperationError
+from llm_conductor.core.shutdown import is_shutdown_requested
+from llm_conductor.exceptions import FileOperationError, RunInterrupted
 from llm_conductor.l10n.context import (
     KeyPath,
     LinguisticContext,
@@ -139,7 +139,7 @@ class RecursiveProcessor:
             preview: Optional path filter, limit, and JSONL sink. Filters emission only.
             verification_preliminary: Mark offline verification requests whose
                 translation is not yet known.
-            resume: Optional stage-local resume journal (Issue #4 MVP).
+            resume: Optional stage-local resume journal.
         """
         self.config = config
         self.preview_prompts = preview_prompts
@@ -164,7 +164,7 @@ class RecursiveProcessor:
         self._dedup_index: Dict[str, Tuple[KeyPath, Any]] = {}
         self._dedup_lock = threading.Lock()
 
-        # Counts leaves that added a NEW cache entry. A separate lock, so
+        # Counts answers stored by model acceptance or resume. A separate lock, so
         # _stats_lock/_dedup_lock are never held during a slow save().
         self._autosave_lock = threading.Lock()
         self._leaves_since_save = 0
@@ -451,10 +451,13 @@ class RecursiveProcessor:
             rejection.
         """
         try:
-            return self._process_leaf_body(
+            result = self._process_leaf_body(
                 value, path, process_func, glossary, runtime_config,
                 mode, original_data, is_verification,
             )
+            if self._resume is not None:
+                self._resume.discard_prior(path.report_key())
+            return result
         finally:
             if self._heartbeat is not None:
                 self._heartbeat.note_leaf()
@@ -637,6 +640,15 @@ class RecursiveProcessor:
                 self.config.usage_ledger.record_non_api(
                     operation_type, USAGE_NON_API_RESUME
                 )
+                if self.cache_enabled and cache_manager is not None:
+                    # The journal already passed the full request-key check.
+                    cache_manager.set(
+                        operation_type, cache_key, resumed,
+                        {'original_key': [value, glossary_string],
+                         'path': str(path), 'fingerprints': fingerprints},
+                        source_value=value,
+                    )
+                    self._maybe_auto_save(operation_type)
                 self._note_resume_accepted(leaf_path, cache_key, resumed)
                 return resumed
 
@@ -1121,14 +1133,12 @@ class RecursiveProcessor:
 
     def _maybe_auto_save(self, operation_type: str) -> None:
         """
-        Flush the cache to disk every ``cache_auto_save_interval`` new
-        entries so a hard process kill (SIGKILL, BSOD, power loss) does
-        not erase already paid-for translations.
+        Flush every ``cache_auto_save_interval`` stored answers to disk.
 
-        Counts only leaves that added a new cache entry: called from
-        ``_process_leaf`` right after ``cache_manager.set()``, not on every
-        processed leaf — a cache hit does not change the on-disk file and
-        needs no flush. ``interval <= 0`` disables the mechanism.
+        Count model answers and accepted resume hits after
+        ``cache_manager.set()``, so a hard process kill does not erase them.
+        An ordinary cache hit does not write an entry and needs no flush.
+        ``interval <= 0`` disables the mechanism.
 
         The write itself is ordered against reordering inside
         ``CacheManager.save()`` (see ``_CacheWriteCoordinator``) — this
@@ -1398,7 +1408,6 @@ def process_stage_recursive(
             relative_path=relative_path or os.path.basename(output_path),
             continue_stage=continue_stage,
         )
-        register_progress_flush(resume_session.flush_for_shutdown)
 
     context_analyzer = LinguisticContext(config, tuple(context_rules))
     processor = RecursiveProcessor(
@@ -1472,9 +1481,11 @@ def process_stage_recursive(
                     f"Unknown patterns: {', '.join(list(unknown_patterns)[:config.max_error_display])}")
 
         return result_data
-    finally:
-        if resume_session is not None:
-            register_progress_flush(None)
+    except RunInterrupted as exc:
+        # Traversal and IO have released their locks before shutdown writes.
+        if resume_session is not None and not exc.forced:
+            resume_session.flush_for_shutdown()
+        raise
 
 
 def _open_resume_session(

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Stage-local resume index (Issue #4 MVP).
+Stage-local resume index.
 
 Orthogonal to the LLM response cache: values are mirrored into the normal
 stage tree (``translated/`` / ``redacted/``); this module tracks which leaves
@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
@@ -103,6 +104,9 @@ def overlay_resume_values(source: Any, values: Mapping[str, str]) -> Any:
             continue
         if not isinstance(segments, list):
             continue
+        if not segments and isinstance(tree, str):
+            tree = value
+            continue
         _set_at_path(tree, segments, value)
     return tree
 
@@ -113,22 +117,18 @@ def _set_at_path(tree: Any, segments: list, value: str) -> bool:
         return False
     node = tree
     for segment in segments[:-1]:
-        if (
-            (isinstance(node, dict) and isinstance(segment, str) and segment in node)
-            or (
-                isinstance(node, list)
-                and isinstance(segment, int)
-                and 0 <= segment < len(node)
-            )
-        ):
+        if isinstance(node, dict) and isinstance(segment, str) and segment in node:
             node = node[segment]
-        else:
-            return False
+            continue
+        if isinstance(node, list) and type(segment) is int and 0 <= segment < len(node):
+            node = node[segment]
+            continue
+        return False
     last = segments[-1]
     if isinstance(node, dict) and isinstance(last, str) and last in node:
         node[last] = value
         return True
-    if isinstance(node, list) and isinstance(last, int) and 0 <= last < len(node):
+    if isinstance(node, list) and type(last) is int and 0 <= last < len(node):
         node[last] = value
         return True
     return False
@@ -148,9 +148,9 @@ def load_resume_index(
     Raises:
         FileOperationError: If the file exists but is unreadable or corrupt.
     """
-    data = safe_read_file(path, "resume index", file_ops, logger)
-    if data is None:
+    if not os.path.exists(path):
         return None
+    data = safe_read_file(path, "resume index", file_ops, logger, as_text=False)
     if not isinstance(data, dict):
         raise FileOperationError(f"resume index {path} is not a JSON object")
     version = data.get('schema_version')
@@ -258,32 +258,45 @@ class StageResumeSession:
         """Return a prior value when ``--continue`` and ``cache_key`` still match."""
         if not self.continue_mode:
             return None
-        entry = self._prior.get(leaf_path)
-        if entry is None or entry.cache_key != cache_key:
-            return None
-        return entry.value
+        with self._lock:
+            entry = self._prior.get(leaf_path)
+            if entry is None or entry.cache_key != cache_key:
+                self._prior.pop(leaf_path, None)
+                return None
+            return entry.value
+
+    def discard_prior(self, leaf_path: str) -> None:
+        """Discard a visited prior candidate, including skipped or degraded leaves."""
+        with self._lock:
+            self._prior.pop(leaf_path, None)
 
     def note_accepted(self, leaf_path: str, cache_key: str, value: str) -> None:
         """Record an accepted leaf; may trigger a periodic flush."""
         should_flush = False
         with self._lock:
             self._completed[leaf_path] = ResumeLeafEntry(cache_key=cache_key, value=value)
+            self._prior.pop(leaf_path, None)
             self._since_flush += 1
             if self._since_flush >= self.flush_interval:
                 self._since_flush = 0
                 should_flush = True
         if should_flush:
-            self.flush()
+            try:
+                if not self.flush():
+                    self.logger.warning("Periodic resume flush did not fully succeed; will retry")
+            except (FileOperationError, OSError) as exc:
+                self.logger.warning(f"Failed to flush stage resume; will retry: {exc}")
 
     def snapshot_values(self) -> Dict[str, str]:
-        """Copy of accepted leaf values (report_key → string)."""
-        with self._lock:
-            return {path: entry.value for path, entry in self._completed.items()}
+        """Copy of retained leaf values (report_key → string)."""
+        return {path: entry.value for path, entry in self.snapshot_index().leaves.items()}
 
     def snapshot_index(self) -> ResumeIndex:
         """Copy of the in-memory index document."""
         with self._lock:
-            leaves = dict(self._completed)
+            # Unvisited prior candidates must survive another interruption.
+            # Their full keys are still checked before reuse by the next walk.
+            leaves = {**self._prior, **self._completed}
         return ResumeIndex(
             schema_version=RESUME_SCHEMA_VERSION,
             stage=self.stage,
@@ -299,8 +312,8 @@ class StageResumeSession:
 
         Args:
             stage_tree: When set, write this tree as the stage file (successful
-                end of traverse). When None, rebuild from ``source`` + completed
-                leaves (SIGINT / periodic flush).
+                end of traverse). When None, rebuild from ``source`` plus
+                retained leaf values (SIGINT / periodic flush).
 
         Returns:
             True when both writes succeed.
@@ -325,7 +338,7 @@ class StageResumeSession:
         return bool(stage_ok and index_ok)
 
     def flush_for_shutdown(self) -> None:
-        """Signal-safe flush: log failures, never raise."""
+        """Flush after traversal unwinds; log IO failures without masking interruption."""
         try:
             if not self.flush():
                 self.logger.warning(

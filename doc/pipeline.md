@@ -21,14 +21,15 @@ rationale kept locally, see `history/` on a maintainer checkout.
    outer whitespace). The hashed user prompt is the effective request. A
    substituted `{RESOURCE_KEY}` is part of that string; a path that was
    never substituted is not.
-8. Persistent cache lookup; in-run dedup (translation only) on the same key.
+8. With `--continue`, stage-local resume lookup on the full key; then
+   persistent cache lookup and in-run dedup (translation only) on the same key.
 9. Mask formatting tags on the peeled core → call translate/verify → unmask.
 10. Transport/parse/truncation/refusal failures → degrade to original; not
     cached; circuit breaker counts a failure.
 11. If `[validation].enabled`, content validator (vs peeled core); reject →
     degrade, no cache.
 12. Accept → restore outer whitespace; record success; write cache / update
-    dedup.
+    dedup and journal the accepted leaf for stage-local resume.
 
 Invariant: glossary, hints, and cache key use the **unmasked** full source;
 the model sees the masked peeled core; outer whitespace is owned by the
@@ -172,8 +173,9 @@ Diagnostic write failures are logged and never interrupt leaf fallback.
 - **`fail_on_any_error`:** when `[resilience].fail_on_any_error = true`, any
   degraded leaf forces exit `5` even if the ratio stays under threshold
   (default `false`).
-- **Shutdown:** first SIGINT/SIGTERM saves caches and flushes stage-local
-  resume progress (partial `translated/` or `redacted/` plus
+- **Shutdown:** first SIGINT/SIGTERM saves caches, unwinds traversal to
+  release its locks, and flushes stage-local resume progress (partial
+  `translated/` or `redacted/` plus
   `resume/<stage>/`), then exits `130`. A second signal forces exit without
   saving. Resume is **not** applied on the next run unless `--continue` is
   passed; degraded / rejected leaves are never stored as done.
@@ -182,6 +184,23 @@ Diagnostic write failures are logged and never interrupt leaf fallback.
   `cache_key`. `--continue` reuses a leaf only when that key still matches;
   a file-level fingerprint mismatch (prompt, model, sampling, content rules,
   or source) fails the file with a clear error. Useful with `--no-cache`.
+  A missing index starts that stage fresh, including stages or manifest
+  files not reached before interruption; an unreadable or corrupt index
+  fails the file. Context/glossary changes are checked per leaf through the
+  full key. Flushes write the stage tree and index as separate atomic files
+  every **10 accepted leaves**, at stage completion, and on graceful
+  interruption. Periodic write failures are logged and retried at the next
+  flush without degrading an accepted answer; a failed completion write
+  fails the file. Unvisited prior index entries survive another interruption
+  as candidates whose keys must still match before reuse.
+  With the disk cache enabled, a matching resume hit also populates that
+  stage's cache with the accepted value and normal request metadata,
+  participating in cache auto-save. This supports starting with `--no-cache`,
+  interrupting, and continuing with caching enabled: later ordinary runs
+  can reuse both the resumed answers and new model replies. `--no-cache`
+  and `[cache].enabled = false` prevent this cache population. Resume hits
+  remain non-API `resume` events; they do not add token attempts or cache-hit
+  counts.
 
 ## Reports
 
@@ -190,8 +209,11 @@ After a run, the result root also gets:
 | File | Contents |
 |---|---|
 | `run_report.json` | Per-leaf stage status (`ok` / `cache_hit` / `dedup` / `degraded` / `verify_skipped` / …), hashes, aggregates |
-| `usage.json` | Token attempts by provider/model/stage (retries included); outcomes `success` / `rejected` / `failed`; preflight separate; cache/dedup non-API counts; unknown usage marked |
+| `usage.json` | Token attempts by provider/model/stage (retries included); outcomes `success` / `rejected` / `failed`; preflight separate; cache/dedup/resume non-API counts; unknown usage marked |
 | `leaves/<relative>` | Per-file sidecar used for verify gates across stage splits (`<relative>` is the same path as under `translated/` / `final/`) |
+
+Resume hits have stage status `ok` in `run_report.json`; their separate
+non-API count is `non_api.<operation>.resume` in `usage.json`.
 
 Leaf identities in `run_report.json` / sidecars (schema version **2**) are
 compact JSON arrays of `KeyPath` segments (e.g. `["a.b"]` vs `["a","b"]`),

@@ -402,7 +402,7 @@ RUN_MANIFEST_TARGET_KEYS = frozenset({
 RESULT_DIR_NAME = 'result'
 # Per-leaf stage status sidecars live under <result_root>/leaves/<relative>.json
 LEAVES_DIR_NAME = 'leaves'
-# Stage-local resume index (Issue #4 MVP): sibling of leaves/, not the LLM cache.
+# Stage-local resume index: sibling of leaves/, not the LLM cache.
 RESUME_DIR_NAME = 'resume'
 RESUME_SCHEMA_VERSION = 1
 # Rewrite partial stage + resume index every N newly accepted leaves (also on SIGINT).

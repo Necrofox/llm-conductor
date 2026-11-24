@@ -199,8 +199,8 @@ target / manifest.
 
 | Path | When |
 |---|---|
-| `{result}/translated/{rel}` | After translation (also partial on SIGINT flush) |
-| `{result}/redacted/{rel}` | After verification (also partial on SIGINT flush) |
+| `{result}/translated/{rel}` | After translation; also partial during periodic flush and on SIGINT/SIGTERM |
+| `{result}/redacted/{rel}` | After verification; also partial during periodic flush and on SIGINT/SIGTERM |
 | `{result}/final/{rel}` | Always (also partial on circuit-breaker abort) |
 | `{result}/run_report.json` | Per-leaf stage status + aggregates |
 | `{result}/usage.json` | Token attempts by provider / model / stage |
@@ -209,6 +209,32 @@ target / manifest.
 
 Semantics of statuses and usage outcomes:
 [pipeline.md](pipeline.md#reports).
+
+To continue an interrupted run, repeat its command with `--continue`:
+
+```bash
+llm-conductor run --target source.json --no-cache
+# After interruption, keep the same profile and source:
+llm-conductor run --target source.json --no-cache --continue
+# Or enable caching for resumed answers and the remaining model replies:
+llm-conductor run --target source.json --continue
+# A run manifest can be continued in the same way:
+llm-conductor run --target job.toml --continue
+```
+
+Resume stage directories are named `translated` and `redacted`. A stage or
+file without an index starts fresh; corrupt indexes fail the affected file.
+Prompt/model/sampling/content/source fingerprint changes also fail that
+file: restore the previous inputs/profile, or restart without `--continue`.
+Context/glossary changes invalidate only affected leaf keys. Indexes are
+written even without `--continue`, every 10 accepted leaves, at stage
+completion, and on graceful interruption. See
+[pipeline.md](pipeline.md#resilience) for write-failure behavior.
+
+When caching is enabled, accepted resume hits populate the LLM cache too,
+so a later ordinary run without `--continue` can reuse them. They remain
+`resume` events in usage, with no additional API calls or tokens. Passing
+`--no-cache` or setting `[cache].enabled = false` prevents cache population.
 
 `{rel}` is the path relative to the manifest directory (or the file name for
 a single target), including its `.json` suffix when present — so a target
